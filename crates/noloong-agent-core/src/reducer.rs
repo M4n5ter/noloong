@@ -38,11 +38,12 @@ pub fn apply_event(state: &mut AgentState, event: &AgentEvent) -> Result<()> {
         AgentEventKind::PhaseStarted { phase } => {
             state.active_phase = Some(phase.clone());
         }
-        AgentEventKind::PhaseCompleted { phase } => {
-            if state.active_phase.as_deref() == Some(phase.as_str()) {
-                state.active_phase = None;
-            }
+        AgentEventKind::PhaseCompleted { phase }
+            if state.active_phase.as_deref() == Some(phase.as_str()) =>
+        {
+            state.active_phase = None;
         }
+        AgentEventKind::PhaseCompleted { .. } => {}
         AgentEventKind::PhaseFailed { error, .. } => {
             state.status = RunStatus::Failed;
             state.last_error = Some(error.clone());

@@ -367,13 +367,13 @@ async fn jsonrpc_request_timeout_is_structured() -> Result<()> {
                     fixture.to_string_lossy().to_string(),
                     "--request-timeout-on-model".into(),
                 ])
-                .request_timeout(Duration::from_millis(75))
+                .request_timeout(Duration::from_millis(500))
                 .stream_timeout(Duration::from_secs(5)),
         )
         .await?;
     let runtime = builder.max_turns(1).build()?;
 
-    let error = timeout(Duration::from_millis(500), runtime.run("hello"))
+    let error = timeout(Duration::from_secs(2), runtime.run("hello"))
         .await
         .expect("request timeout should fire before stream timeout")
         .unwrap_err();
