@@ -6,7 +6,7 @@
 
 ```bash
 cargo fmt --check
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p noloong-agent-core --examples
 node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
@@ -43,4 +43,3 @@ cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 | JSON-RPC terminal lifecycle | `Finished` can settle stream before JSON-RPC response | `stdio_model_stream_can_finish_before_jsonrpc_response`, `jsonrpc_finished_settles_without_response` | `cargo test --workspace` | None |
 | JSON-RPC error lifecycle | `Failed`, invalid JSON, extension crash, request timeout, and stream timeout are structured failures | `stdio_model_stream_error_records_failed_replay_state`, `invalid_json_from_stdio_extension_is_reported`, `stdio_extension_crash_records_failed_replay_state`, `jsonrpc_request_timeout_is_structured`, `stdio_model_stream_timeout_is_separate_from_request_timeout` | `cargo test --workspace` | None |
 | OpenRouter live thinking | Real model path returns reasoning and commits thinking content | `openrouter_deepseek_v4_flash_official_provider_with_thinking` | manual external gate | None |
-

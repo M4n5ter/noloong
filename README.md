@@ -36,7 +36,7 @@ The conformance source of truth is [`plans/CONFORMANCE_MATRIX.md`](plans/CONFORM
 
 ```bash
 cargo fmt --check
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p noloong-agent-core --examples
 node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
