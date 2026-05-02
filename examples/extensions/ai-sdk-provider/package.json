@@ -1,0 +1,18 @@
+{
+  "name": "noloong-ai-sdk-provider-extension",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.58",
+    "ai": "^6.0.174"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0"
+  },
+  "scripts": {
+    "start": "tsx ./stdio-ai-sdk-extension.ts",
+    "start:js": "node ./stdio-ai-sdk-extension.mjs"
+  }
+}

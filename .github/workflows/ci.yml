@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: Rust and extension checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Build examples
+        run: cargo test -p noloong-agent-core --examples
+
+      - name: Check stdio fixture syntax
+        run: node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
+
+      - name: Check OpenRouter fixture syntax
+        run: node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs
+
+      - name: Check AI SDK example syntax
+        run: node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
+
