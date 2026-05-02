@@ -1,8 +1,8 @@
 use crate::runtime::ToolRuntimeHandles;
 use crate::{
     AfterToolCallContext, AgentEffect, AgentMessage, BeforeToolCallContext, ContentBlock,
-    ContextRequest, ModelRequest, ModelStreamEvent, Result, ToolCall, ToolExecutionMode,
-    ToolOutput, TurnDecision,
+    ContextRequest, ModelRequest, ModelStreamEvent, Result, ThinkingBlock, ToolCall,
+    ToolExecutionMode, ToolOutput, TurnDecision,
     providers::{BoxFuture, CancellationToken, ModelStreamSink},
 };
 use crate::{AgentRuntime, AgentState};
@@ -219,24 +219,33 @@ async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
 
 async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     let mut output = PhaseOutput::from_scratch(context.scratch);
-    let mut thinking = String::new();
+    let mut thinking: Option<ThinkingBlock> = None;
     let mut text = String::new();
     let mut content = Vec::new();
     for event in &output.scratch.model_events {
         match event {
-            ModelStreamEvent::ThinkingDelta { text: delta } => thinking.push_str(delta),
-            ModelStreamEvent::TextDelta { text: delta } => text.push_str(delta),
+            ModelStreamEvent::ThinkingDelta { delta } => {
+                flush_text(&mut content, &mut text);
+                if !delta.is_empty() {
+                    if thinking
+                        .as_ref()
+                        .is_some_and(|block| block.kind != delta.kind)
+                    {
+                        flush_thinking(&mut content, &mut thinking);
+                    }
+                    match &mut thinking {
+                        Some(block) => block.apply_delta(delta),
+                        None => thinking = Some(ThinkingBlock::from_delta(delta)),
+                    }
+                }
+            }
+            ModelStreamEvent::TextDelta { text: delta } => {
+                flush_thinking(&mut content, &mut thinking);
+                text.push_str(delta);
+            }
             ModelStreamEvent::ToolCall { tool_call } => {
-                if !thinking.is_empty() {
-                    content.push(ContentBlock::Thinking {
-                        text: std::mem::take(&mut thinking),
-                    });
-                }
-                if !text.is_empty() {
-                    content.push(ContentBlock::Text {
-                        text: std::mem::take(&mut text),
-                    });
-                }
+                flush_thinking(&mut content, &mut thinking);
+                flush_text(&mut content, &mut text);
                 content.push(ContentBlock::ToolCall {
                     tool_call: tool_call.clone(),
                 });
@@ -249,12 +258,8 @@ async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
             ModelStreamEvent::Started { .. } | ModelStreamEvent::Finished { .. } => {}
         }
     }
-    if !thinking.is_empty() {
-        content.push(ContentBlock::Thinking { text: thinking });
-    }
-    if !text.is_empty() {
-        content.push(ContentBlock::Text { text });
-    }
+    flush_thinking(&mut content, &mut thinking);
+    flush_text(&mut content, &mut text);
     let message = AgentMessage::assistant(
         format!("assistant-{}-{}", context.run_id, context.turn_id),
         content,
@@ -264,6 +269,22 @@ async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     });
     output.scratch.assistant_message = Some(message);
     Ok(output)
+}
+
+fn flush_thinking(content: &mut Vec<ContentBlock>, thinking: &mut Option<ThinkingBlock>) {
+    if let Some(thinking) = thinking.take()
+        && !thinking.is_empty()
+    {
+        content.push(ContentBlock::Thinking { thinking });
+    }
+}
+
+fn flush_text(content: &mut Vec<ContentBlock>, text: &mut String) {
+    if !text.is_empty() {
+        content.push(ContentBlock::Text {
+            text: std::mem::take(text),
+        });
+    }
 }
 
 async fn tool_call_resolve(context: PhaseContext<'_>) -> Result<PhaseOutput> {

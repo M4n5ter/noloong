@@ -1,6 +1,7 @@
 //! Event-sourced, providerless agent runtime core for Noloong.
 
 mod agent;
+mod chat_completions;
 mod error;
 mod jsonrpc;
 mod phase;
@@ -11,6 +12,7 @@ mod store;
 mod types;
 
 pub use agent::{Agent, AgentBuilder};
+pub use chat_completions::{ChatCompletionsProvider, ChatCompletionsProviderConfig};
 pub use error::{AgentCoreError, Result};
 pub use jsonrpc::{StdioExtension, StdioExtensionConfig};
 pub use phase::{

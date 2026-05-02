@@ -109,7 +109,7 @@ for await (const line of rl) {
       const message = completion.choices?.[0]?.message ?? {};
       stream(streamId, { type: "started", stream_id: streamId });
       if (message.reasoning) {
-        stream(streamId, { type: "thinking_delta", text: message.reasoning });
+        stream(streamId, { type: "thinking_delta", textDelta: message.reasoning });
       }
       if (message.content) {
         stream(streamId, { type: "text_delta", text: message.content });

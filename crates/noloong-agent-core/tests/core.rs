@@ -4,8 +4,8 @@ use noloong_agent_core::{
     CancellationToken, ContentBlock, ContextPatch, ContextProvider, ContextRequest, EventStore,
     InMemoryEventStore, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
     PHASE_CONTEXT_PREPARE, PhaseContext, PhaseNode, PhaseOutput, Result, RunStatus, StopReason,
-    ToolCall, ToolCallHook, ToolExecutionMode, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
-    ToolUpdate, reduce_events,
+    ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall, ToolCallHook, ToolExecutionMode,
+    ToolOutput, ToolProvider, ToolRequest, ToolSpec, ToolUpdate, reduce_events,
 };
 use serde_json::json;
 use std::sync::{
@@ -14,6 +14,51 @@ use std::sync::{
 };
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
+
+#[test]
+fn thinking_type_serde_round_trips_structured_payloads() -> Result<()> {
+    let event = ModelStreamEvent::ThinkingDelta {
+        delta: ThinkingDelta::from_summary("visible summary")
+            .with_raw(json!({ "summary": [{ "text": "visible summary" }] })),
+    };
+
+    let encoded = serde_json::to_value(&event)?;
+    assert_eq!(encoded["type"], "thinking_delta");
+    assert_eq!(encoded["kind"], "summary");
+    assert_eq!(encoded["textDelta"], "visible summary");
+    assert_eq!(
+        encoded["rawSnapshot"]["summary"][0]["text"],
+        "visible summary"
+    );
+
+    let decoded = serde_json::from_value::<ModelStreamEvent>(encoded)?;
+    assert_eq!(decoded, event);
+
+    let legacy = serde_json::from_value::<ModelStreamEvent>(json!({
+        "type": "thinking_delta",
+        "text": "legacy text"
+    }))?;
+    assert!(matches!(
+        legacy,
+        ModelStreamEvent::ThinkingDelta { delta }
+            if delta.kind == ThinkingKind::Raw
+                && delta.text_delta.as_deref() == Some("legacy text")
+    ));
+
+    let block = ContentBlock::Thinking {
+        thinking: ThinkingBlock::from_text("raw thinking"),
+    };
+    let encoded_block = serde_json::to_value(&block)?;
+    assert_eq!(encoded_block["type"], "thinking");
+    assert_eq!(encoded_block["thinking"]["kind"], "raw");
+    assert_eq!(encoded_block["thinking"]["text"], "raw thinking");
+    assert_eq!(
+        serde_json::from_value::<ContentBlock>(encoded_block)?,
+        block
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn event_log_replays_to_report_state() -> Result<()> {

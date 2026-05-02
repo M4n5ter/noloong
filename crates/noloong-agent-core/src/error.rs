@@ -10,6 +10,7 @@ pub enum AgentCoreError {
     MissingModelProvider(String),
     MissingTool(String),
     Phase(String),
+    Provider(String),
     JsonRpc(String),
     Io(std::io::Error),
     Json(serde_json::Error),
@@ -25,6 +26,7 @@ impl Display for AgentCoreError {
             Self::MissingModelProvider(id) => write!(f, "model provider not found: {id}"),
             Self::MissingTool(name) => write!(f, "tool not found: {name}"),
             Self::Phase(message) => write!(f, "phase failed: {message}"),
+            Self::Provider(message) => write!(f, "provider error: {message}"),
             Self::JsonRpc(message) => write!(f, "json-rpc error: {message}"),
             Self::Io(error) => write!(f, "io error: {error}"),
             Self::Json(error) => write!(f, "json error: {error}"),
@@ -44,6 +46,12 @@ impl From<std::io::Error> for AgentCoreError {
 impl From<serde_json::Error> for AgentCoreError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
+    }
+}
+
+impl From<reqwest::Error> for AgentCoreError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Provider(error.to_string())
     }
 }
 
