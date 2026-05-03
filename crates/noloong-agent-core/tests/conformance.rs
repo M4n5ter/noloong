@@ -7,7 +7,6 @@ use noloong_agent_core::{
 };
 use serde_json::json;
 use std::{
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -18,6 +17,10 @@ use tokio::{
     sync::{Mutex, mpsc},
     time::{sleep, timeout},
 };
+
+pub mod support;
+
+use support::fixture_path;
 
 #[tokio::test]
 async fn runtime_success_replay_matches_report_state() -> Result<()> {
@@ -419,13 +422,6 @@ async fn committed_tool_names(
             _ => None,
         })
         .collect())
-}
-
-fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
 }
 
 struct TextModel;

@@ -13,7 +13,7 @@ use crate::{
 };
 use crate::{CancellationToken, ContextProvider, ModelStreamSink, StandardPhase};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::{
         Arc,
@@ -878,6 +878,7 @@ impl AgentRuntimeBuilder {
     pub async fn with_stdio_extension(mut self, config: StdioExtensionConfig) -> Result<Self> {
         let extension = Arc::new(StdioExtension::connect(config).await?);
         let capabilities = extension.capabilities().await?;
+        self.validate_extension_capabilities(&capabilities)?;
         for capability in capabilities {
             match capability {
                 crate::ExtensionCapability::ModelProvider { id } => {
@@ -929,6 +930,60 @@ impl AgentRuntimeBuilder {
         }
         self.stdio_extensions.push(extension);
         Ok(self)
+    }
+
+    fn validate_extension_capabilities(
+        &self,
+        capabilities: &[crate::ExtensionCapability],
+    ) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for capability in capabilities {
+            match capability {
+                crate::ExtensionCapability::ModelProvider { id } => ensure_unique_capability(
+                    &mut seen,
+                    "model provider",
+                    id,
+                    self.model_providers.contains_key(id),
+                )?,
+                crate::ExtensionCapability::Tool { spec } => ensure_unique_capability(
+                    &mut seen,
+                    "tool",
+                    &spec.name,
+                    self.tools.contains_key(&spec.name),
+                )?,
+                crate::ExtensionCapability::ContextProvider { id } => ensure_unique_capability(
+                    &mut seen,
+                    "context provider",
+                    id,
+                    self.context_providers
+                        .iter()
+                        .any(|provider| provider.id() == id),
+                )?,
+                crate::ExtensionCapability::PhaseNode { id } => ensure_unique_capability(
+                    &mut seen,
+                    "phase",
+                    id,
+                    self.phases.iter().any(|phase| phase.id() == id),
+                )?,
+                crate::ExtensionCapability::PhaseHook { id } => ensure_unique_capability(
+                    &mut seen,
+                    "phase hook",
+                    id,
+                    self.phase_hooks
+                        .iter()
+                        .any(|hook| hook.id().is_some_and(|hook_id| hook_id == id.as_str())),
+                )?,
+                crate::ExtensionCapability::CompactionSummarizer { id } => {
+                    ensure_unique_capability(
+                        &mut seen,
+                        "compaction summarizer",
+                        id,
+                        self.compaction_summarizers.contains_key(id),
+                    )?
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn build(self) -> Result<AgentRuntime> {
@@ -997,6 +1052,22 @@ fn insert_before_phase(
     } else {
         phases.push(phase);
     }
+}
+
+fn ensure_unique_capability<'a>(
+    seen: &mut BTreeSet<(&'static str, &'a str)>,
+    kind: &'static str,
+    id: &'a str,
+    exists: bool,
+) -> Result<()> {
+    if exists || !seen.insert((kind, id)) {
+        return Err(duplicate_extension_capability(kind, id));
+    }
+    Ok(())
+}
+
+fn duplicate_extension_capability(kind: &str, id: &str) -> AgentCoreError {
+    AgentCoreError::JsonRpc(format!("duplicate extension {kind}: {id}"))
 }
 
 #[allow(dead_code)]

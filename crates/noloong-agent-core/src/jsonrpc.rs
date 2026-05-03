@@ -70,7 +70,6 @@ pub struct StdioExtension {
     manifest: ExtensionManifest,
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingRequests,
-    streams: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
     model_stream_sinks: ModelStreamRegistrations,
     request_counter: AtomicU64,
     request_timeout: Duration,
@@ -108,12 +107,10 @@ impl StdioExtension {
             .ok_or_else(|| AgentCoreError::JsonRpc("extension stdout unavailable".into()))?;
 
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
-        let streams = Arc::new(Mutex::new(BTreeMap::new()));
         let model_stream_sinks = Arc::new(Mutex::new(BTreeMap::new()));
         tokio::spawn(read_stdout(
             stdout,
             pending.clone(),
-            streams.clone(),
             model_stream_sinks.clone(),
         ));
 
@@ -124,7 +121,6 @@ impl StdioExtension {
             },
             writer: Arc::new(Mutex::new(stdin)),
             pending,
-            streams,
             model_stream_sinks,
             request_counter: AtomicU64::new(0),
             request_timeout: config.request_timeout,
@@ -231,23 +227,6 @@ impl StdioExtension {
             }
         }?;
         Ok(serde_json::from_value(response)?)
-    }
-
-    async fn take_stream<T>(&self, stream_id: &str) -> Result<Vec<T>>
-    where
-        T: DeserializeOwned,
-    {
-        let values = self
-            .streams
-            .lock()
-            .await
-            .remove(stream_id)
-            .unwrap_or_default();
-        values
-            .into_iter()
-            .map(serde_json::from_value)
-            .collect::<std::result::Result<Vec<T>, _>>()
-            .map_err(Into::into)
     }
 
     async fn register_model_stream(
@@ -370,12 +349,16 @@ async fn collect_model_stream(
                 response_done = true;
                 let response = response
                     .map_err(|error| AgentCoreError::JsonRpc(format!("model stream task failed: {error}")))??;
-                let response_stream_id = response.stream_id.as_deref().unwrap_or(stream_id);
-                let mut response_events = extension
-                    .take_stream::<ModelStreamEvent>(response_stream_id)
-                    .await?;
-                response_events.extend(response.events);
-                for event in response_events {
+                if response
+                    .stream_id
+                    .as_deref()
+                    .is_some_and(|response_stream_id| response_stream_id != stream_id)
+                {
+                    return Err(AgentCoreError::JsonRpc(format!(
+                        "model stream id mismatch: expected {stream_id}"
+                    )));
+                }
+                for event in response.events {
                     stream(event.clone()).await?;
                     let terminal = model_stream_event_is_terminal(&event);
                     events.push(event);
@@ -566,6 +549,10 @@ impl StdioPhaseHook {
 }
 
 impl PhaseHook for StdioPhaseHook {
+    fn id(&self) -> Option<&str> {
+        Some(&self.id)
+    }
+
     fn before_model_request<'a>(
         &'a self,
         context: BeforeModelRequestHookContext<'a>,
@@ -755,7 +742,6 @@ struct CompactionSummarizeRequest<'a> {
 async fn read_stdout(
     stdout: tokio::process::ChildStdout,
     pending: PendingRequests,
-    streams: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
     model_stream_sinks: ModelStreamRegistrations,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -764,7 +750,7 @@ async fn read_stdout(
             continue;
         }
         match serde_json::from_str::<Value>(&line) {
-            Ok(value) => handle_message(value, &pending, &streams, &model_stream_sinks).await,
+            Ok(value) => handle_message(value, &pending, &model_stream_sinks).await,
             Err(error) => {
                 let mut pending = pending.lock().await;
                 let pending = std::mem::take(&mut *pending);
@@ -789,7 +775,6 @@ async fn read_stdout(
 async fn handle_message(
     value: Value,
     pending: &PendingRequests,
-    streams: &Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
     model_stream_sinks: &ModelStreamRegistrations,
 ) {
     if let Some(id) = value.get("id").and_then(Value::as_u64) {
@@ -817,19 +802,21 @@ async fn handle_message(
     let Some(event) = params.get("event") else {
         return;
     };
-    if let Some(registration) = model_stream_sinks.lock().await.get(stream_id).cloned()
-        && let Ok(event) = serde_json::from_value::<ModelStreamEvent>(event.clone())
-    {
-        let result = (registration.sink)(event.clone()).await.map(|()| event);
-        let _ = registration.events.send(result);
-        return;
+    if let Some(registration) = model_stream_sinks.lock().await.get(stream_id).cloned() {
+        match serde_json::from_value::<ModelStreamEvent>(event.clone()) {
+            Ok(event) => {
+                let result = (registration.sink)(event.clone()).await.map(|()| event);
+                let _ = registration.events.send(result);
+            }
+            Err(error) => {
+                let _ = registration
+                    .events
+                    .send(Err(AgentCoreError::JsonRpc(format!(
+                        "invalid stream event for {stream_id}: {error}"
+                    ))));
+            }
+        }
     }
-    streams
-        .lock()
-        .await
-        .entry(stream_id.to_string())
-        .or_default()
-        .push(event.clone());
 }
 
 #[derive(Serialize)]

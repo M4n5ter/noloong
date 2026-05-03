@@ -1,11 +1,12 @@
 use noloong_agent_core::{
-    AgentEventKind, AgentMessage, BoxFuture, CancellationToken, ContentBlock, MessageRole,
-    ModelStreamEvent, Result, RunReport, ThinkingBlock, ToolOutput, ToolProvider, ToolRequest,
-    ToolSpec,
+    AgentEventKind, AgentMessage, AgentState, BoxFuture, CancellationToken, ContentBlock,
+    MessageRole, ModelStreamEvent, Result, RunReport, ThinkingBlock, ToolOutput, ToolProvider,
+    ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -20,6 +21,29 @@ pub fn skip_when_env_missing(name: &str) -> bool {
     }
     eprintln!("skipping live test because {name} is not set");
     true
+}
+
+pub fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+pub fn compaction_trigger_state() -> AgentState {
+    AgentState {
+        messages: vec![
+            AgentMessage::user("u1", "old ".repeat(80)),
+            AgentMessage::assistant(
+                "a1",
+                vec![ContentBlock::Text {
+                    text: "old answer ".repeat(80),
+                }],
+            ),
+            AgentMessage::user("u2", "recent"),
+        ],
+        ..AgentState::default()
+    }
 }
 
 pub fn assert_exact_assistant_text(report: &RunReport, sentinel: &str) {

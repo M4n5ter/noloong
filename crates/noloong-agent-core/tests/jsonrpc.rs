@@ -1,17 +1,17 @@
 use noloong_agent_core::{
     AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AgentEventKind, AgentRuntime,
-    AgentRuntimeBuilder, AgentState, BoxFuture, CancellationToken, ContentBlock,
-    ContextCompactionConfig, ContextPatch, EventStore, InMemoryEventStore, MediaEncoding,
-    MediaKind, MediaSource, MessageRole, ModelStreamEvent, PhaseHook, Result, RunStatus,
-    StdioExtension, StdioExtensionConfig, reduce_events,
+    AgentRuntimeBuilder, BoxFuture, CancellationToken, ContentBlock, ContextCompactionConfig,
+    ContextPatch, EventStore, InMemoryEventStore, MediaEncoding, MediaKind, MediaSource,
+    MessageRole, ModelStreamEvent, PhaseHook, Result, RunStatus, StdioExtension,
+    StdioExtensionConfig, reduce_events,
 };
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::timeout};
 
 pub mod support;
 
-use support::assert_assistant_text_contains;
+use support::{assert_assistant_text_contains, compaction_trigger_state, fixture_path};
 
 #[tokio::test]
 async fn stdio_compaction_summarizer_compacts_persistent_state() -> Result<()> {
@@ -35,7 +35,7 @@ async fn stdio_compaction_summarizer_compacts_persistent_state() -> Result<()> {
     let runtime = builder.max_turns(1).build()?;
 
     let report = runtime
-        .continue_from_state(long_compaction_state(), None, CancellationToken::new())
+        .continue_from_state(compaction_trigger_state(), None, CancellationToken::new())
         .await?;
 
     assert!(report.state.messages.iter().any(|message| {
@@ -81,7 +81,7 @@ async fn malformed_stdio_compaction_summarizer_response_fails_phase() -> Result<
     let runtime = builder.max_turns(1).build()?;
 
     let result = runtime
-        .continue_from_state(long_compaction_state(), None, CancellationToken::new())
+        .continue_from_state(compaction_trigger_state(), None, CancellationToken::new())
         .await;
 
     let error = result.expect_err("malformed compaction response should fail");
@@ -489,29 +489,6 @@ async fn invalid_json_from_stdio_extension_is_reported() {
         Err(error) => error.to_string(),
     };
     assert!(error.contains("invalid json from extension"));
-}
-
-fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
-fn long_compaction_state() -> AgentState {
-    AgentState {
-        messages: vec![
-            noloong_agent_core::AgentMessage::user("u1", "old ".repeat(80)),
-            noloong_agent_core::AgentMessage::assistant(
-                "a1",
-                vec![ContentBlock::Text {
-                    text: "old answer ".repeat(80),
-                }],
-            ),
-            noloong_agent_core::AgentMessage::user("u2", "recent"),
-        ],
-        ..AgentState::default()
-    }
 }
 
 async fn runtime_with_phase_hook_mode(mode: &str) -> Result<AgentRuntime> {

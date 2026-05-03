@@ -65,6 +65,10 @@ pub trait ToolCallHook: Send + Sync {
 }
 
 pub trait PhaseHook: Send + Sync {
+    fn id(&self) -> Option<&str> {
+        None
+    }
+
     fn before_model_request<'a>(
         &'a self,
         _context: BeforeModelRequestHookContext<'a>,

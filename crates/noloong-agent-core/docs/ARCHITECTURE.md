@@ -657,7 +657,15 @@ spawn process
 stream/event
 ```
 
-如果 `stream/event` 在 `model/stream` response 前到达，bridge 会把它直接送进已注册的 `ModelStreamSink`。如果 response 返回时携带 buffered events，也会统一转换成 `ModelStreamEvent`。
+如果 `stream/event` 在 `model/stream` response 前到达，bridge 只会把已注册 active stream 的事件直接送进对应 `ModelStreamSink`。未知或 unrelated `streamId` 不会被缓存，会被忽略；如果 response 返回时携带 inline events，也会统一转换成 `ModelStreamEvent`。
+
+JSON-RPC bridge 采用 core strict conformance policy：
+
+- `initialize`、`capabilities/list` 和所有 adapter response 都按 typed serde contract 解析；缺失或类型错误会让当前 connect/request/phase 失败。
+- capability id/name 不允许重复注册；重复的 model provider、tool、context provider、phase、phase hook 或 compaction summarizer 都会在 registration 阶段失败。
+- JSON-RPC error response 映射为 `AgentCoreError::JsonRpc`；typed payload 解析错误保持 `AgentCoreError::Json`。
+- active `stream/event` 的 malformed event 会立即 fail 当前 model stream；未知 notification、未知 response id 和 unrelated stream id 不影响 active stream，pending request 会按 timeout/cancellation 收敛。
+- `tool/execute` 遵循 core 的 tool policy：扩展返回的 malformed `ToolOutput` 会作为 tool provider error 转成 auditable error tool result，而不是直接让 run fail；`Aborted` 仍会中止 run。
 
 `phase_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。返回值是统一 envelope：`modelRequest`、`modelEvents`、`assistantMessage` 都是可选字段；缺少对应字段表示 no-op，字段类型错误会让当前 phase 失败。
 
@@ -666,6 +674,8 @@ stream/event
 `ContentBlock::Media` 和 `ModelStreamEvent::MediaDelta` 也走同一套 typed JSON contract。外部语言扩展不需要新的 bridge 方法；JS/TS/Python provider 只要按 serde JSON shape 发送 `media` content block 或 `media_delta` stream event，runtime 就会按 Rust-native provider 的同一语义处理。
 
 这个设计的边界是：外部语言扩展不需要链接 Rust ABI，只需要实现 newline-delimited JSON-RPC 2.0。JS/TS 可以用 npm 生态，Python 可以用自己的 HTTP/model SDK，Rust core 只关心 typed JSON contract。
+
+内部 conformance suite 位于 `tests/jsonrpc_conformance.rs`，并使用 dedicated fixture `tests/fixtures/jsonrpc-conformance-extension.mjs` 覆盖 lifecycle、capability、request/response、adapter payload、malformed result 和 stream notification 行为。它是 crate 内部质量门，不是对第三方扩展作者暴露的 public runner。
 
 ## Built-in Chat Completions Provider
 
@@ -1206,7 +1216,7 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 1. 持久化 event store：SQLite/PostgreSQL/object store。
 2. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
 3. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
-4. 更严格的 JSON-RPC extension conformance suite。
+4. 可复用的 extension conformance runner：把当前 crate 内部 JSON-RPC conformance suite 提炼成第三方扩展作者也能运行的测试工具。
 5. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 6. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
 7. tool permission model：把 before hook 扩展为可审计的 capability/approval 机制。
