@@ -1,11 +1,16 @@
 use noloong_agent_core::{
-    AgentEventKind, AgentRuntime, ContentBlock, ContextPatch, EventStore, InMemoryEventStore,
-    MediaEncoding, MediaKind, MediaSource, ModelStreamEvent, Result, RunStatus, StdioExtension,
-    StdioExtensionConfig, reduce_events,
+    AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AgentEventKind, AgentRuntime,
+    AgentRuntimeBuilder, BoxFuture, CancellationToken, ContentBlock, ContextPatch, EventStore,
+    InMemoryEventStore, MediaEncoding, MediaKind, MediaSource, ModelStreamEvent, PhaseHook, Result,
+    RunStatus, StdioExtension, StdioExtensionConfig, reduce_events,
 };
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::timeout};
+
+pub mod support;
+
+use support::assert_assistant_text_contains;
 
 #[tokio::test]
 async fn stdio_extension_runs_provider_tool_and_context() -> Result<()> {
@@ -203,6 +208,75 @@ async fn jsonrpc_tool_output_media() -> Result<()> {
 }
 
 #[tokio::test]
+async fn stdio_phase_hook_before_model_request_modifies_request() -> Result<()> {
+    let runtime = runtime_with_phase_hook_mode("before-request").await?;
+
+    let report = runtime.run("hook").await?;
+
+    assert_assistant_text_contains(&report, "hooked request");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_phase_hook_after_model_request_modifies_events() -> Result<()> {
+    let runtime = runtime_with_phase_hook_mode("after-events").await?;
+
+    let report = runtime.run("hook").await?;
+
+    assert_assistant_text_contains(&report, "hooked events");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_phase_hook_after_assistant_commit_modifies_message() -> Result<()> {
+    let runtime = runtime_with_phase_hook_mode("after-assistant").await?;
+
+    let report = runtime.run("hook").await?;
+
+    assert_assistant_text_contains(&report, "hooked assistant");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_phase_hook_composes_with_native_hooks_in_registration_order() -> Result<()> {
+    let builder = phase_hook_builder_from(
+        AgentRuntime::builder().with_phase_hook(Arc::new(AppendAssistantTextHook::new(" before"))),
+        "after-assistant",
+    )
+    .await?
+    .with_phase_hook(Arc::new(AppendAssistantTextHook::new(" after")));
+    let runtime = builder.max_turns(1).build()?;
+
+    let report = runtime.run("hook").await?;
+
+    assert_assistant_text_contains(&report, "hooked assistant after");
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_stdio_phase_hook_response_fails_active_phase() -> Result<()> {
+    let event_store = Arc::new(InMemoryEventStore::new());
+    let builder = phase_hook_builder_from(
+        AgentRuntime::builder().with_event_store(event_store.clone()),
+        "malformed",
+    )
+    .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let error = runtime.run("hook").await.unwrap_err();
+    let events = event_store.load("run-1").await?;
+
+    assert!(error.to_string().contains("invalid type"));
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::PhaseFailed { phase, .. } if phase == "model.request.prepare"
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn stdio_model_stream_can_finish_before_jsonrpc_response() -> Result<()> {
     let fixture = fixture_path("stdio-extension.mjs");
     let builder = AgentRuntime::builder()
@@ -342,4 +416,55 @@ fn fixture_path(name: &str) -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join(name)
+}
+
+async fn runtime_with_phase_hook_mode(mode: &str) -> Result<AgentRuntime> {
+    phase_hook_builder_from(AgentRuntime::builder(), mode)
+        .await?
+        .max_turns(1)
+        .build()
+}
+
+async fn phase_hook_builder_from(
+    builder: AgentRuntimeBuilder,
+    mode: &str,
+) -> Result<AgentRuntimeBuilder> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    builder
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    format!("--phase-hook-mode={mode}"),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await
+}
+
+struct AppendAssistantTextHook {
+    suffix: &'static str,
+}
+
+impl AppendAssistantTextHook {
+    fn new(suffix: &'static str) -> Self {
+        Self { suffix }
+    }
+}
+
+impl PhaseHook for AppendAssistantTextHook {
+    fn after_assistant_commit<'a>(
+        &'a self,
+        context: AfterAssistantCommitHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<AfterAssistantCommitHookResult>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let mut message = context.message.clone();
+            if let Some(ContentBlock::Text { text }) = message.content.first_mut() {
+                text.push_str(self.suffix);
+            }
+            Ok(Some(AfterAssistantCommitHookResult { message }))
+        })
+    }
 }

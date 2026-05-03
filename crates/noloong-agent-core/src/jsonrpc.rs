@@ -1,7 +1,11 @@
 use crate::{
-    AgentCoreError, AgentEffect, ContextProvider, ContextRequest, ExtensionCapability,
-    ExtensionManifest, ModelProvider, ModelRequest, ModelStreamEvent, PhaseContext, PhaseNode,
-    PhaseOutput, Result, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AfterModelRequestHookContext,
+    AfterModelRequestHookResult, AgentCoreError, AgentEffect, AgentMessage,
+    BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
+    BeforeModelRequestHookContext, BeforeModelRequestHookResult, ContextProvider, ContextRequest,
+    ExtensionCapability, ExtensionManifest, ModelProvider, ModelRequest, ModelStreamEvent,
+    PhaseContext, PhaseHook, PhaseNode, PhaseOutput, Result, ToolOutput, ToolProvider, ToolRequest,
+    ToolSpec,
 };
 use crate::{CancellationToken, ModelStreamSink};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -515,6 +519,196 @@ impl PhaseNode for StdioPhaseNode {
     }
 }
 
+pub struct StdioPhaseHook {
+    extension: Arc<StdioExtension>,
+    id: String,
+}
+
+impl StdioPhaseHook {
+    pub fn new(extension: Arc<StdioExtension>, id: String) -> Self {
+        Self { extension, id }
+    }
+}
+
+impl PhaseHook for StdioPhaseHook {
+    fn before_model_request<'a>(
+        &'a self,
+        context: BeforeModelRequestHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, Option<BeforeModelRequestHookResult>> {
+        Box::pin(async move {
+            Ok(self
+                .run_phase_hook(
+                    PhaseHookPoint::BeforeModelRequest,
+                    context.run_id,
+                    context.turn_id,
+                    context.state,
+                    BeforeModelRequestHookPayload {
+                        model_request: context.request,
+                    },
+                    cancellation,
+                )
+                .await?
+                .model_request
+                .map(|request| BeforeModelRequestHookResult { request }))
+        })
+    }
+
+    fn after_model_request<'a>(
+        &'a self,
+        context: AfterModelRequestHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, Option<AfterModelRequestHookResult>> {
+        Box::pin(async move {
+            Ok(self
+                .run_phase_hook(
+                    PhaseHookPoint::AfterModelRequest,
+                    context.run_id,
+                    context.turn_id,
+                    context.state,
+                    AfterModelRequestHookPayload {
+                        model_request: context.request,
+                        model_events: context.events,
+                    },
+                    cancellation,
+                )
+                .await?
+                .model_events
+                .map(|events| AfterModelRequestHookResult { events }))
+        })
+    }
+
+    fn before_assistant_commit<'a>(
+        &'a self,
+        context: BeforeAssistantCommitHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, Option<BeforeAssistantCommitHookResult>> {
+        Box::pin(async move {
+            Ok(self
+                .run_phase_hook(
+                    PhaseHookPoint::BeforeAssistantCommit,
+                    context.run_id,
+                    context.turn_id,
+                    context.state,
+                    BeforeAssistantCommitHookPayload {
+                        model_events: context.events,
+                    },
+                    cancellation,
+                )
+                .await?
+                .model_events
+                .map(|events| BeforeAssistantCommitHookResult { events }))
+        })
+    }
+
+    fn after_assistant_commit<'a>(
+        &'a self,
+        context: AfterAssistantCommitHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, Option<AfterAssistantCommitHookResult>> {
+        Box::pin(async move {
+            Ok(self
+                .run_phase_hook(
+                    PhaseHookPoint::AfterAssistantCommit,
+                    context.run_id,
+                    context.turn_id,
+                    context.state,
+                    AfterAssistantCommitHookPayload {
+                        assistant_message: context.message,
+                    },
+                    cancellation,
+                )
+                .await?
+                .assistant_message
+                .map(|message| AfterAssistantCommitHookResult { message }))
+        })
+    }
+}
+
+impl StdioPhaseHook {
+    async fn run_phase_hook<P>(
+        &self,
+        hook_point: PhaseHookPoint,
+        run_id: &str,
+        turn_id: u64,
+        state: &crate::AgentState,
+        payload: P,
+        cancellation: CancellationToken,
+    ) -> Result<PhaseHookOutput>
+    where
+        P: Serialize,
+    {
+        cancellation.throw_if_cancelled()?;
+        let params = serde_json::to_value(PhaseHookRequest {
+            hook_id: &self.id,
+            hook_point: hook_point.as_str(),
+            run_id,
+            turn_id,
+            state,
+            payload,
+        })?;
+        self.extension
+            .request("phase_hook/run", params, Some(cancellation))
+            .await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PhaseHookPoint {
+    BeforeModelRequest,
+    AfterModelRequest,
+    BeforeAssistantCommit,
+    AfterAssistantCommit,
+}
+
+impl PhaseHookPoint {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeModelRequest => "before_model_request",
+            Self::AfterModelRequest => "after_model_request",
+            Self::BeforeAssistantCommit => "before_assistant_commit",
+            Self::AfterAssistantCommit => "after_assistant_commit",
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhaseHookRequest<'a, P> {
+    hook_id: &'a str,
+    hook_point: &'static str,
+    run_id: &'a str,
+    turn_id: u64,
+    state: &'a crate::AgentState,
+    #[serde(flatten)]
+    payload: P,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BeforeModelRequestHookPayload<'a> {
+    model_request: &'a ModelRequest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AfterModelRequestHookPayload<'a> {
+    model_request: &'a ModelRequest,
+    model_events: &'a [ModelStreamEvent],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BeforeAssistantCommitHookPayload<'a> {
+    model_events: &'a [ModelStreamEvent],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AfterAssistantCommitHookPayload<'a> {
+    assistant_message: &'a AgentMessage,
+}
+
 async fn read_stdout(
     stdout: tokio::process::ChildStdout,
     pending: PendingRequests,
@@ -628,4 +822,15 @@ struct StreamResult {
 struct ContextResult {
     #[serde(default)]
     effects: Vec<AgentEffect>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PhaseHookOutput {
+    #[serde(default)]
+    model_request: Option<ModelRequest>,
+    #[serde(default)]
+    model_events: Option<Vec<ModelStreamEvent>>,
+    #[serde(default)]
+    assistant_message: Option<AgentMessage>,
 }

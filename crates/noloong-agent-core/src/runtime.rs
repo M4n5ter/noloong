@@ -6,7 +6,7 @@ use crate::reducer::{apply_event, reduce_events, validate_effect};
 use crate::{
     AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentMessage, AgentState,
     EventSinkFuture, EventStore, InMemoryEventStore, ModelProvider, ModelStreamEvent, PhaseContext,
-    PhaseNode, PhaseScratch, Result, StdioExtension, StdioExtensionConfig, ToolCallHook,
+    PhaseHook, PhaseNode, PhaseScratch, Result, StdioExtension, StdioExtensionConfig, ToolCallHook,
     ToolExecutionMode, ToolProvider, TurnDecision,
 };
 use crate::{CancellationToken, ContextProvider, ModelStreamSink, StandardPhase};
@@ -70,6 +70,7 @@ pub struct AgentRuntime {
     tools: BTreeMap<String, Arc<dyn ToolProvider>>,
     tool_execution_mode: ToolExecutionMode,
     tool_hooks: Vec<Arc<dyn ToolCallHook>>,
+    phase_hooks: Vec<Arc<dyn PhaseHook>>,
     context_providers: Vec<Arc<dyn ContextProvider>>,
     _stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
@@ -315,6 +316,10 @@ impl AgentRuntime {
 
     pub fn tool_hooks(&self) -> Vec<Arc<dyn ToolCallHook>> {
         self.tool_hooks.clone()
+    }
+
+    pub fn phase_hooks(&self) -> &[Arc<dyn PhaseHook>] {
+        &self.phase_hooks
     }
 
     pub(crate) fn tool_handles(&self) -> ToolRuntimeHandles {
@@ -691,6 +696,7 @@ pub struct AgentRuntimeBuilder {
     tools: BTreeMap<String, Arc<dyn ToolProvider>>,
     tool_execution_mode: ToolExecutionMode,
     tool_hooks: Vec<Arc<dyn ToolCallHook>>,
+    phase_hooks: Vec<Arc<dyn PhaseHook>>,
     context_providers: Vec<Arc<dyn ContextProvider>>,
     stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
@@ -706,6 +712,7 @@ impl Default for AgentRuntimeBuilder {
             tools: BTreeMap::new(),
             tool_execution_mode: ToolExecutionMode::Parallel,
             tool_hooks: Vec::new(),
+            phase_hooks: Vec::new(),
             context_providers: Vec::new(),
             stdio_extensions: Vec::new(),
             max_turns: 8,
@@ -745,6 +752,11 @@ impl AgentRuntimeBuilder {
 
     pub fn with_tool_hook(mut self, hook: Arc<dyn ToolCallHook>) -> Self {
         self.tool_hooks.push(hook);
+        self
+    }
+
+    pub fn with_phase_hook(mut self, hook: Arc<dyn PhaseHook>) -> Self {
+        self.phase_hooks.push(hook);
         self
     }
 
@@ -814,6 +826,13 @@ impl AgentRuntimeBuilder {
                         Arc::new(crate::jsonrpc::StdioPhaseNode::new(extension.clone(), id));
                     insert_before_phase(&mut self.phases, PHASE_TURN_DECISION, phase);
                 }
+                crate::ExtensionCapability::PhaseHook { id } => {
+                    self.phase_hooks
+                        .push(Arc::new(crate::jsonrpc::StdioPhaseHook::new(
+                            extension.clone(),
+                            id,
+                        )));
+                }
             }
         }
         self.stdio_extensions.push(extension);
@@ -835,6 +854,7 @@ impl AgentRuntimeBuilder {
             tools: self.tools,
             tool_execution_mode: self.tool_execution_mode,
             tool_hooks: self.tool_hooks,
+            phase_hooks: self.phase_hooks,
             context_providers: self.context_providers,
             _stdio_extensions: self.stdio_extensions,
             max_turns: self.max_turns,

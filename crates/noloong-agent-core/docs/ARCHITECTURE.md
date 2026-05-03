@@ -10,7 +10,7 @@
 
 1. Kernel runtime：`AgentRuntime`、phase graph、event store、reducer。
 2. Typed data model：`AgentEvent`、`AgentEffect`、`AgentState`、message/content/tool/thinking/model stream 类型。
-3. Native extension traits：Rust 原生的 `ModelProvider`、`ToolProvider`、`ContextProvider`、`PhaseNode`、`ToolCallHook`。
+3. Native extension traits：Rust 原生的 `ModelProvider`、`ToolProvider`、`ContextProvider`、`PhaseNode`、`PhaseHook`、`ToolCallHook`。
 4. Process extension bridge：stdio JSON-RPC，把 JS/TS/Python 等外部进程适配为 Rust trait。
 5. UX layer：`Agent`，在 kernel 之上提供持久状态、订阅、队列、abort、continue 等交互能力。
 
@@ -50,7 +50,7 @@ Agent
 AgentRuntime
   owns EventStore
   owns PhaseNode graph
-  owns ModelProvider / ToolProvider / ContextProvider / ToolCallHook registries
+  owns ModelProvider / ToolProvider / ContextProvider / PhaseHook / ToolCallHook registries
   emits AgentEvent
   commits AgentEffect
 
@@ -298,7 +298,50 @@ hook 当前专注于工具调用前后：
 - before hook 可以 block 工具调用，并返回可审计的 error tool output。
 - after hook 可以改写工具输出的 content、details、is_error。
 
-后续如果要覆盖更广的 agent loop 节点，应该优先通过 `PhaseNode` 或更细粒度的 phase hook trait 扩展，而不是把所有行为塞进 tool hook。
+`PhaseHook`：
+
+```rust
+pub trait PhaseHook: Send + Sync {
+    fn before_model_request<'a>(
+        &'a self,
+        context: BeforeModelRequestHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeModelRequestHookResult>>;
+
+    fn after_model_request<'a>(
+        &'a self,
+        context: AfterModelRequestHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<AfterModelRequestHookResult>>;
+
+    fn before_assistant_commit<'a>(
+        &'a self,
+        context: BeforeAssistantCommitHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeAssistantCommitHookResult>>;
+
+    fn after_assistant_commit<'a>(
+        &'a self,
+        context: AfterAssistantCommitHookContext<'a>,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<AfterAssistantCommitHookResult>>;
+}
+```
+
+`PhaseHook` 是标准 phase 内的细粒度拦截点，适合在不替换完整 phase 的情况下调整 request、model events 或最终 assistant message。context 以借用形式暴露当前值，result 使用完整替换语义：
+
+- `before_model_request` 替换 `ModelRequest`。
+- `after_model_request` 替换后续 phase 使用的 `Vec<ModelStreamEvent>`。
+- `before_assistant_commit` 替换折叠前的 `Vec<ModelStreamEvent>`。
+- `after_assistant_commit` 替换最终 append 的 `AgentMessage`。
+
+hooks 按注册顺序串行执行，后一个 hook 看到前一个 hook 的修改结果。任意 hook 返回 error 时，当前 phase 失败并走现有 `PhaseFailed` / run failure 路径。`after_model_request` 和 `before_assistant_commit` 修改的是后续 commit 输入，不会回写已经记录过的 raw provider stream events；最终 state 以 committed assistant message 为准。
+
+选择扩展点时的边界是：
+
+- 用 `PhaseNode` 替换完整 phase 或插入新的 phase。
+- 用 `PhaseHook` 拦截标准 phase 的稳定边界。
+- 用 `ToolCallHook` 专门处理 tool execution 前后的 block/rewrite。
 
 ## Phase Graph
 
@@ -531,6 +574,7 @@ spawn process
 - `Tool { spec }`
 - `ContextProvider { id }`
 - `PhaseNode { id }`
+- `PhaseHook { id }`
 
 对应 JSON-RPC 方法：
 
@@ -538,6 +582,7 @@ spawn process
 - `tool/execute`
 - `context/apply`
 - `phase/run`
+- `phase_hook/run`
 
 模型流事件通过 notification 发送：
 
@@ -546,6 +591,8 @@ stream/event
 ```
 
 如果 `stream/event` 在 `model/stream` response 前到达，bridge 会把它直接送进已注册的 `ModelStreamSink`。如果 response 返回时携带 buffered events，也会统一转换成 `ModelStreamEvent`。
+
+`phase_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。返回值是统一 envelope：`modelRequest`、`modelEvents`、`assistantMessage` 都是可选字段；缺少对应字段表示 no-op，字段类型错误会让当前 phase 失败。
 
 `ContentBlock::Media` 和 `ModelStreamEvent::MediaDelta` 也走同一套 typed JSON contract。外部语言扩展不需要新的 bridge 方法；JS/TS/Python provider 只要按 serde JSON shape 发送 `media` content block 或 `media_delta` stream event，runtime 就会按 Rust-native provider 的同一语义处理。
 
@@ -1088,13 +1135,12 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 比较自然的后续扩展方向：
 
 1. 持久化 event store：SQLite/PostgreSQL/object store。
-2. 更细粒度 phase hooks：例如 before/after model request、before/after assistant commit。
-3. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
-4. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
-5. 更严格的 JSON-RPC extension conformance suite。
-6. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
-7. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
-8. tool permission model：把 before hook 扩展为可审计的 capability/approval 机制。
-9. context compaction phase：在长上下文场景下自动摘要和裁剪历史。
+2. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
+3. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
+4. 更严格的 JSON-RPC extension conformance suite。
+5. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
+6. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
+7. tool permission model：把 before hook 扩展为可审计的 capability/approval 机制。
+8. context compaction phase：在长上下文场景下自动摘要和裁剪历史。
 
 这些方向应该继续遵守当前核心原则：状态变更通过 effect，外部行为通过 trait 或 JSON-RPC，provider-specific 细节留在调用方配置或 provider 实现内，不泄漏到 runtime。

@@ -849,6 +849,7 @@ pub enum ExtensionCapability {
     Tool { spec: ToolSpec },
     ContextProvider { id: String },
     PhaseNode { id: String },
+    PhaseHook { id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

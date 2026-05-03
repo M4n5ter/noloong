@@ -64,6 +64,40 @@ pub trait ToolCallHook: Send + Sync {
     }
 }
 
+pub trait PhaseHook: Send + Sync {
+    fn before_model_request<'a>(
+        &'a self,
+        _context: BeforeModelRequestHookContext<'a>,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeModelRequestHookResult>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn after_model_request<'a>(
+        &'a self,
+        _context: AfterModelRequestHookContext<'a>,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<AfterModelRequestHookResult>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn before_assistant_commit<'a>(
+        &'a self,
+        _context: BeforeAssistantCommitHookContext<'a>,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeAssistantCommitHookResult>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn after_assistant_commit<'a>(
+        &'a self,
+        _context: AfterAssistantCommitHookContext<'a>,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<AfterAssistantCommitHookResult>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     inner: Arc<CancellationInner>,
@@ -149,4 +183,65 @@ pub struct ContextRequest {
     pub run_id: String,
     pub turn_id: u64,
     pub state: AgentState,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BeforeModelRequestHookContext<'a> {
+    pub run_id: &'a str,
+    pub turn_id: u64,
+    pub state: &'a AgentState,
+    pub request: &'a ModelRequest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BeforeModelRequestHookResult {
+    pub request: ModelRequest,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AfterModelRequestHookContext<'a> {
+    pub run_id: &'a str,
+    pub turn_id: u64,
+    pub state: &'a AgentState,
+    pub request: &'a ModelRequest,
+    pub events: &'a [ModelStreamEvent],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AfterModelRequestHookResult {
+    pub events: Vec<ModelStreamEvent>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BeforeAssistantCommitHookContext<'a> {
+    pub run_id: &'a str,
+    pub turn_id: u64,
+    pub state: &'a AgentState,
+    pub events: &'a [ModelStreamEvent],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BeforeAssistantCommitHookResult {
+    pub events: Vec<ModelStreamEvent>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AfterAssistantCommitHookContext<'a> {
+    pub run_id: &'a str,
+    pub turn_id: u64,
+    pub state: &'a AgentState,
+    pub message: &'a AgentMessage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AfterAssistantCommitHookResult {
+    pub message: AgentMessage,
 }

@@ -1,7 +1,7 @@
 use crate::{
     AgentCoreError, AgentEvent, AgentEventSink, AgentInput, AgentMessage, AgentRuntime,
     AgentRuntimeBuilder, AgentState, CancellationToken, ContextProvider, EventSinkFuture,
-    ModelProvider, QueueMode, Result, RuntimeQueues, StdioExtensionConfig, ToolCallHook,
+    ModelProvider, PhaseHook, QueueMode, Result, RuntimeQueues, StdioExtensionConfig, ToolCallHook,
     ToolExecutionMode, ToolProvider, apply_event,
 };
 use std::{
@@ -327,6 +327,11 @@ impl AgentBuilder {
 
     pub fn with_tool_hook(mut self, hook: Arc<dyn ToolCallHook>) -> Self {
         self.runtime_builder = self.runtime_builder.with_tool_hook(hook);
+        self
+    }
+
+    pub fn with_phase_hook(mut self, hook: Arc<dyn PhaseHook>) -> Self {
+        self.runtime_builder = self.runtime_builder.with_phase_hook(hook);
         self
     }
 

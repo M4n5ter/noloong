@@ -1,409 +1,314 @@
-# Implementation Plan: Built-in Responses API Provider
+# Implementation Plan: Fine-Grained Phase Hooks
 
 ## Overview
 
-为 `noloong-agent-core` 增加内置 `ResponsesApiProvider`，实现 OpenAI Responses / OpenResponses wire format。这个 provider 仍然只是普通 `ModelProvider`，不能获得 runtime 或 phase graph 特权。v1 采用 stateless full-history 模式：每次从 `AgentState.messages` 构造完整 `input`，默认 `store = false`，与当前 event-sourced kernel 和 OpenRouter Responses Beta 的 stateless 语义保持一致。
+为 `noloong-agent-core` 增加比 `PhaseNode` 更细粒度、比 `ToolCallHook` 更通用的 `PhaseHook` 扩展层。v1 覆盖四个稳定 hook 点：`before_model_request`、`after_model_request`、`before_assistant_commit`、`after_assistant_commit`。Rust 内部扩展和 JSON-RPC 外部扩展都应使用同一语义：hook 按注册顺序串行执行，后一个 hook 看到前一个 hook 的修改结果，任意 hook 返回 error 时当前 phase 失败。
 
 ## Architecture Decisions
 
-- 新增 `crates/noloong-agent-core/src/responses.rs`，所有 Responses-specific wire shape 只留在 provider adapter 内。
-- 新增 public exports：`ResponsesApiProvider`、`ResponsesApiProviderConfig`、`ResponsesReasoningConfig`、`ResponsesReasoningEffort`、`ResponsesReasoningSummary`。
-- 官方 OpenAI 默认配置：
-  - `base_url = "https://api.openai.com/v1"`
-  - endpoint = `{base_url}/responses`
-  - auth header = `Authorization: Bearer ...`
-  - API key env = `OPENAI_API_KEY`
-  - `stream = true`
-  - `store = false`
-  - `max_output_tokens: Option<u64>`
-- OpenRouter Responses-compatible endpoint 只通过 generic config 支持：
-  - `base_url = "https://openrouter.ai/api/v1"`
-  - `api_key_env = "OPENROUTER_API_KEY"`
-  - optional headers such as `X-Title`
-- Core provider source 不允许出现 OpenRouter/free、DeepSeek 或任何 vendor/model preset。
-- `extra_body` 作为 provider-specific escape hatch，最后 merge，允许调用方覆盖或追加 Responses 字段。
-- `native_tools: Vec<Value>` 用于 pass-through hosted tools；core runtime tools 仍映射为 Responses function tools 并由 `AgentRuntime` 执行。
-- v1 不自动维护 `previous_response_id`。如果未来需要 stateful Responses，应由独立 context/phase 扩展管理，而不是让 provider 隐式持有 conversation state。
-- v1 对 Responses audio/video 输入输出保持 explicit gap，除非上游 wire format 和可测 provider 行为足够稳定。
+- 新增 `PhaseHook` trait，不复用 `ToolCallHook`，避免把 tool-specific context 扩散到 agent loop 其它阶段。
+- `PhaseHook` 是标准 phase 内的拦截点；`PhaseNode` 仍用于替换完整 phase。
+- hook result 使用完整替换语义，不引入 patch DSL：
+  - `before_model_request` 可以替换 `ModelRequest`。
+  - `after_model_request` 可以替换后续 phase 使用的 `Vec<ModelStreamEvent>`。
+  - `before_assistant_commit` 可以替换折叠前的 `Vec<ModelStreamEvent>`。
+  - `after_assistant_commit` 可以替换最终 append 的 `AgentMessage`。
+- raw provider stream events 仍作为 provider 原始输出被记录；hook 修改后的 events/message 作为后续 phase 和最终 state commit 的输入。
+- v1 不支持 hook priority、条件匹配、动态 enable/disable 或静默跳过 assistant commit；需要阻止 commit 时返回 error。
 
 ## Dependency Graph
 
-1. Provider config and HTTP shell
-2. Request payload mapping
-3. Media and thinking replay mapping
-4. Streaming parser
-5. Runtime and live gates
-6. Docs and conformance evidence
-7. Final quality gate
+1. Native `PhaseHook` API
+2. Runtime registration
+3. Standard phase integration
+4. JSON-RPC extension adapter
+5. Tests and docs
 
-## Phase 1: Foundation
+## Task List
 
-### Task 1: Add Responses Provider Config and HTTP Shell
+### Phase 1: Native Hook Foundation
 
-**Description:** 新增 `ResponsesApiProviderConfig`、`ResponsesApiProvider`、headers、endpoint construction、timeouts、HTTP error reporting 和 `ModelProvider` skeleton。
+## Task 1: Define Native PhaseHook API
+
+**Description:** 新增 `PhaseHook` trait 及四组 context/result 类型，建立 Rust 内部扩展的稳定公共 API。
 
 **Acceptance criteria:**
 
-- [ ] Official OpenAI config 默认使用 Bearer auth、`OPENAI_API_KEY`、`https://api.openai.com/v1/responses`。
-- [ ] Compatible providers can be configured only through `base_url`、`api_key_env`、`header`、`extra_body`。
-- [ ] `max_output_tokens` exists and no `max_tokens` API is introduced.
-- [ ] `store` defaults to `false` and is configurable.
-- [ ] non-2xx error includes status and body excerpt.
-- [ ] config `Debug` redacts API key.
+- [ ] `PhaseHook` 是 `Send + Sync`，所有 hook methods 默认 no-op。
+- [ ] context 类型包含 `run_id`、`turn_id`、`state` 和当前 hook point 必需的数据。
+- [ ] result 类型只表达完整替换，不包含 provider-specific 字段或 patch DSL。
+- [ ] hook method 返回 crate 现有 `Result<Option<...>>` 风格，error 会自然进入现有 phase failure 路径。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test responses config_`
-- [ ] `cargo test -p noloong-agent-core --test responses http_error_`
-- [ ] `cargo test -p noloong-agent-core --test responses request_timeout_`
-- [ ] `cargo test -p noloong-agent-core --test responses cancellation_`
+- [ ] API compiles without requiring downstream providers to implement new methods.
+- [ ] Unit test validates a no-op hook does not change request/events/message.
 
 **Dependencies:** None
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
+- `crates/noloong-agent-core/src/providers.rs`
 - `crates/noloong-agent-core/src/lib.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/tests/phase_hooks.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-### Task 2: Define Responses Reasoning Configuration
+## Task 2: Register Phase Hooks in Runtime Builders
 
-**Description:** 增加 Responses reasoning request config，覆盖 effort、summary、include encrypted reasoning，同时保持 provider-neutral `ThinkingBlock` 不变。
+**Description:** 在 runtime 和高层 agent builder 中注册 `PhaseHook`，并为标准 phase 提供只读访问。
 
 **Acceptance criteria:**
 
-- [ ] `ResponsesReasoningEffort` supports `Minimal`、`Low`、`Medium`、`High`、`XHigh`、`Custom(String)`。
-- [ ] `ResponsesReasoningSummary` supports `Auto`、`Concise`、`Detailed`、`None`、`Custom(String)`。
-- [ ] config can emit `reasoning` request object only when explicitly configured.
-- [ ] config can add `include: ["reasoning.encrypted_content"]` without caller manually editing `extra_body`.
-- [ ] `extra_body` can still override request fields when intentionally supplied.
+- [ ] `AgentRuntimeBuilder` exposes `with_phase_hook`.
+- [ ] 高层 `AgentBuilder` exposes matching phase hook registration if it already forwards tool hooks.
+- [ ] `AgentRuntime` stores hooks as `Vec<Arc<dyn PhaseHook>>` and exposes read-only access.
+- [ ] Existing runtime construction tests still pass without registering any hook.
 
 **Verification:**
 
-- [ ] `payload_omits_reasoning_config_by_default`
-- [ ] `payload_maps_reasoning_effort_summary_and_encrypted_include`
-- [ ] `payload_extra_body_can_override_reasoning_fields`
+- [ ] Unit test builds a runtime with two hooks and observes registration order.
+- [ ] `cargo test -p noloong-agent-core phase_hook_registration`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/src/runtime.rs`
+- `crates/noloong-agent-core/src/agent.rs`
+- `crates/noloong-agent-core/tests/phase_hooks.rs`
 
 **Estimated scope:** S
 
-## Checkpoint: Foundation
+### Checkpoint: Native Foundation
 
 - [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test -p noloong-agent-core --test responses config_`
+- [ ] `cargo test -p noloong-agent-core phase_hook`
 
-## Phase 2: Request Mapping
+### Phase 2: Standard Phase Integration
 
-### Task 3: Map Core Messages to Responses Input Items
+## Task 3: Add before_model_request Hook Execution
 
-**Description:** 将 `ModelRequest.messages` 转成 Responses `input` items，并将 `System` messages 合并为 top-level `instructions`。
+**Description:** 在 `model_request_prepare` 构造基础 `ModelRequest` 后执行 `before_model_request` hooks，并将最终 request 写入 `scratch.model_request`。
 
 **Acceptance criteria:**
 
-- [ ] `MessageRole::System` content renders to top-level `instructions` and does not enter `input`.
-- [ ] `MessageRole::User` maps to `{"type":"message","role":"user","content":[...]}`.
-- [ ] `MessageRole::Assistant` text/json maps to completed assistant message with `output_text` content.
-- [ ] `MessageRole::Custom` fails fast with a clear provider error.
-- [ ] empty content is represented by an empty content array, not invalid JSON.
+- [ ] hooks 按注册顺序串行执行。
+- [ ] 每个 hook 接收到上一个 hook 修改后的 request。
+- [ ] final `scratch.model_request` 是最后一个修改结果。
+- [ ] hook error causes `model.request.prepare` to fail without calling model provider.
 
 **Verification:**
 
-- [ ] `payload_maps_system_to_instructions`
-- [ ] `payload_maps_user_and_assistant_history`
-- [ ] `payload_rejects_custom_roles`
-- [ ] `payload_handles_empty_content`
+- [ ] Test a hook can add request metadata observed by a mock provider.
+- [ ] Test two hooks compose in registration order.
+- [ ] Test hook error prevents model provider invocation.
 
-**Dependencies:** Task 1
+**Dependencies:** Tasks 1-2
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/src/phase.rs`
+- `crates/noloong-agent-core/tests/phase_hooks.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-### Task 4: Map Runtime Tools and Tool Results
+## Task 4: Add after_model_request Hook Execution
 
-**Description:** 支持 core runtime tool loop：`ToolSpec` 映射为 Responses function tool，assistant `ToolCall` history 映射为 `function_call` item，tool result 映射为 `function_call_output` item。
+**Description:** 在 `model_stream` 完成 provider stream 后执行 `after_model_request` hooks，允许转换后续 phase 使用的 `ModelStreamEvent` 列表。
 
 **Acceptance criteria:**
 
-- [ ] `ToolSpec` maps to `{"type":"function","name","description","parameters"}`.
-- [ ] function tool strictness is configurable and defaults to Responses API behavior, without changing `ToolSpec`.
-- [ ] assistant `ContentBlock::ToolCall` maps to `function_call` with `call_id` and stringified `arguments`.
-- [ ] `MessageRole::ToolResult` maps to `function_call_output` correlated by `tool_call_id`.
-- [ ] tool result text/json content renders as string output; unsupported media fails fast in v1.
-- [ ] `native_tools` are appended alongside runtime function tools.
+- [ ] hooks receive the final model request and provider-produced events.
+- [ ] hooks can replace the event list used by later phases.
+- [ ] raw streamed events are not retroactively mutated or double-recorded.
+- [ ] hook error causes `model.stream` to fail before assistant commit.
 
 **Verification:**
 
-- [ ] `payload_maps_function_tools`
-- [ ] `payload_maps_assistant_function_call_history`
-- [ ] `payload_maps_function_call_output`
-- [ ] `payload_merges_native_tools_with_runtime_tools`
-- [ ] `payload_tool_result_rejects_unsupported_media`
+- [ ] Test `after_model_request` can replace a text delta before assistant commit.
+- [ ] Test live stream forwarding still records provider raw events once.
+- [ ] Test hook error records phase failure and no assistant message is appended.
 
 **Dependencies:** Task 3
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/src/phase.rs`
+- `crates/noloong-agent-core/tests/phase_hooks.rs`
 
 **Estimated scope:** M
 
-### Task 5: Map Image and File Media
+## Task 5: Add Assistant Commit Hooks
 
-**Description:** 将 provider-neutral `MediaBlock` 映射到 Responses `input_image` / `input_file` content parts，并明确 v1 不支持的 media。
+**Description:** 在 `assistant_commit` 中加入 `before_assistant_commit` 和 `after_assistant_commit`，分别控制 event folding 输入和最终 append 的 assistant message。
 
 **Acceptance criteria:**
 
-- [ ] `MediaKind::Image + Uri` maps to `input_image.image_url`.
-- [ ] `MediaKind::Image + Inline(base64)` maps to data URL using `mime_type`.
-- [ ] `MediaKind::Image + Provider` maps to `input_image.file_id` when `provider_id` matches current provider id.
-- [ ] `MediaKind::File + Uri` maps to `input_file.file_url`.
-- [ ] `MediaKind::File + Provider` maps to `input_file.file_id` when `provider_id` matches current provider id.
-- [ ] `MediaKind::File + Inline(base64)` is supported only when the provider accepts data URL file input; otherwise it fails fast with a targeted error.
-- [ ] `Audio`、`Video`、custom media kind return clear provider errors in v1.
+- [ ] `before_assistant_commit` runs before folding `ModelStreamEvent` into `AgentMessage`.
+- [ ] `after_assistant_commit` runs after message creation and before `AppendMessage` effect.
+- [ ] `after_assistant_commit` can replace the final assistant message.
+- [ ] hooks cannot silently skip commit; blocking commit requires returning error.
 
 **Verification:**
 
-- [ ] `payload_maps_image_url_data_url_and_file_id`
-- [ ] `payload_maps_file_url_and_file_id`
-- [ ] `payload_ignores_cross_provider_media_replay`
-- [ ] `payload_rejects_unsupported_audio_video_custom_media`
+- [ ] Test `before_assistant_commit` can modify final text through event replacement.
+- [ ] Test `after_assistant_commit` can replace final assistant message content.
+- [ ] Test error path appends no assistant message.
 
-**Dependencies:** Task 3
+**Dependencies:** Task 4
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/src/phase.rs`
+- `crates/noloong-agent-core/tests/phase_hooks.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-## Checkpoint: Request Mapping
+### Checkpoint: Core Hook Behavior
 
-- [ ] `cargo test -p noloong-agent-core --test responses payload_`
-- [ ] `cargo test --workspace`
+- [ ] `cargo test -p noloong-agent-core --test phase_hooks`
+- [ ] `cargo test -p noloong-agent-core runtime`
+- [ ] `cargo fmt --check`
 
-## Phase 3: Streaming
+### Phase 3: JSON-RPC Extension Support
 
-### Task 6: Parse Text and Stream Lifecycle
+## Task 6: Add PhaseHook Capability and Stdio Adapter
 
-**Description:** 复用 crate-private `SseDecoder`，解析 Responses SSE lifecycle 和 text deltas。
+**Description:** 让非 Rust 扩展可以通过 JSON-RPC 注册和执行 phase hooks。
 
 **Acceptance criteria:**
 
-- [ ] `response.created` emits `ModelStreamEvent::Started` using response id when available.
-- [ ] OpenAI `response.output_text.delta` emits `TextDelta`.
-- [ ] OpenRouter-compatible `response.content_part.delta` text emits `TextDelta`.
-- [ ] `[DONE]` is accepted as terminal marker.
-- [ ] `response.completed` or `response.done` emits `Finished { stop_reason: Stop }`.
-- [ ] `response.incomplete` with max token details maps to `StopReason::Length`.
-- [ ] `response.failed` and `response.error` map to `ModelStreamEvent::Failed`.
+- [ ] `ExtensionCapability` supports `PhaseHook { id }`.
+- [ ] `StdioPhaseHook` implements native `PhaseHook`.
+- [ ] extension discovery registers phase hooks alongside model providers, tools, context providers, and phase nodes.
+- [ ] adapter preserves native hook ordering relative to registration order.
 
 **Verification:**
 
-- [ ] `stream_text_delta_and_completed`
-- [ ] `stream_openrouter_content_part_delta`
-- [ ] `stream_incomplete_maps_to_length`
-- [ ] `stream_failed_reports_provider_failure`
-- [ ] `stream_accepts_done_marker`
+- [ ] Test extension manifest with `PhaseHook` capability registers a hook.
+- [ ] Test native and JSON-RPC hooks compose in registration order.
 
-**Dependencies:** Tasks 1-3
+**Dependencies:** Tasks 1-2
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/src/jsonrpc.rs`
+- `crates/noloong-agent-core/src/runtime.rs`
+- `crates/noloong-agent-core/tests/jsonrpc.rs`
 
 **Estimated scope:** M
 
-### Task 7: Parse Streaming Function Calls
+## Task 7: Define phase_hook/run Wire Contract
 
-**Description:** 支持 Responses function call stream，将 `response.output_item.added`、`response.function_call_arguments.delta`、`response.function_call_arguments.done` 聚合为 core `ToolCall`。
+**Description:** 新增 JSON-RPC method `phase_hook/run`，用统一 envelope 表达四类 hook point 的输入输出。
 
 **Acceptance criteria:**
 
-- [ ] function call item start captures `id`、`call_id`、`name` by `output_index` and `item_id`.
-- [ ] arguments delta accumulates by item.
-- [ ] done event emits exactly one `ModelStreamEvent::ToolCall`.
-- [ ] interleaved text and function call items preserve event ordering at the core stream level.
-- [ ] malformed JSON arguments use existing shared `parse_tool_arguments` fallback policy.
+- [ ] request contains `hookId`、`hookPoint`、`runId`、`turnId`、`state` and hook-specific payload.
+- [ ] response accepts optional `modelRequest`、`modelEvents`、`assistantMessage`.
+- [ ] missing hook-specific response field means no-op.
+- [ ] wrong response field type returns extension error.
+- [ ] `hookPoint` uses stable snake_case values matching native hook names.
 
 **Verification:**
 
-- [ ] `stream_accumulates_function_call_arguments`
-- [ ] `stream_handles_interleaved_text_and_function_calls`
-- [ ] `stream_function_call_malformed_json_policy_falls_back_to_string`
+- [ ] Test external `before_model_request` modifies request.
+- [ ] Test external `after_model_request` modifies events.
+- [ ] Test external `after_assistant_commit` modifies final message.
+- [ ] Test malformed response fails the active phase.
 
 **Dependencies:** Task 6
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
-
-**Estimated scope:** S
-
-### Task 8: Parse Reasoning Summary, Raw, and Encrypted Items
-
-**Description:** 支持 Responses reasoning stream 和 output items，映射到 provider-neutral `ThinkingDelta` / `ThinkingBlock`。
-
-**Acceptance criteria:**
-
-- [ ] reasoning summary text deltas map to `ThinkingKind::Summary`.
-- [ ] raw reasoning text deltas map to `ThinkingKind::Raw`.
-- [ ] encrypted reasoning content maps to `ThinkingKind::Encrypted` with raw snapshot and replay descriptor.
-- [ ] final reasoning item can be replayed only when provider id and model match.
-- [ ] unknown reasoning fields are preserved in `metadata` or `raw_snapshot` rather than discarded when practical.
-
-**Verification:**
-
-- [ ] `stream_reasoning_summary_delta`
-- [ ] `stream_reasoning_text_delta`
-- [ ] `stream_encrypted_reasoning_replay_descriptor`
-- [ ] `payload_replays_responses_reasoning_with_matching_scope`
-- [ ] `payload_ignores_cross_provider_reasoning_replay`
-
-**Dependencies:** Task 6
-
-**Files likely touched:**
-
-- `crates/noloong-agent-core/src/responses.rs`
-- `crates/noloong-agent-core/tests/responses.rs`
+- `crates/noloong-agent-core/src/jsonrpc.rs`
+- `crates/noloong-agent-core/tests/jsonrpc.rs`
+- `crates/noloong-agent-core/tests/fixtures/jsonrpc-extension.*`
 
 **Estimated scope:** M
 
-## Checkpoint: Streaming
+### Checkpoint: External Hook Path
 
-- [ ] `cargo test -p noloong-agent-core --test responses stream_`
-- [ ] `cargo test -p noloong-agent-core --test responses payload_replays_`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test -p noloong-agent-core --test jsonrpc phase_hook`
+- [ ] `cargo test -p noloong-agent-core --test phase_hooks`
 
-## Phase 4: Runtime, Live Gates, and Documentation
+### Phase 4: Documentation and Quality Gate
 
-### Task 9: Add Runtime Integration Tests
+## Task 8: Update Architecture Documentation
 
-**Description:** 验证 Responses provider 通过现有 `AgentRuntime` 提交 text/thinking/tool calls，不需要 runtime special case。
-
-**Acceptance criteria:**
-
-- [ ] Runtime commits streamed visible text as `ContentBlock::Text`.
-- [ ] Runtime commits streamed reasoning as `ContentBlock::Thinking`.
-- [ ] Runtime resolves and executes Responses function calls through existing tool phases.
-- [ ] Assistant content ordering preserves thinking, text, media, tool call boundaries.
-
-**Verification:**
-
-- [ ] `runtime_commits_responses_text_and_thinking`
-- [ ] `runtime_executes_responses_tool_call`
-- [ ] `cargo test -p noloong-agent-core --test responses runtime_`
-
-**Dependencies:** Tasks 6-8
-
-**Files likely touched:**
-
-- `crates/noloong-agent-core/tests/responses.rs`
-
-**Estimated scope:** S
-
-### Task 10: Add OpenRouter Responses Live Gate
-
-**Description:** 新增 ignored live tests，只要求 `OPENROUTER_API_KEY`。默认 text smoke 使用 `openrouter/free`，tool/reasoning tests 使用 env-overridable model when free routing cannot guarantee capability。
+**Description:** 更新架构文档，把 “更细粒度 phase hooks” 从 future work 改为已支持的扩展机制，并明确与 `PhaseNode` / `ToolCallHook` 的边界。
 
 **Acceptance criteria:**
 
-- [ ] live tests live outside provider source and assemble OpenRouter config generically.
-- [ ] text compatibility test defaults to `openrouter/free`.
-- [ ] tool live test is skipped unless `NOLOONG_OPENROUTER_RESPONSES_TOOL_MODEL` is set or a known free route proves tool support.
-- [ ] reasoning live test is skipped unless `NOLOONG_OPENROUTER_RESPONSES_REASONING_MODEL` is set or free route returns reasoning.
-- [ ] no official `OPENAI_API_KEY` is required for required live gate.
+- [ ] docs describe when to use `PhaseHook` versus `PhaseNode`.
+- [ ] docs describe the four v1 hook points and mutation semantics.
+- [ ] docs explain raw stream events versus hook-transformed commit input.
+- [ ] docs mention JSON-RPC `phase_hook/run` for non-Rust extensions.
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture`
-- [ ] `rg -n "openrouter|deepseek|OPENROUTER|deepseek-v4" crates/noloong-agent-core/src -S` returns no matches.
+- [ ] Manual doc review confirms no obsolete future-work wording remains.
 
-**Dependencies:** Task 9
-
-**Files likely touched:**
-
-- `crates/noloong-agent-core/tests/responses_live.rs`
-- `crates/noloong-agent-core/tests/support/mod.rs`
-
-**Estimated scope:** M
-
-### Task 11: Update Docs and Conformance Matrix
-
-**Description:** 更新 README、architecture docs 和 conformance matrix，把 Responses provider 记录为第三个 built-in wire adapter。
-
-**Acceptance criteria:**
-
-- [ ] README includes official OpenAI Responses config example.
-- [ ] README includes OpenRouter-compatible config example without core preset.
-- [ ] Architecture docs state Responses is provider adapter only, not runtime state owner.
-- [ ] Conformance matrix lists payload, streaming/runtime, vendor neutrality, and OpenRouter live evidence.
-- [ ] `plans/CURRENT_PLAN.md` remains the source implementation plan until the feature is complete.
-
-**Verification:**
-
-- [ ] docs review
-- [ ] `cargo test -p noloong-agent-core --examples`
-
-**Dependencies:** Tasks 1-10
+**Dependencies:** Tasks 3-7
 
 **Files likely touched:**
 
-- `README.md`
 - `crates/noloong-agent-core/docs/ARCHITECTURE.md`
-- `plans/CONFORMANCE_MATRIX.md`
-- `plans/CURRENT_PLAN.md`
 
 **Estimated scope:** S
 
-## Final Quality Gate
+## Task 9: Run Full Quality Gate
+
+**Description:** 对完整实现运行格式、lint 和测试，确保 hooks 没有破坏现有 provider/runtime 行为。
+
+**Acceptance criteria:**
+
+- [ ] Formatting passes.
+- [ ] Clippy passes with no warnings.
+- [ ] Workspace tests pass.
+- [ ] Existing provider tests do not require hook-specific changes.
+
+**Verification:**
 
 - [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
+- [ ] `cargo clippy --workspace --all-targets --all-features`
 - [ ] `cargo nextest run --workspace`
-- [ ] `cargo test -p noloong-agent-core --examples`
-- [ ] `cargo test -p noloong-agent-core --test responses`
-- [ ] `cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture`
-- [ ] `node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
-- [ ] `node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs`
-- [ ] `node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs`
-- [ ] `rg -n "openrouter|deepseek|OPENROUTER|deepseek-v4" crates/noloong-agent-core/src -S` returns no matches.
-- [ ] `git diff --check`
+
+**Dependencies:** Tasks 1-8
+
+**Files likely touched:**
+
+- No source file should be changed by this task except fixes required by failing checks.
+
+**Estimated scope:** S
+
+### Checkpoint: Complete
+
+- [ ] All task acceptance criteria are satisfied.
+- [ ] `cargo fmt --check` passes.
+- [ ] `cargo clippy --workspace --all-targets --all-features` passes.
+- [ ] `cargo nextest run --workspace` passes.
+- [ ] `crates/noloong-agent-core/docs/ARCHITECTURE.md` matches implemented behavior.
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
-|---|---|---|
-| Responses stream event names differ between OpenAI and OpenRouter-compatible providers | High | Cover both OpenAI spec events and OpenRouter documented `content_part.delta` with mock stream tests before live tests. |
-| Reasoning item wire shape evolves | Medium | Preserve unknown reasoning payloads in `raw_snapshot` or metadata, and keep request config extensible through `extra_body`. |
-| `previous_response_id` conflicts with event-sourced full-history replay | Medium | Keep v1 stateless by default and avoid provider-owned hidden state. |
-| Free OpenRouter routing may not support tools or reasoning consistently | Medium | Make text compatibility required; gate tool/reasoning live tests behind explicit model env vars when needed. |
-| Media support across Responses-compatible providers is uneven | Medium | Implement image/file core mappings with fail-fast unsupported cases; keep audio/video explicit gap for v1. |
+|------|--------|------------|
+| Raw stream events and hook-transformed final message can differ | Medium | Document the distinction and test that final state follows transformed hook output. |
+| Hook API becomes too broad and hard to stabilize | Medium | v1 only supports four explicit hook points and full replacement result types. |
+| JSON-RPC envelope becomes ambiguous | Medium | Validate hook-specific response fields per `hookPoint`; missing means no-op, wrong type means error. |
+| Hook ordering bugs cause nondeterministic behavior | High | Store hooks in registration order and add composition tests. |
+| Error handling leaves partial state | High | Execute hooks before committing effects and assert no assistant message is appended on hook failure. |
+
+## Parallelization Opportunities
+
+- Tasks 1-2 must be sequential.
+- Tasks 3-5 should be sequential because they share `phase.rs` and hook execution helpers.
+- Tasks 6-7 should start after Task 1 and can be implemented after Task 2 while phase integration tests are being expanded.
+- Task 8 can run in parallel after the public API and wire contract are stable.
+- Task 9 must be last.
 
 ## Open Questions
 
-- None. Defaults are chosen for v1: stateless full-history, `store = false`, OpenRouter live required gate, no official OpenAI key requirement.
-
-## References
-
-- OpenAI Responses API: `https://api.openai.com/v1/responses`
-- OpenAI migration guide: `https://developers.openai.com/api/docs/guides/migrate-to-responses`
-- OpenAI function-call streaming: `https://developers.openai.com/api/docs/guides/function-calling#streaming`
-- OpenRouter Responses basic usage: `https://openrouter.ai/docs/api/reference/responses/basic-usage`
+- None. v1 defaults are fixed in this plan.

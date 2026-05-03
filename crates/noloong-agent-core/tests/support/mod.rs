@@ -1,6 +1,7 @@
 use noloong_agent_core::{
-    AgentEventKind, BoxFuture, CancellationToken, ContentBlock, MessageRole, ModelStreamEvent,
-    Result, RunReport, ThinkingBlock, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    AgentEventKind, AgentMessage, BoxFuture, CancellationToken, ContentBlock, MessageRole,
+    ModelStreamEvent, Result, RunReport, ThinkingBlock, ToolOutput, ToolProvider, ToolRequest,
+    ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
@@ -32,6 +33,15 @@ pub fn assert_exact_assistant_text(report: &RunReport, sentinel: &str) {
 
 pub fn assert_assistant_text_contains(report: &RunReport, expected: &str) {
     let visible_text = assistant_visible_text(report);
+    assert_text_contains(&visible_text, expected);
+}
+
+pub fn assert_assistant_messages_contain(messages: &[AgentMessage], expected: &str) {
+    let visible_text = assistant_visible_text_from_messages(messages);
+    assert_text_contains(&visible_text, expected);
+}
+
+fn assert_text_contains(visible_text: &str, expected: &str) {
     assert!(
         visible_text.contains(expected),
         "assistant visible text did not include expected sentinel `{expected}`; visible text: {visible_text}"
@@ -39,9 +49,11 @@ pub fn assert_assistant_text_contains(report: &RunReport, expected: &str) {
 }
 
 pub fn assistant_visible_text(report: &RunReport) -> String {
-    report
-        .state
-        .messages
+    assistant_visible_text_from_messages(&report.state.messages)
+}
+
+pub fn assistant_visible_text_from_messages(messages: &[AgentMessage]) -> String {
+    messages
         .iter()
         .filter(|message| matches!(message.role, MessageRole::Assistant))
         .flat_map(|message| &message.content)

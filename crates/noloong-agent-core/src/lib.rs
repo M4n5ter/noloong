@@ -33,8 +33,11 @@ pub use phase::{
     PhaseContext, PhaseNode, PhaseOutput, PhaseScratch, StandardPhase,
 };
 pub use providers::{
-    BoxFuture, CancellationToken, ContextProvider, ContextRequest, EventSinkFuture, ModelProvider,
-    ModelRequest, ModelStreamSink, ToolCallHook, ToolProvider, ToolRequest,
+    AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AfterModelRequestHookContext,
+    AfterModelRequestHookResult, BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
+    BeforeModelRequestHookContext, BeforeModelRequestHookResult, BoxFuture, CancellationToken,
+    ContextProvider, ContextRequest, EventSinkFuture, ModelProvider, ModelRequest, ModelStreamSink,
+    PhaseHook, ToolCallHook, ToolProvider, ToolRequest,
 };
 pub use reducer::{apply_event, reduce_events};
 pub use responses::{

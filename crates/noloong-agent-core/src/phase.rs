@@ -1,8 +1,12 @@
 use crate::runtime::ToolRuntimeHandles;
 use crate::{
-    AfterToolCallContext, AgentEffect, AgentMessage, BeforeToolCallContext, ContentBlock,
-    ContextRequest, MediaBlock, MediaDelta, MediaSource, ModelRequest, ModelStreamEvent, Result,
-    ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, TurnDecision,
+    AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AfterModelRequestHookContext,
+    AfterModelRequestHookResult, AfterToolCallContext, AgentEffect, AgentMessage,
+    BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
+    BeforeModelRequestHookContext, BeforeModelRequestHookResult, BeforeToolCallContext,
+    ContentBlock, ContextRequest, MediaBlock, MediaDelta, MediaSource, ModelRequest,
+    ModelStreamEvent, PhaseHook, Result, ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput,
+    TurnDecision,
     providers::{BoxFuture, CancellationToken, ModelStreamSink},
 };
 use crate::{AgentRuntime, AgentState};
@@ -157,40 +161,64 @@ async fn context_prepare(context: PhaseContext<'_>) -> Result<PhaseOutput> {
 }
 
 async fn model_request_prepare(context: PhaseContext<'_>) -> Result<PhaseOutput> {
-    let mut output = PhaseOutput::from_scratch(context.scratch);
-    let context_map = context
-        .state
+    let PhaseContext {
+        runtime,
+        run_id,
+        turn_id,
+        state,
+        scratch,
+        cancellation,
+        ..
+    } = context;
+    let mut output = PhaseOutput::from_scratch(scratch);
+    let context_map = state
         .context
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    output.scratch.model_request = Some(ModelRequest {
-        run_id: context.run_id.to_string(),
-        turn_id: context.turn_id,
-        messages: context.state.messages.clone(),
+    let request = ModelRequest {
+        run_id: run_id.to_string(),
+        turn_id,
+        messages: state.messages.clone(),
         context: context_map,
-        tools: context
-            .runtime
+        tools: runtime
             .tool_specs()
             .into_iter()
             .map(|tool| tool.spec())
             .collect(),
         metadata: Default::default(),
-    });
+    };
+    let hook_runner = PhaseHookRunner::new(
+        runtime.phase_hooks(),
+        run_id,
+        turn_id,
+        &state,
+        &cancellation,
+    );
+    output.scratch.model_request = Some(hook_runner.before_model_request(request).await?);
     Ok(output)
 }
 
 async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
-    let mut output = PhaseOutput::from_scratch(context.scratch);
-    context.cancellation.throw_if_cancelled()?;
-    let provider = context.runtime.default_model_provider()?;
+    let PhaseContext {
+        runtime,
+        run_id,
+        turn_id,
+        state,
+        scratch,
+        cancellation,
+        model_stream_sink,
+    } = context;
+    let mut output = PhaseOutput::from_scratch(scratch);
+    cancellation.throw_if_cancelled()?;
+    let provider = runtime.default_model_provider()?;
     let request = output
         .scratch
         .model_request
         .clone()
         .ok_or_else(|| crate::AgentCoreError::Phase("model request was not prepared".into()))?;
     let emitted_events = Arc::new(Mutex::new(Vec::new()));
-    let outer_sink = context.model_stream_sink.clone();
+    let outer_sink = model_stream_sink;
     let emitted_events_for_sink = Arc::clone(&emitted_events);
     let sink: ModelStreamSink = Arc::new(move |event| {
         let emitted_events = Arc::clone(&emitted_events_for_sink);
@@ -203,8 +231,16 @@ async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
             Ok(())
         })
     });
+    let hook_runner = PhaseHookRunner::new(
+        runtime.phase_hooks(),
+        run_id,
+        turn_id,
+        &state,
+        &cancellation,
+    );
+    let request_for_hooks = hook_runner.has_hooks().then(|| request.clone());
     let returned_events = provider
-        .stream_model(request, sink, context.cancellation.clone())
+        .stream_model(request, sink, cancellation.clone())
         .await?;
     let emitted_events = emitted_events.lock().await.clone();
     let events = if emitted_events.is_empty() {
@@ -213,12 +249,158 @@ async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     } else {
         emitted_events
     };
-    output.scratch.model_events = events;
+    output.scratch.model_events = match request_for_hooks {
+        Some(request) => hook_runner.after_model_request(&request, events).await?,
+        None => events,
+    };
     Ok(output)
 }
 
+struct PhaseHookRunner<'a> {
+    hooks: &'a [Arc<dyn PhaseHook>],
+    run_id: &'a str,
+    turn_id: u64,
+    state: &'a AgentState,
+    cancellation: &'a CancellationToken,
+}
+
+impl<'a> PhaseHookRunner<'a> {
+    fn new(
+        hooks: &'a [Arc<dyn PhaseHook>],
+        run_id: &'a str,
+        turn_id: u64,
+        state: &'a AgentState,
+        cancellation: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            hooks,
+            run_id,
+            turn_id,
+            state,
+            cancellation,
+        }
+    }
+
+    fn has_hooks(&self) -> bool {
+        !self.hooks.is_empty()
+    }
+
+    async fn before_model_request(&self, mut request: ModelRequest) -> Result<ModelRequest> {
+        for hook in self.hooks {
+            self.cancellation.throw_if_cancelled()?;
+            if let Some(BeforeModelRequestHookResult { request: next }) = hook
+                .before_model_request(
+                    BeforeModelRequestHookContext {
+                        run_id: self.run_id,
+                        turn_id: self.turn_id,
+                        state: self.state,
+                        request: &request,
+                    },
+                    self.cancellation.clone(),
+                )
+                .await?
+            {
+                request = next;
+            }
+        }
+        Ok(request)
+    }
+
+    async fn after_model_request(
+        &self,
+        request: &ModelRequest,
+        mut events: Vec<ModelStreamEvent>,
+    ) -> Result<Vec<ModelStreamEvent>> {
+        for hook in self.hooks {
+            self.cancellation.throw_if_cancelled()?;
+            if let Some(AfterModelRequestHookResult { events: next }) = hook
+                .after_model_request(
+                    AfterModelRequestHookContext {
+                        run_id: self.run_id,
+                        turn_id: self.turn_id,
+                        state: self.state,
+                        request,
+                        events: &events,
+                    },
+                    self.cancellation.clone(),
+                )
+                .await?
+            {
+                events = next;
+            }
+        }
+        Ok(events)
+    }
+
+    async fn before_assistant_commit(
+        &self,
+        mut events: Vec<ModelStreamEvent>,
+    ) -> Result<Vec<ModelStreamEvent>> {
+        for hook in self.hooks {
+            self.cancellation.throw_if_cancelled()?;
+            if let Some(BeforeAssistantCommitHookResult { events: next }) = hook
+                .before_assistant_commit(
+                    BeforeAssistantCommitHookContext {
+                        run_id: self.run_id,
+                        turn_id: self.turn_id,
+                        state: self.state,
+                        events: &events,
+                    },
+                    self.cancellation.clone(),
+                )
+                .await?
+            {
+                events = next;
+            }
+        }
+        Ok(events)
+    }
+
+    async fn after_assistant_commit(&self, mut message: AgentMessage) -> Result<AgentMessage> {
+        for hook in self.hooks {
+            self.cancellation.throw_if_cancelled()?;
+            if let Some(AfterAssistantCommitHookResult { message: next }) = hook
+                .after_assistant_commit(
+                    AfterAssistantCommitHookContext {
+                        run_id: self.run_id,
+                        turn_id: self.turn_id,
+                        state: self.state,
+                        message: &message,
+                    },
+                    self.cancellation.clone(),
+                )
+                .await?
+            {
+                message = next;
+            }
+        }
+        Ok(message)
+    }
+}
+
 async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
-    let mut output = PhaseOutput::from_scratch(context.scratch);
+    let PhaseContext {
+        runtime,
+        run_id,
+        turn_id,
+        state,
+        scratch,
+        cancellation,
+        ..
+    } = context;
+    let mut output = PhaseOutput::from_scratch(scratch);
+    let hook_runner = PhaseHookRunner::new(
+        runtime.phase_hooks(),
+        run_id,
+        turn_id,
+        &state,
+        &cancellation,
+    );
+    if hook_runner.has_hooks() {
+        output.scratch.model_events = hook_runner
+            .before_assistant_commit(output.scratch.model_events)
+            .await?;
+    }
     let mut thinking: Option<ThinkingBlock> = None;
     let mut media: Option<MediaBlock> = None;
     let mut text = String::new();
@@ -289,6 +471,11 @@ async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
         format!("assistant-{}-{}", context.run_id, context.turn_id),
         content,
     );
+    let message = if hook_runner.has_hooks() {
+        hook_runner.after_assistant_commit(message).await?
+    } else {
+        message
+    };
     output.effects.push(AgentEffect::AppendMessage {
         message: message.clone(),
     });

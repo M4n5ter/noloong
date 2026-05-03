@@ -14,6 +14,10 @@ const crashOnModel = process.argv.includes("--crash-on-model");
 const requestTimeoutOnModel = process.argv.includes("--request-timeout-on-model");
 const mediaStream = process.argv.includes("--media-stream");
 const mediaTool = process.argv.includes("--media-tool");
+const phaseHookMode =
+  process.argv
+    .find((arg) => arg.startsWith("--phase-hook-mode="))
+    ?.slice("--phase-hook-mode=".length) ?? null;
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -49,24 +53,28 @@ for await (const line of rl) {
   }
 
   if (method === "capabilities/list") {
-    result(id, {
-      capabilities: [
-        { type: "model_provider", id: "fixture-model" },
-        {
-          type: "tool",
-          spec: {
-            name: "fixture_echo",
-            description: "Echo text from a stdio JSON-RPC fixture",
-            inputSchema: {
-              type: "object",
-              properties: { text: { type: "string" } },
-              required: ["text"],
-            },
+    const capabilities = [
+      { type: "model_provider", id: "fixture-model" },
+      {
+        type: "tool",
+        spec: {
+          name: "fixture_echo",
+          description: "Echo text from a stdio JSON-RPC fixture",
+          inputSchema: {
+            type: "object",
+            properties: { text: { type: "string" } },
+            required: ["text"],
           },
         },
-        { type: "context_provider", id: "fixture-context" },
-        { type: "phase_node", id: "fixture.phase" },
-      ],
+      },
+      { type: "context_provider", id: "fixture-context" },
+      { type: "phase_node", id: "fixture.phase" },
+    ];
+    if (phaseHookMode) {
+      capabilities.push({ type: "phase_hook", id: "fixture-phase-hook" });
+    }
+    result(id, {
+      capabilities,
     });
     continue;
   }
@@ -94,6 +102,12 @@ for await (const line of rl) {
     const messages = params.request.messages ?? [];
     const hasToolResult = messages.some((message) => message.role === "tool_result");
     stream(streamId, { type: "started", stream_id: streamId });
+    if (params.request.metadata?.fixtureHook === "before_model_request") {
+      stream(streamId, { type: "text_delta", text: "hooked request" });
+      stream(streamId, { type: "finished", stop_reason: "stop" });
+      result(id, { streamId });
+      continue;
+    }
     if (streamError) {
       stream(streamId, { type: "failed", error: "fixture stream failed" });
       result(id, { streamId });
@@ -158,6 +172,40 @@ for await (const line of rl) {
       resolvedToolCalls: [],
       toolOutputs: [],
     });
+    continue;
+  }
+
+  if (method === "phase_hook/run") {
+    if (phaseHookMode === "malformed") {
+      result(id, { modelRequest: "not an object" });
+      continue;
+    }
+    if (params.hookPoint === "before_model_request" && phaseHookMode === "before-request") {
+      const modelRequest = params.modelRequest;
+      modelRequest.metadata = {
+        ...(modelRequest.metadata ?? {}),
+        fixtureHook: "before_model_request",
+      };
+      result(id, { modelRequest });
+      continue;
+    }
+    if (params.hookPoint === "after_model_request" && phaseHookMode === "after-events") {
+      result(id, {
+        modelEvents: [
+          { type: "started", stream_id: "phase-hook-stream" },
+          { type: "text_delta", text: "hooked events" },
+          { type: "finished", stop_reason: "stop" },
+        ],
+      });
+      continue;
+    }
+    if (params.hookPoint === "after_assistant_commit" && phaseHookMode === "after-assistant") {
+      const assistantMessage = params.assistantMessage;
+      assistantMessage.content = [{ type: "text", text: "hooked assistant" }];
+      result(id, { assistantMessage });
+      continue;
+    }
+    result(id, {});
     continue;
   }
 
