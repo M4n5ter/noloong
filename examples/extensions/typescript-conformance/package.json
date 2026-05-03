@@ -1,0 +1,16 @@
+{
+  "name": "noloong-typescript-conformance-extension",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "start": "tsx src/full-conformance-extension.ts",
+    "conformance": "cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- tsx src/full-conformance-extension.ts"
+  }
+}

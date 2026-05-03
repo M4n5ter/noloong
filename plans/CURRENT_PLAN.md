@@ -1,324 +1,248 @@
-# Implementation Plan: Reusable Extension Conformance Runner
+# Implementation Plan: Extension Wire Contract Documentation
 
 ## Overview
 
-把当前 crate 内部的 JSON-RPC extension conformance suite 提炼成第三方扩展作者也能运行的测试工具。交付形态同时包含 Rust public runner API 和 `noloong-extension-conformance` CLI。默认采用 hybrid profile：任意扩展都能运行通用 lifecycle / capability 校验；如果扩展实现标准 `conformance-*` capability，则额外运行完整 adapter payload、stream、tool hook 和 compaction 行为测试。
-
-内部 fixture-only 的负向测试仍留在 crate tests 中，用于验证 core bridge 对 malformed result、duplicate capability、wrong response id、stdout close、timeout 等异常行为的健壮性；这些不要求第三方扩展实现。
+当前扩展文档已经说明了 Noloong stdio JSON-RPC extension 的能力模型，但对插件开发者仍不够可执行：每个 method、phase hook、tool hook 的输入结构、返回结构、可省略字段和 no-op 语义没有形成完整 contract。这个计划将 `EXTENSIONS.md` 升级为插件作者可以直接照着实现 handler 的 wire contract，并把 TS/Python 示例 README 与 conformance runner 说明对齐。
 
 ## Architecture Decisions
 
-- Runner API 和 CLI 共用同一套 case engine，避免 CLI 与内部测试逻辑漂移。
-- `ExtensionConformanceProfile::Hybrid` 作为默认值：第三方接入成本低，同时能在实现标准 conformance capability 后获得强校验。
-- `Strict` profile 要求完整标准 conformance capability，适合 extension SDK、template 和 CI gate。
-- `Generic` profile 只校验 JSON-RPC lifecycle、typed capability decode、runtime registration 和 shutdown，适合任意现有扩展的基础健康检查。
-- 不新增 `clap` 等 CLI 依赖；v1 用轻量手写 argv parser，保持 core crate 依赖面克制。
-- Public runner 只暴露正向/协议契约测试；内部 bridge robustness tests 继续使用 dedicated fixture modes。
-
-## Public API Contract
-
-新增 public API 并从 `lib.rs` 导出：
-
-- `ExtensionConformanceConfig`
-- `ExtensionConformanceProfile::{Generic, Hybrid, Strict}`
-- `ExtensionConformanceReport`
-- `ExtensionConformanceCaseReport`
-- `ExtensionConformanceCaseStatus::{Passed, Failed, Skipped}`
-- `run_extension_conformance(config) -> Result<ExtensionConformanceReport>`
-
-`ExtensionConformanceConfig` 持有 `StdioExtensionConfig`，并提供 builder：
-
-- `new(stdio: StdioExtensionConfig)`
-- `profile(ExtensionConformanceProfile)`
-- `fail_fast(bool)`
-
-新增 CLI binary：`noloong-extension-conformance`
-
-- Invocation: `noloong-extension-conformance [--profile generic|hybrid|strict] [--json] [--fail-fast] -- <command> [args...]`
-- Exit code `0` only when all non-skipped cases pass.
-- Text output 包含 total / passed / failed / skipped 和失败 case message。
-- `--json` 输出 `ExtensionConformanceReport`。
-
-标准 full conformance capability ids：
-
-- `conformance-model`
-- `conformance_echo`
-- `conformance-context`
-- `conformance.phase`
-- `conformance-hook`
-- `conformance-tool-hook`
-- `conformance-compaction`
+- `EXTENSIONS.md` 作为插件作者的权威 wire contract；`ARCHITECTURE.md` 只保留架构意图并链接到 contract 文档。
+- 文档采用真实 JSON-RPC payload 形状，而不是 Rust trait 术语；字段命名必须匹配当前 serde wire shape。
+- 每个 method 使用同一模板：调用时机、params、result、no-op 语义、失败语义、最小 handler 示例。
+- 暂不引入 machine-readable JSON Schema 文件；先用 Markdown contract、具体 JSON snippet、TS/Python 示例和 conformance runner 保持开发体验闭环。
+- 示例 helper 仍保持 example-local SDK skeleton，不承诺 npm/PyPI 稳定 SDK。
 
 ## Dependency Graph
 
-1. Runner report/config/profile public types
-2. Shared positive conformance case engine
-3. Existing internal suite refactor
-4. CLI binary
-5. Documentation and plan updates
-6. Full verification gate
+1. 从 Rust serde types 和 JSON-RPC bridge 固化真实 wire shapes。
+2. 重写 `EXTENSIONS.md` 的公共结构与 method contracts。
+3. 补齐 phase hook、tool hook、compaction 的逐 hook-point 输入/输出说明。
+4. 更新 TS/Python 示例 README 与架构文档链接。
+5. 增加轻量文档覆盖测试，防止后续新增 hook/method 后文档再次缺失。
+6. 运行 conformance、语言示例、Rust workspace 检查。
 
 ## Task List
 
-### Phase 1: Runner Foundation
+### Phase 1: Contract Inventory
 
-## Task 1: Add Public Conformance Types
+## Task 1: Inventory Actual Wire Shapes
 
-**Description:** 新增 extension conformance runner 的 public report/config/profile/case status 类型，并从 crate root 导出。类型需要 serde-friendly，方便 CLI JSON 输出、第三方测试集成和内部 tests 断言。
+**Description:** 对照 `jsonrpc.rs`、`types.rs`、`providers.rs`、`phase.rs` 和 `compaction.rs`，整理当前所有 extension-facing JSON shape。重点确认 method params 是否使用 wrapper、flatten payload、enum tag、`camelCase` 字段和 `snake_case` variant。
 
 **Acceptance criteria:**
 
-- [x] `ExtensionConformanceProfile` 支持 `Generic`、`Hybrid`、`Strict`，默认行为为 `Hybrid`。
-- [x] `ExtensionConformanceReport` 能表达 total、passed、failed、skipped、case reports 和 overall success。
-- [x] `ExtensionConformanceCaseReport` 包含 case name、status、message、elapsed duration。
-- [x] `ExtensionConformanceConfig` 持有 `StdioExtensionConfig`，支持 profile 和 fail-fast 配置。
-- [x] Public API 从 `lib.rs` 导出，不暴露 crate-private test helper。
+- [x] 列出所有 JSON-RPC method：`initialize`、`capabilities/list`、`model/stream`、`stream/event`、`tool/execute`、`context/apply`、`phase/run`、`phase_hook/run`、`tool_hook/run`、`compaction/summarize`、`shutdown`。
+- [x] 列出所有 hook point：`before_model_request`、`after_model_request`、`before_assistant_commit`、`after_assistant_commit`、`before_tool_call`、`after_tool_call`。
+- [x] 确认 common shapes 覆盖 `AgentState`、`AgentMessage`、`ContentBlock`、`ModelStreamEvent`、`ToolSpec`、`ToolCall`、`ToolOutput`、`AgentEffect`、`PhaseScratch`、`PhaseOutput`、`ToolPermissionDecision`、`CompactionSummaryRequest`。
 
 **Verification:**
 
-- [x] `cargo test -p noloong-agent-core extension_conformance`
-- [x] `cargo fmt --check`
+- [x] `rg -n "request\\(|phase_hook/run|tool_hook/run|compaction/summarize" crates/noloong-agent-core/src/jsonrpc.rs`
+- [x] `rg -n "struct ModelRequest|enum ContentBlock|enum ModelStreamEvent|struct PhaseOutput|struct CompactionSummaryRequest" crates/noloong-agent-core/src`
 
 **Dependencies:** None
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/extension_conformance.rs`
-- `crates/noloong-agent-core/src/lib.rs`
+- `crates/noloong-agent-core/docs/EXTENSIONS.md`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-## Task 2: Implement Shared Positive Case Engine
+### Checkpoint: Inventory
 
-**Description:** 把当前 `tests/jsonrpc_conformance.rs` 中可复用的正向 conformance flow 抽成 runner case engine。Runner 负责连接扩展、读取 manifest/capabilities、按 profile 选择 case、构造 runtime 并验证标准 conformance capability 的行为。
+- [x] 所有 public extension methods 和 hook points 都有真实 wire shape 来源。
+- [x] 后续文档不需要靠推测补字段。
+
+### Phase 2: Method Contracts
+
+## Task 2: Rewrite Core Extension Method Contracts
+
+**Description:** 重写 `EXTENSIONS.md` 的 lifecycle、capability、model、tool、context、phase 和 shutdown 章节，让插件作者能直接知道每个 handler 接收什么、必须返回什么、返回空对象代表什么。
 
 **Acceptance criteria:**
 
-- [x] `Generic` profile 校验 `initialize`、`capabilities/list`、typed capability decode、runtime registration、shutdown。
-- [x] `Strict` profile 要求全部标准 `conformance-*` capability 存在，并运行完整行为 case。
-- [x] `Hybrid` profile 在没有标准 conformance capability 时跳过 full cases。
-- [x] `Hybrid` profile 在只实现部分标准 conformance capability 时 fail，并报告缺失 ids。
-- [x] Case engine 支持 fail-fast；关闭 fail-fast 时收集所有 case 结果。
-- [x] Runner 不要求第三方实现 malformed/duplicate/wrong-id 等 fixture-only modes。
+- [x] `initialize` 明确 `protocolVersion` 输入和 `manifest` 输出。
+- [x] `capabilities/list` 明确所有 capability variant 的 JSON shape。
+- [x] `model/stream` 明确 `providerId`、`streamId`、`request`、inline `events` 与 `stream/event` notification 的关系。
+- [x] `tool/execute` 明确 `toolName` wrapper 与内部 `request` 的完整字段。
+- [x] `context/apply` 与 `phase/run` 明确 effects、scratch、stream events、tool outputs 的返回语义。
+- [x] `shutdown` 明确应返回 `{}`，并说明可在响应后退出进程。
 
 **Verification:**
 
-- [x] Existing fixture 在 `Strict` profile 下全部通过。
-- [x] Model-only fixture mode 在 `Hybrid` profile 下 generic pass、full cases skipped。
-- [x] Partial conformance fixture mode 在 `Hybrid` profile 下失败并报告 missing capability。
+- [x] `rg -n "## .*model/stream|providerId|streamId|tool/execute|phase/run|shutdown" crates/noloong-agent-core/docs/EXTENSIONS.md`
+- [x] 手动检查每个 method section 都包含 params 和 result JSON snippet。
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/extension_conformance.rs`
-- `crates/noloong-agent-core/tests/jsonrpc_conformance.rs`
-- `crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+- `crates/noloong-agent-core/docs/EXTENSIONS.md`
 
 **Estimated scope:** M
 
-### Checkpoint: Runner Core
+## Task 3: Document Hook Point Contracts
 
-- [x] Public runner API compiles and is exported.
-- [x] Positive conformance cases can be executed without depending on test-only functions.
-- [x] Existing fixture passes strict runner smoke test.
-
-### Phase 2: Internal Suite Refactor
-
-## Task 3: Preserve Internal Negative Bridge Tests
-
-**Description:** 保留现有 bridge robustness coverage，但从内部 suite 中移除已经迁移到 runner 的 positive duplication。Fixture-only negative modes 继续验证 malformed result、duplicate capability、JSON-RPC error、wrong response id、stdout close、cancellation 和 stream timeout 等 core behavior。
+**Description:** 为 `phase_hook/run` 和 `tool_hook/run` 增加逐 hook-point contract。每个 hook point 必须写清楚公共 envelope 字段、专属 payload 字段、允许返回字段、字段省略时的 no-op 语义，以及 malformed response 的影响。
 
 **Acceptance criteria:**
 
-- [x] `tests/jsonrpc_conformance.rs` 复用 runner 或 shared constants 验证 positive path。
-- [x] `malformed-*` result tests 仍覆盖 active phase failure。
-- [x] `duplicate-*` capability tests 仍覆盖 registration failure。
-- [x] `wrong-response-id`、`stdout-close`、`stream-hangs`、`malformed-active-stream` 等 stream/request edge cases 仍保留。
-- [x] Negative tests 不出现在 public runner 默认 case list 中。
+- [x] `before_model_request` 说明输入 `modelRequest`，返回 `modelRequest` 可重写 request。
+- [x] `after_model_request` 说明输入 `modelRequest` 和 `modelEvents`，返回 `modelEvents` 可重写 stream result。
+- [x] `before_assistant_commit` 说明输入 `modelEvents`，返回 `modelEvents` 可重写 commit source。
+- [x] `after_assistant_commit` 说明输入 `assistantMessage`，返回 `assistantMessage` 可重写已构造消息。
+- [x] `before_tool_call` 说明输入 `toolCall`、`toolSpec`、`permissions`，返回 `decision` 会进入 audit。
+- [x] `after_tool_call` 说明输入 `toolCall`、`output`，返回 `content`、`details`、`isError` 可重写 tool output。
 
 **Verification:**
 
-- [x] `cargo nextest run -p noloong-agent-core --test jsonrpc_conformance`
+- [x] `rg -n "before_model_request|after_model_request|before_assistant_commit|after_assistant_commit|before_tool_call|after_tool_call" crates/noloong-agent-core/docs/EXTENSIONS.md`
+- [x] 手动检查每个 hook point 至少有一个 params snippet 和一个 result snippet。
 
 **Dependencies:** Task 2
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/tests/jsonrpc_conformance.rs`
-- `crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+- `crates/noloong-agent-core/docs/EXTENSIONS.md`
 
 **Estimated scope:** M
 
-## Task 4: Add Runner-Specific Integration Tests
+### Checkpoint: Method and Hook Contracts
 
-**Description:** 新增 tests 覆盖 public runner profile semantics 和 report shape，确保第三方可依赖 API/CLI 的稳定行为。
+- [x] 插件作者不读 Rust 源码也能实现所有 method handler。
+- [x] 每个 hook point 的输入和输出都能从文档直接复制为 JSON 对照。
+
+### Phase 3: Shared Shapes and Examples
+
+## Task 4: Add Common JSON Shape Reference
+
+**Description:** 在 `EXTENSIONS.md` 中增加 common shapes 参考，覆盖所有 method 和 hook 会复用的数据结构。文档应突出 required/optional 字段、tag enum 写法、thinking/media/tool-call 的特殊结构。
 
 **Acceptance criteria:**
 
-- [x] `Strict` profile 对完整 fixture 返回 all passed。
-- [x] `Hybrid` profile 对 model-only fixture 返回 generic passed、full skipped。
-- [x] `Hybrid` profile 对 partial fixture 返回 failed report。
-- [x] `fail_fast(true)` 在首个失败 case 后停止后续 case。
-- [x] Report serde round-trip 保持 case status、message 和 counts。
+- [x] `AgentMessage`、`ContentBlock`、`ThinkingBlock`、`MediaBlock`、`ToolCall`、`ToolSpec`、`ToolOutput` 均有最小 JSON 示例。
+- [x] `ModelStreamEvent` 覆盖 `started`、`thinking_delta`、`text_delta`、`media_delta`、`tool_call`、`finished`、`failed`。
+- [x] `AgentEffect` 覆盖 `append_message`、`patch_context`、`set_available_tools`、`compact_messages`。
+- [x] `PhaseScratch` 和 `PhaseOutput` 说明 tuple-like tool output 在 JSON 中的表现。
+- [x] 文档明确 optional 字段省略、空数组和空对象的推荐写法。
 
 **Verification:**
 
-- [x] `cargo test -p noloong-agent-core --test extension_conformance`
+- [x] `rg -n "AgentState|AgentMessage|ContentBlock|ModelStreamEvent|PhaseScratch|PhaseOutput|AgentEffect" crates/noloong-agent-core/docs/EXTENSIONS.md`
+- [x] 手动检查 JSON snippet 的 field casing 与 Rust serde attributes 一致。
 
-**Dependencies:** Task 2
+**Dependencies:** Task 3
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/tests/extension_conformance.rs`
-- `crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+- `crates/noloong-agent-core/docs/EXTENSIONS.md`
 
 **Estimated scope:** M
 
-### Checkpoint: Test Coverage
+## Task 5: Align TS/Python Example Documentation
 
-- [x] Public runner profile semantics 有独立测试。
-- [x] Internal negative suite 仍完整通过。
-- [x] Positive logic 不再在多个 tests 中复制实现。
-
-### Phase 3: CLI
-
-## Task 5: Add `noloong-extension-conformance` Binary
-
-**Description:** 在 `noloong-agent-core` crate 中新增 CLI binary，包装 public runner API，允许第三方扩展作者用命令行直接验证自己的 stdio JSON-RPC extension。
+**Description:** 更新 TypeScript 和 Python conformance 示例 README，让它们从“如何运行示例”升级为“如何按 contract 写 handler”。README 需要列出 handler method mapping，并指向 `EXTENSIONS.md` 的 contract 章节。
 
 **Acceptance criteria:**
 
-- [x] 支持 `--profile generic|hybrid|strict`。
-- [x] 支持 `--json` 输出 machine-readable report。
-- [x] 支持 `--fail-fast`。
-- [x] 使用 `-- <command> [args...]` 分隔 runner args 与 extension command args。
-- [x] Invalid argv 返回非零 exit code 并打印 concise usage。
-- [x] Runner failure 返回非零 exit code；skipped cases 不导致失败。
+- [x] TS README 列出每个 handler key 对应的 JSON-RPC method。
+- [x] Python README 列出每个 function 对应的 JSON-RPC method。
+- [x] 两个 README 都说明 stdout/stderr 分离、`stream/event` notification 和 strict conformance 命令。
+- [x] README 不把 example-local helper 描述成稳定 SDK。
 
 **Verification:**
 
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs --mode=all-capabilities,adapter-payloads,tool-hook-payloads`
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile hybrid --json -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+- [x] `rg -n "phase_hook/run|tool_hook/run|compaction/summarize|EXTENSIONS.md" examples/extensions/typescript-conformance examples/extensions/python-conformance`
+- [x] `npm run check` in `examples/extensions/typescript-conformance`
+- [x] `python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py`
 
-**Dependencies:** Tasks 1-2
+**Dependencies:** Task 4
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
-- `crates/noloong-agent-core/src/extension_conformance.rs`
+- `examples/extensions/typescript-conformance/README.md`
+- `examples/extensions/python-conformance/README.md`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-## Task 6: Add CLI Smoke Tests
+### Checkpoint: Author Usability
 
-**Description:** 增加 CLI-level smoke tests，验证 exit code、text summary、JSON output 和 invalid argv behavior。测试应复用现有 Node fixture，不依赖真实外部服务。
+- [x] `EXTENSIONS.md` 是完整 contract。
+- [x] TS/Python 示例 README 能把 contract 映射到具体 handler。
+
+### Phase 4: Drift Guard and Final Verification
+
+## Task 6: Add Documentation Coverage Guard
+
+**Description:** 增加轻量测试，确保 `EXTENSIONS.md` 至少覆盖当前所有 extension method、standard hook point、strict conformance capability id 和核心 shared shape 名称。这个测试不替代人工审阅，但能防止未来新增协议点后文档完全遗漏。
 
 **Acceptance criteria:**
 
-- [x] Strict fixture smoke exit code 为 `0`。
-- [x] Hybrid model-only smoke exit code 为 `0`，并包含 skipped count。
-- [x] Invalid profile 或缺少 `-- <command>` exit code 非 `0`。
-- [x] JSON output 可反序列化为 `ExtensionConformanceReport`。
+- [x] 测试断言所有 JSON-RPC method 名称都出现在 `EXTENSIONS.md`。
+- [x] 测试断言所有 hook point 名称都出现在 `EXTENSIONS.md`。
+- [x] 测试断言 strict conformance ids 都出现在 `EXTENSIONS.md` 或示例 README 中。
+- [x] 测试失败信息能指出缺失的具体文档 token。
 
 **Verification:**
 
-- [x] `cargo test -p noloong-agent-core --test extension_conformance_cli`
+- [x] `cargo test -p noloong-agent-core extension_docs_cover_current_contract`
 
 **Dependencies:** Task 5
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/tests/extension_conformance_cli.rs`
-
-**Estimated scope:** M
-
-### Checkpoint: CLI
-
-- [x] CLI 可以被第三方扩展作者直接运行。
-- [x] Text 和 JSON 输出都被测试覆盖。
-- [x] CLI 和 Rust API 共享同一个 runner engine。
-
-### Phase 4: Documentation and Final Verification
-
-## Task 7: Update Architecture Documentation
-
-**Description:** 更新 `ARCHITECTURE.md` 中 Process Extension Bridge 章节，把当前“内部 suite 不是 public runner”的描述替换为 public runner 设计，并说明 profile、CLI 示例和标准 conformance capability contract。
-
-**Acceptance criteria:**
-
-- [x] 文档解释 `Generic`、`Hybrid`、`Strict` 的区别。
-- [x] 文档列出标准 `conformance-*` capability ids。
-- [x] 文档给出 CLI text 和 JSON 模式示例。
-- [x] “内部 suite 不是对第三方扩展作者暴露的 public runner” 这类过期描述被移除。
-- [x] `## 后续演进方向` 中删除或改写该已完成待办。
-
-**Verification:**
-
-- [x] `rg "不是对第三方扩展作者暴露|可复用的 extension conformance runner" crates/noloong-agent-core/docs/ARCHITECTURE.md`
-
-**Dependencies:** Tasks 1-6
-
-**Files likely touched:**
-
-- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `crates/noloong-agent-core/tests/extension_language_examples.rs`
+- or `crates/noloong-agent-core/tests/extension_docs_contract.rs`
 
 **Estimated scope:** S
 
-## Task 8: Run Full Quality Gate
+## Task 7: Run Full Extension Verification Gate
 
-**Description:** 运行完整格式、lint、test 和 fixture syntax gate，确保 runner extraction 没有破坏 agent core、JSON-RPC bridge、provider、phase hook、compaction 或 SSE 行为。
+**Description:** 运行文档和示例相关的最终验证，确保 contract 文档没有破坏现有 conformance 示例，也没有引入格式或 lint 问题。
 
 **Acceptance criteria:**
 
-- [x] Formatting clean。
-- [x] Clippy clean。
-- [x] Workspace tests pass。
-- [x] Node fixture syntax valid。
-- [x] CLI strict/hybrid smoke commands pass。
+- [x] Python example 通过 strict conformance。
+- [x] TypeScript example 通过 typecheck 和 strict conformance。
+- [x] Rust integration tests 覆盖语言示例和文档 coverage guard。
+- [x] Workspace format、clippy、nextest 均通过。
 
 **Verification:**
 
+- [x] `python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py`
+- [x] `npm run check` in `examples/extensions/typescript-conformance`
+- [x] `npm run conformance` in `examples/extensions/typescript-conformance`
+- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- python3 examples/extensions/python-conformance/full_conformance_extension.py`
+- [x] `cargo test -p noloong-agent-core --test extension_language_examples`
 - [x] `cargo fmt --check`
 - [x] `cargo clippy --workspace --all-targets --all-features`
 - [x] `cargo nextest run --workspace`
-- [x] `node --check crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs --mode=all-capabilities,adapter-payloads,tool-hook-payloads`
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile hybrid -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+- [x] `git diff --check`
 
-**Dependencies:** Tasks 1-7
+**Dependencies:** Task 6
 
 **Files likely touched:**
 
-- No new files expected beyond previous tasks
+- None
 
 **Estimated scope:** S
 
 ### Checkpoint: Complete
 
-- [x] Public runner API exists and is documented.
-- [x] CLI exists and is tested.
-- [x] Internal negative conformance suite still protects bridge robustness.
-- [x] Full workspace quality gate passes.
-- [x] `plans/CURRENT_PLAN.md` remains aligned with implemented behavior.
+- [x] `EXTENSIONS.md` contains implementation-grade wire contracts for every extension method and hook point.
+- [x] TS/Python examples point plugin authors to the exact contract and still pass strict conformance.
+- [x] Rust tests include a guard against obvious documentation drift.
+- [x] Full workspace verification passes.
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Public runner overfits current fixture | High | Split generic/hybrid/strict profiles; only strict requires standard conformance ids. |
-| Negative bridge tests accidentally become third-party requirements | Medium | Keep malformed/duplicate/wrong-id modes internal and document the boundary. |
-| CLI adds dependency bloat | Low | Use manual argv parser for v1. |
-| Positive conformance logic is duplicated between runner and tests | Medium | Internal tests should call runner where possible and reserve custom code for negative cases. |
-| Partial conformance capability creates confusing skips | Medium | Hybrid treats partial standard capability set as failure with explicit missing ids. |
-
-## Parallelization Opportunities
-
-- Tasks 1-2 are sequential foundation work.
-- After Task 2, Task 3 and Task 4 can be done in parallel if they coordinate runner API names.
-- Task 5 depends on runner API but can proceed before all negative suite cleanup is complete.
-- Task 7 can begin after public API and CLI names are stable, then be finalized after tests pass.
+| 文档 JSON shape 与 serde wire shape 漂移 | High | 从 Rust source inventory 开始，并加入 docs coverage guard |
+| 文档过长但仍难用 | Medium | 每个 method 使用统一模板，并在 hook point 处给最小 params/result snippet |
+| README 与 `EXTENSIONS.md` 重复导致维护成本上升 | Medium | README 只保留 handler mapping 和运行方式，完整字段 contract 只放 `EXTENSIONS.md` |
+| 文档测试过弱 | Low | 本阶段只防遗漏；完整行为仍由 strict conformance 示例验证 |
 
 ## Open Questions
 
-- None. Decisions locked: API + CLI, default `Hybrid` profile, no new CLI dependency, internal negative tests remain private.
+- None.

@@ -694,7 +694,7 @@ JSON-RPC bridge 采用 core strict conformance policy：
 
 `ContentBlock::Media` 和 `ModelStreamEvent::MediaDelta` 也走同一套 typed JSON contract。外部语言扩展不需要新的 bridge 方法；JS/TS/Python provider 只要按 serde JSON shape 发送 `media` content block 或 `media_delta` stream event，runtime 就会按 Rust-native provider 的同一语义处理。
 
-这个设计的边界是：外部语言扩展不需要链接 Rust ABI，只需要实现 newline-delimited JSON-RPC 2.0。JS/TS 可以用 npm 生态，Python 可以用自己的 HTTP/model SDK，Rust core 只关心 typed JSON contract。
+这个设计的边界是：外部语言扩展不需要链接 Rust ABI，只需要实现 newline-delimited JSON-RPC 2.0。JS/TS 可以用 npm 生态，Python 可以用自己的 HTTP/model SDK，Rust core 只关心 typed JSON contract。面向扩展作者的完整 wire contract、quickstart 和 TS/Python 示例说明位于 `docs/EXTENSIONS.md`；本文档只保留架构级边界。
 
 extension conformance runner 把正向协议契约暴露给第三方扩展作者和 SDK/template CI。Rust 调用方可以使用 `run_extension_conformance(ExtensionConformanceConfig)`，命令行用户可以直接运行 `noloong-extension-conformance`。
 
@@ -1256,9 +1256,20 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p noloong-agent-core --examples
+cargo test -p noloong-agent-core --test extension_language_examples
+python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py
 node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
 node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs
 node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
+```
+
+扩展作者示例门：
+
+```bash
+cd examples/extensions/typescript-conformance
+npm install
+npm run check
+npm run conformance
 ```
 
 真实 provider 手动门：

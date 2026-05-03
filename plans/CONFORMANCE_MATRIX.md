@@ -9,9 +9,20 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p noloong-agent-core --examples
+cargo test -p noloong-agent-core --test extension_language_examples
+python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py
 node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
 node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs
 node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
+```
+
+## Extension Authoring Gate
+
+```bash
+cd examples/extensions/typescript-conformance
+npm install
+npm run check
+npm run conformance
 ```
 
 ## Manual External Gate
@@ -51,6 +62,9 @@ Responses-compatible live gate 只要求 `OPENROUTER_API_KEY`，默认使用 `op
 | Structured thinking | Thinking events/content preserve display text, raw JSON/object/list, summary kind, and replay descriptor | `thinking_type_serde_round_trips_structured_payloads`, `thinking_details_preserve_raw_json_and_render_summary_delta`, `object_reasoning_preserves_raw_snapshot_and_summary_kind`, `arbitrary_object_reasoning_preserves_raw_snapshot_without_text` | `cargo test --workspace` | None |
 | Provider-neutral media model | Media content/events preserve kind, source, MIME/name, inline base64 chunks, provider refs, ordering, tool outputs, and hook rewrites | `media_type_serde_round_trips_provider_neutral_payloads`, `assistant_commit_media_ordering`, `tool_output_media_preserved`, `after_tool_hook_can_rewrite_to_media` | `cargo test --workspace` | None |
 | JSON-RPC media contract | External language providers and tools can send media through the existing typed JSON-RPC bridge without new methods | `jsonrpc_model_stream_media_delta`, `jsonrpc_tool_output_media` | `cargo test --workspace` | None |
+| Extension author docs | Third-party authors can discover the stdio JSON-RPC contract, conformance profiles, and TS/Python examples without reading Rust source | `rg "typescript-conformance|python-conformance|EXTENSIONS.md" README.md crates/noloong-agent-core/docs/ARCHITECTURE.md plans/CONFORMANCE_MATRIX.md` | manual audit | None |
+| TypeScript extension conformance example | Example-local TS SDK skeleton implements all standard conformance capabilities and passes strict public runner when npm dependencies are installed | `npm run check`, `npm run conformance` in `examples/extensions/typescript-conformance`; conditional `typescript_conformance_example_passes_strict_profile_when_dependencies_are_available` | extension authoring gate; `cargo test -p noloong-agent-core --test extension_language_examples` | Default Rust test skips TS when `tsx` is unavailable |
+| Python extension conformance example | Standard-library Python SDK skeleton implements all standard conformance capabilities and passes strict public runner | `python_conformance_example_passes_strict_profile`, `python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py` | default local gate | None |
 | Built-in Chat Completions payload | Messages, tool specs, tool results, provider extra body, and scoped thinking replay map to compatible Chat Completions JSON | `payload_maps_messages_tools_and_replay_descriptor`, `payload_does_not_replay_reasoning_across_provider_scope`, `config_carries_provider_specific_body_without_core_presets` | `cargo test --workspace` | None |
 | Built-in Chat Completions media input | Text-only messages stay compact; image, audio, file, video URI/inline, and opt-in provider video references map to portable Chat Completions content parts with fail-fast unsupported cases | `payload_text_only_remains_string`, `payload_image_uri_content_part`, `payload_image_inline_content_part`, `payload_system_media_rejected`, `payload_audio_inline_wav`, `payload_audio_uri_rejected`, `payload_file_provider_reference`, `payload_file_uri_rejected`, `payload_video_uri_content_part`, `payload_video_inline_content_part`, `payload_provider_video_default_rejected`, `payload_provider_video_file_mapping_when_enabled` | `cargo test --workspace` | None |
 | Built-in Chat Completions media output | Output modalities/audio config maps into requests; streamed audio payloads become `MediaDelta` with transcript metadata and scoped same-provider replay while preserving provider source and inline data separately | `payload_audio_output_config`, `payload_audio_modality_requires_audio_config`, `stream_audio_delta_to_media_event`, `runtime_commits_streamed_audio_with_provider_source_and_data`, `payload_assistant_audio_replay`, `payload_assistant_media_cross_provider_ignored`, `payload_assistant_unsupported_media_rejected` | `cargo test --workspace` | None |

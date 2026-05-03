@@ -9,7 +9,7 @@
 - Process extensions: newline-delimited JSON-RPC 2.0 over stdio.
 - UX layer: `Agent` with persistent state, subscriptions, `prompt`, `continue_run`, `reset`, `abort`, `wait_for_idle`, steering, and follow-up queues.
 
-Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md).
+Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md). Extension authoring details live in [`crates/noloong-agent-core/docs/EXTENSIONS.md`](crates/noloong-agent-core/docs/EXTENSIONS.md).
 
 ## Examples
 
@@ -111,12 +111,32 @@ async fn main() -> noloong_agent_core::Result<()> {
 
 Anthropic-compatible routers should also stay caller-owned config. For example, OpenRouter's Anthropic Messages endpoint can use `base_url("https://openrouter.ai/api")`, `api_key_env("OPENROUTER_API_KEY")`, `auth_scheme(AnthropicAuthScheme::Bearer)`, and `without_anthropic_version()` without adding an OpenRouter preset to core.
 
-The TS AI SDK stdio provider example lives in `examples/extensions/ai-sdk-provider`:
+## Extension Authoring
+
+The deterministic conformance examples are the fastest way to learn the stdio JSON-RPC extension contract. They do not call a real model; they exist to validate the bridge surface and pass `noloong-extension-conformance --profile strict`.
+
+TypeScript:
+
+```bash
+cd examples/extensions/typescript-conformance
+npm install
+npm run check
+npm run conformance
+```
+
+Python:
+
+```bash
+python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py
+cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- python3 examples/extensions/python-conformance/full_conformance_extension.py
+```
+
+The TS AI SDK stdio provider example lives in `examples/extensions/ai-sdk-provider`. It is a real provider integration example, not the strict conformance template:
 
 ```bash
 cd examples/extensions/ai-sdk-provider
 npm install
-OPENAI_API_KEY=... npm run start
+OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.5-mini npm run start
 ```
 
 The Rust side for launching that provider is:
@@ -192,9 +212,20 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p noloong-agent-core --examples
+cargo test -p noloong-agent-core --test extension_language_examples
+python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py
 node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
 node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs
 node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
+```
+
+Extension authoring gate:
+
+```bash
+cd examples/extensions/typescript-conformance
+npm install
+npm run check
+npm run conformance
 ```
 
 Manual external gate:

@@ -31,7 +31,7 @@ function stream(streamId: string, event: unknown) {
 }
 
 async function streamWithAiSdk(streamId: string, request: any) {
-  const model = openai(process.env.OPENAI_MODEL ?? "gpt-4.1-mini");
+  const model = openai(process.env.OPENAI_MODEL ?? "gpt-5.5-mini");
   const prompt = (request.messages ?? [])
     .flatMap((message: any) =>
       (message.content ?? [])

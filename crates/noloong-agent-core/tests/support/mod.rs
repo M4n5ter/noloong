@@ -30,6 +30,14 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crate is inside crates/noloong-agent-core")
+        .to_path_buf()
+}
+
 pub fn fast_one_retry_reconnect() -> SseReconnectConfig {
     SseReconnectConfig {
         max_reconnects: 1,
