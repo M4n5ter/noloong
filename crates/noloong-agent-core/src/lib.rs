@@ -1,6 +1,7 @@
 //! Event-sourced, providerless agent runtime core for Noloong.
 
 mod agent;
+mod anthropic_messages;
 mod chat_completions;
 mod error;
 mod jsonrpc;
@@ -8,10 +9,16 @@ mod phase;
 mod providers;
 mod reducer;
 mod runtime;
+mod sse;
 mod store;
+mod tool_arguments;
 mod types;
 
 pub use agent::{Agent, AgentBuilder};
+pub use anthropic_messages::{
+    AnthropicAuthScheme, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
+    AnthropicThinkingConfig,
+};
 pub use chat_completions::{
     ChatAudioFormat, ChatCompletionsProvider, ChatCompletionsProviderConfig, ChatImageDetail,
     ChatOutputAudioConfig, ChatOutputModality,

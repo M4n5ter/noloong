@@ -1,346 +1,462 @@
-# Implementation Plan: Multimodal LLM Provider I/O
+# Implementation Plan: Built-in Anthropic Messages Provider
 
 ## Overview
 
-为 `noloong-agent-core` 增加 provider-neutral 的多模态输入输出能力，让 image、audio、video、file 可以作为 message content、model stream output、tool output、JSON-RPC extension payload 在 core 中稳定流转。第一轮采用 reference-first 设计：事件日志优先保存 URI 或 provider reference，小体积 inline base64 作为可选 source；不在 v1 引入 `MediaStore` 或隐式下载/上传 blob。
-
-当前重点是让 core data model 和内置 Chat Completions provider 具备正确边界，而不是把某个厂商的 wire shape 直接泄漏进公共 API。OpenAI Chat Completions 支持 image/audio/file content parts 和 audio output；Anthropic Messages 使用 typed image/document/file source blocks。core 应抽象成统一 media block，再由 provider adapter 做各自映射。
+为 `noloong-agent-core` 增加一个内置 `AnthropicMessagesProvider`，让它和现有 `ChatCompletionsProvider` 一样只是普通 `ModelProvider`，不获得 runtime 特权。v1 覆盖 Anthropic Messages 的核心能力：文本/system/messages、streaming、tool use、extended thinking、image/document/file 输入映射、same-provider thinking replay、mock conformance，以及 OpenRouter Anthropic-compatible Messages endpoint live gate。官方 Anthropic live test 只作为显式 opt-in diagnostic 保留，不作为当前必需 gate。
 
 ## Architecture Decisions
 
-- 公共 API 使用一个 `ContentBlock::Media { media: MediaBlock }`，不拆成多个 provider-specific block，也不新增 `Image`、`Audio`、`Video` 三套平行结构。
-- `MediaSource` 默认 reference-first：`Uri`、`Provider`、`Inline` 三种 source；`Inline` 只保存调用方已经提供的编码数据，不在 core 内做文件读取、下载或 base64 编码。
-- v1 不引入 `MediaStore` trait。后续如果需要大 blob 生命周期、缓存、去重或加密存储，再单独增加 store abstraction。
-- video 在 core 中是一等 `MediaKind::Video`；内置 Chat Completions provider 会把 URI/inline base64 映射到 `video_url`，provider file/ref 仍需要通过配置显式允许后才透传。
-- Chat Completions provider 只实现标准兼容映射和显式配置开关，不硬编码 OpenRouter、DeepSeek 或其它 provider preset。
-- 多模态输出通过 `ModelStreamEvent::MediaDelta` 表达，并由 `assistant_commit` 折叠为 `ContentBlock::Media`，保持 thinking、text、media、tool call 的相对顺序。
-- JSON-RPC bridge 不新增方法；外部 JS/TS/Python 扩展通过现有 serde JSON contract 直接收发新的 `media` content block 和 `media_delta` stream event。
-
-## Public API Shape
-
-- `ContentBlock` 新增 variant：`Media { media: MediaBlock }`。
-- 新增 `MediaKind`：`Image`、`Audio`、`Video`、`File`、`Custom(String)`；serde 使用 snake_case string，未知值反序列化为 `Custom`。
-- 新增 `MediaEncoding`：`Base64`、`Custom(String)`；v1 内置 Chat provider 只消费 `Base64` inline source。
-- 新增 `MediaSource`，serde 使用 tagged snake_case object：
-  - `Uri { uri: String }`
-  - `Inline { data: String, encoding: MediaEncoding }`
-  - `Provider { provider_id: String, id: String }`
-- 新增 `MediaBlock` 字段：
-  - `kind: MediaKind`
-  - `source: MediaSource`
-  - `data: Option<EncodedMediaData>`
-  - `mime_type: Option<String>`
-  - `name: Option<String>`
-  - `replay_descriptor: Option<Value>`
-  - `metadata: Map<String, Value>`
-- 新增 `MediaDelta` 字段：
-  - `kind: MediaKind`
-  - `data_delta: Option<String>`
-  - `source: Option<MediaSource>`
-  - `mime_type: Option<String>`
-  - `name: Option<String>`
-  - `replay_descriptor: Option<Value>`
-  - `metadata: Map<String, Value>`
-  - `done: bool`
-- `ModelStreamEvent` 新增 `MediaDelta { delta: MediaDelta }`。
-- Helper constructors:
-  - `MediaBlock::uri(kind, uri)`
-  - `MediaBlock::inline_base64(kind, data)`
-  - `MediaBlock::provider(kind, provider_id, id)`
-  - `MediaDelta::from_inline_base64_delta(kind, data_delta)`
+- 新增 `crates/noloong-agent-core/src/anthropic_messages.rs`，provider-specific wire shape 只留在 provider adapter 内，不泄漏进 phase/runtime。
+- 新增 public exports：`AnthropicMessagesProvider`、`AnthropicMessagesProviderConfig`、`AnthropicAuthScheme`、`AnthropicThinkingConfig`。
+- 官方 Anthropic 默认配置：
+  - `base_url = "https://api.anthropic.com"`
+  - endpoint = `{base_url}/v1/messages`
+  - auth header = `x-api-key`
+  - API key env = `ANTHROPIC_API_KEY`
+  - `anthropic-version = "2023-06-01"`
+  - `max_tokens = 1024`
+- OpenRouter Anthropic-compatible endpoint 通过配置支持：
+  - `AnthropicAuthScheme::Bearer`
+  - `base_url = "https://openrouter.ai/api"`
+  - `api_key_env = "OPENROUTER_API_KEY"`
+  - optional `anthropic_version`
+- `MediaKind::Image` 映射为 Anthropic `image` block；`MediaKind::File` 映射为 `document` 或 opt-in Files API `file_id`。
+- Anthropic Messages v1 对 `MediaKind::Audio` 和 `MediaKind::Video` fail-fast，错误信息说明该 provider v1 不支持 audio/video。
+- Extended thinking 默认关闭；通过 `enable_thinking(budget_tokens)` 打开。stream 中 `thinking_delta` 进入 `ThinkingDelta`，`signature_delta` 保存在 metadata/raw replay descriptor。
+- Files API/provider `file_id` 为 opt-in v1：`allow_files_api_media(true)` 才允许 provider-hosted file refs 映射到 Anthropic file source，并添加所需 beta header。
 
 ## Dependency Graph
 
-1. Core media serde types
-2. Assistant commit media folding
-3. Chat Completions input content part mapping
-4. Chat Completions output media parsing
-5. JSON-RPC and tool coverage
-6. Docs and examples
-7. Full quality gate and optional live gate
+1. Shared SSE decoder
+2. Anthropic provider config and HTTP shell
+3. Request payload mapping
+4. Streaming parser
+5. Thinking replay and assistant history
+6. Live gates, docs, conformance matrix
+7. Final quality gate
 
-## Task List
+## Phase 1: Foundation
 
-### Phase 1: Core Media Foundation
+### Task 1: Extract Shared SSE Decoder
 
-#### Task 1: Add Provider-neutral Media Types
-
-**Description:** Add the core media data model to `types.rs` so every message-bearing surface can represent image, audio, video, and file content without provider-specific JSON.
+**Description:** 把当前 Chat Completions provider 内部的 SSE decoder 提取为 crate-private shared module，供 Chat 和 Anthropic provider 复用。
 
 **Acceptance criteria:**
-- [ ] `ContentBlock::Media { media: MediaBlock }` exists and round-trips through serde.
-- [ ] `MediaKind`, `MediaEncoding`, `MediaSource`, `MediaBlock`, and `MediaDelta` are public and exported through `lib.rs`.
-- [ ] Unknown media kind and encoding values deserialize into `Custom(String)` instead of failing.
-- [ ] Helper constructors cover URI, inline base64, and provider reference sources.
+
+- [ ] Chat Completions 现有 SSE behavior 不变。
+- [ ] shared decoder 支持 multiline `data:`, CRLF, split CRLF across chunks, final unfinished frame flush。
+- [ ] decoder API 不暴露到 public crate API。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core media_type_serde`
-- [ ] `cargo test -p noloong-agent-core --test core`
+
+- [ ] `cargo test -p noloong-agent-core chat_completions::tests::sse_decoder`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent-core/src/types.rs`
+
+- `crates/noloong-agent-core/src/chat_completions.rs`
 - `crates/noloong-agent-core/src/lib.rs`
-- `crates/noloong-agent-core/tests/core.rs`
+- `crates/noloong-agent-core/src/sse.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-#### Task 2: Fold Media Stream Events Into Assistant Messages
+### Task 2: Add Anthropic Provider Config and HTTP Shell
 
-**Description:** Extend assistant commit logic so streamed media deltas become committed `ContentBlock::Media` blocks while preserving the existing ordering contract for thinking, text, and tool calls.
+**Description:** 新增 `AnthropicMessagesProviderConfig`、`AnthropicMessagesProvider`、headers、auth scheme、endpoint construction、timeouts、HTTP error reporting 和 `ModelProvider` skeleton。
 
 **Acceptance criteria:**
-- [ ] `ModelStreamEvent::MediaDelta` is accepted by `assistant_commit`.
-- [ ] Media deltas flush any open text/thinking before starting a media block.
-- [ ] Repeated inline base64 `data_delta` chunks append into one media block until `done` or until another content type starts.
-- [ ] Source-only media deltas commit a media block without requiring inline data.
-- [ ] Tool call boundaries flush any open media block before committing the tool call.
+
+- [ ] Official Anthropic config 默认使用 `x-api-key`、`ANTHROPIC_API_KEY`、`anthropic-version`。
+- [ ] OpenRouter-compatible config 可切换 Bearer auth，并可关闭或覆盖 version header。
+- [ ] `max_tokens` 默认存在，可通过 builder 覆盖。
+- [ ] non-2xx error 包含 status 和 body excerpt。
+- [ ] config `Debug` redacts API key。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test core assistant_commit_media_ordering`
-- [ ] `cargo test -p noloong-agent-core --test conformance`
+
+- [ ] `cargo test -p noloong-agent-core --test anthropic_messages config_`
+- [ ] `cargo test -p noloong-agent-core --test anthropic_messages http_error_`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
-- `crates/noloong-agent-core/src/phase.rs`
-- `crates/noloong-agent-core/tests/core.rs`
-- `crates/noloong-agent-core/tests/conformance.rs`
+
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/src/lib.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
 
 **Estimated scope:** M
 
-#### Checkpoint: Core Media Model
+## Checkpoint: Foundation
 
 - [ ] `cargo fmt --check`
-- [ ] `cargo test -p noloong-agent-core --test core`
-- [ ] `cargo test -p noloong-agent-core --test conformance`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test -p noloong-agent-core --test anthropic_messages`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions`
 
-### Phase 2: Chat Completions Input Mapping
+## Phase 2: Request Mapping
 
-#### Task 3: Render Text and Media Content Parts
+### Task 3: Map Core Messages to Anthropic Messages Payload
 
-**Description:** Update the built-in Chat Completions payload builder so user/custom messages can be rendered as OpenAI-compatible content parts when they contain media, while pure text messages keep the existing compact string content.
+**Description:** 将 `ModelRequest` 转成 Anthropic Messages request body，包括 top-level system、messages array、assistant history、tool specs 和 extra body。
 
 **Acceptance criteria:**
-- [ ] Pure text user/custom messages still serialize as string `content`.
-- [ ] Mixed text/media user/custom messages serialize as content parts array.
-- [ ] `MediaKind::Image` with `Uri` maps to `image_url.url`.
-- [ ] `MediaKind::Image` with inline base64 maps to a data URL in `image_url.url`.
-- [ ] `ChatCompletionsProviderConfig` exposes `image_detail`, defaulting to `auto`.
-- [ ] System messages reject media with a clear provider error instead of silently dropping it.
+
+- [ ] `MessageRole::System` 合并为 top-level `system`，不进入 `messages` array。
+- [ ] `User` 和 `Assistant` 映射为 Anthropic role；`Custom` role fail-fast。
+- [ ] pure text content 保持 Anthropic text block，mixed content 使用 typed content blocks。
+- [ ] `ToolSpec` 映射为 Anthropic `tools`。
+- [ ] caller-owned `extra_body` 最后 merge，允许兼容 provider 覆盖或追加字段。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_text_only_remains_string`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_image_uri_content_part`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_image_inline_content_part`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_system_media_rejected`
 
-**Dependencies:** Tasks 1, 2
+- [ ] `payload_maps_text_system_and_extra_body`
+- [ ] `payload_rejects_custom_roles`
+- [ ] `payload_maps_tools`
+
+**Dependencies:** Task 2
 
 **Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
+
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
 
 **Estimated scope:** M
 
-#### Task 4: Map Audio, File, and Video Inputs Safely
+### Task 4: Map Tool Calls and Tool Results
 
-**Description:** Add deterministic Chat Completions mappings for audio and file media, and define fail-fast behavior for unsupported source/kind combinations.
+**Description:** 实现 Anthropic assistant `tool_use` history block 和 user `tool_result` block 映射，使 runtime 工具循环可直接复用。
 
 **Acceptance criteria:**
-- [ ] Inline base64 audio with `audio/wav` maps to `input_audio` format `wav`.
-- [ ] Inline base64 audio with `audio/mpeg` or `audio/mp3` maps to `input_audio` format `mp3`.
-- [ ] Audio URI and unsupported audio MIME types return clear provider errors; no implicit downloads.
-- [ ] Provider file references map to `file.file_id`.
-- [ ] Inline file source maps to `file.file_data` and uses `MediaBlock.name` as `filename` when present.
-- [ ] File URI returns a clear provider error because Chat Completions file URL input is not portable.
-- [ ] Video URI/inline media maps to `video_url`.
-- [ ] Optional config `allow_provider_video_file_media` allows provider-referenced `Video` to map to `file_id` for compatible providers; provider-referenced `File` maps to `file_id` directly.
+
+- [ ] assistant `ContentBlock::ToolCall` 映射为 `tool_use` block。
+- [ ] `ToolResult` message 映射为 user role message 中的 `tool_result` block。
+- [ ] tool result content 可包含 text/json/media，其中不支持的 media fail-fast。
+- [ ] tool arguments 保持 JSON object；非 object 时按当前 core value 原样传入并由 Anthropic 侧决定。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_audio_inline_wav`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_audio_uri_rejected`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_file_provider_reference`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_file_uri_rejected`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_video_uri_content_part`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_video_inline_content_part`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_provider_video_default_rejected`
+
+- [ ] `payload_maps_assistant_tool_use_history`
+- [ ] `payload_maps_tool_result_message`
+- [ ] `payload_tool_result_rejects_unsupported_media`
 
 **Dependencies:** Task 3
 
 **Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
 
-**Estimated scope:** M
-
-#### Checkpoint: Chat Input Mapping
-
-- [ ] `cargo fmt --check`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_`
-- [ ] `cargo test -p noloong-agent-core --test core`
-
-### Phase 3: Chat Completions Output Mapping
-
-#### Task 5: Parse Chat Audio Output Into Media Events
-
-**Description:** Extend Chat Completions stream parsing so provider audio output can be represented as `MediaDelta` and committed as assistant media content.
-
-**Acceptance criteria:**
-- [ ] `ChatCompletionsProviderConfig` supports output `modalities`, audio `format`, and audio `voice` through typed helpers while keeping `extra_body` available.
-- [ ] Request payload includes `modalities` and `audio` only when configured.
-- [ ] Stream chunks with audio base64 data emit `ModelStreamEvent::MediaDelta`.
-- [ ] Audio transcript is stored in media metadata, not forced into `TextDelta`.
-- [ ] Audio output id, expiry, provider id, model, format, and streamed payload are preserved in `MediaBlock.source`, `MediaBlock.data`, `replay_descriptor`, or metadata as appropriate.
-
-**Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_audio_output_config`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions stream_audio_delta_to_media_event`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions stream_audio_metadata_preserved`
-
-**Dependencies:** Tasks 1, 2, 4
-
-**Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
-
-**Estimated scope:** M
-
-#### Task 6: Replay Assistant Media Where Chat Supports It
-
-**Description:** Add same-provider replay for assistant media outputs so a later Chat Completions turn can reference prior provider-hosted audio or file output when the provider contract supports it.
-
-**Acceptance criteria:**
-- [ ] Assistant `MediaBlock` with matching Chat replay descriptor can render top-level assistant `audio` when it represents previous Chat audio output.
-- [ ] Cross-provider or cross-model media replay is ignored or rejected consistently with thinking replay rules.
-- [ ] Unsupported assistant media history returns a clear provider error instead of silently dropping media content.
-- [ ] Text and tool call replay behavior from the existing provider remains unchanged.
-
-**Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_assistant_audio_replay`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_assistant_media_cross_provider_ignored`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_assistant_unsupported_media_rejected`
-
-**Dependencies:** Task 5
-
-**Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
 
 **Estimated scope:** S
 
-#### Checkpoint: Chat Output Mapping
+### Task 5: Map Image, Document, and File Media
 
-- [ ] `cargo test -p noloong-agent-core --test chat_completions`
-- [ ] `cargo test -p noloong-agent-core --test conformance`
+**Description:** 将 provider-neutral `MediaBlock` 映射为 Anthropic Messages 支持的 image/document/file source blocks。
+
+**Acceptance criteria:**
+
+- [ ] `MediaKind::Image + Inline(base64)` 映射为 Anthropic base64 image source，需要 `mime_type`。
+- [ ] `MediaKind::Image + Uri` 映射为 Anthropic URL image source。
+- [ ] `MediaKind::File + Inline(base64)` 映射为 document base64 source，需要 `mime_type`，`name` 映射为 title/filename metadata。
+- [ ] `MediaKind::File + Uri` 映射为 document URL source。
+- [ ] `MediaKind::File + Provider` 只有 `allow_files_api_media(true)` 且 provider scope 匹配时映射为 file source。
+- [ ] `Audio`、`Video`、custom media kind 和 system media 都返回清晰 provider error。
+
+**Verification:**
+
+- [ ] `payload_maps_inline_and_url_images`
+- [ ] `payload_maps_inline_and_url_documents`
+- [ ] `payload_maps_provider_file_when_enabled`
+- [ ] `payload_rejects_unsupported_audio_video_custom_media`
+
+**Dependencies:** Task 3
+
+**Files likely touched:**
+
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
+
+**Estimated scope:** M
+
+## Checkpoint: Request Mapping
+
+- [ ] `cargo test -p noloong-agent-core --test anthropic_messages payload_`
 - [ ] `cargo test --workspace`
+- [ ] `rg -n "anthropic|claude|ANTHROPIC" crates/noloong-agent-core/src -S` shows provider module/export only, no runtime preset leakage.
 
-### Phase 4: Extension and Tool Coverage
+## Phase 3: Streaming
 
-#### Task 7: Cover JSON-RPC Extension Media Contract
+### Task 6: Parse Text, Stop Reasons, and Stream Lifecycle
 
-**Description:** Update JSON-RPC tests and fixtures so non-Rust model providers and tools can send and receive media content through the existing bridge without new bridge methods.
+**Description:** 实现 Anthropic SSE event parser 的基础路径，转换 message/content lifecycle 为 core stream events。
 
 **Acceptance criteria:**
-- [ ] A JS fixture can return a `media_delta` model stream event.
-- [ ] The runtime commits that external media stream into assistant message content.
-- [ ] A JS tool fixture can return `ContentBlock::Media` in `ToolOutput`.
-- [ ] JSON-RPC request payloads for model/tool calls include media blocks without custom bridge translation.
+
+- [ ] `message_start` emits `ModelStreamEvent::Started`。
+- [ ] `content_block_delta.text_delta` emits `TextDelta`。
+- [ ] `message_delta.stop_reason` maps `end_turn`、`max_tokens`、`tool_use`、`stop_sequence`、unknown values into `StopReason`。
+- [ ] `message_stop` emits final `Finished` if not already emitted。
+- [ ] stream `error` becomes provider failure and fails the run.
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc jsonrpc_model_stream_media_delta`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc jsonrpc_tool_output_media`
-- [ ] `node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
 
-**Dependencies:** Tasks 1, 2
+- [ ] `stream_text_and_finish_reason`
+- [ ] `stream_error_reports_provider_failure`
+- [ ] `stream_ignores_unknown_nonfatal_events`
+
+**Dependencies:** Tasks 1-3
 
 **Files likely touched:**
-- `crates/noloong-agent-core/tests/jsonrpc.rs`
-- `crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
+
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
+
+**Estimated scope:** M
+
+### Task 7: Parse Streaming Tool Use
+
+**Description:** 支持 Anthropic `tool_use` content block 和 `input_json_delta` accumulation，最终 emit core `ToolCall`。
+
+**Acceptance criteria:**
+
+- [ ] tool block start captures Anthropic tool id/name by content block index。
+- [ ] fragmented `input_json_delta.partial_json` accumulates by block index。
+- [ ] block stop emits exactly one `ModelStreamEvent::ToolCall` with parsed JSON arguments。
+- [ ] malformed JSON falls back to string or provider error using the same policy as Chat Completions; policy must be documented in test name and error/message。
+
+**Verification:**
+
+- [ ] `stream_accumulates_tool_use_input_json`
+- [ ] `stream_handles_interleaved_tool_blocks`
+- [ ] `stream_tool_use_malformed_json_policy`
+
+**Dependencies:** Task 6
+
+**Files likely touched:**
+
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
 
 **Estimated scope:** S
 
-#### Task 8: Add Tool and Hook Regression Coverage
+### Task 8: Parse Extended Thinking
 
-**Description:** Verify that existing tool execution, tool updates, and after-tool hooks preserve media blocks because they already share the `Vec<ContentBlock>` surface.
+**Description:** 支持 Anthropic extended thinking stream，保留 display text、raw snapshot、signature 和 replay descriptor。
 
 **Acceptance criteria:**
-- [ ] Tool output can contain image/audio/file media blocks.
-- [ ] Tool update can contain media blocks.
-- [ ] `AfterToolCallResult.content` can replace tool output with media content.
-- [ ] Tool error outputs remain text-only unless a tool explicitly returns media.
+
+- [ ] `thinking_delta` emits `ThinkingDelta` with `ThinkingKind::Raw` and visible text delta。
+- [ ] `signature_delta` is preserved in metadata and replay descriptor。
+- [ ] thinking raw snapshot is sufficient to replay same-provider/model assistant history。
+- [ ] thinking remains disabled unless `enable_thinking(budget_tokens)` is configured。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test core tool_output_media_preserved`
-- [ ] `cargo test -p noloong-agent-core --test core tool_update_media_preserved`
-- [ ] `cargo test -p noloong-agent-core --test core after_tool_hook_can_rewrite_to_media`
 
-**Dependencies:** Task 1
+- [ ] `stream_thinking_delta_preserves_raw_and_signature`
+- [ ] `payload_sends_thinking_config_when_enabled`
+- [ ] `payload_omits_thinking_config_by_default`
+
+**Dependencies:** Task 6
 
 **Files likely touched:**
-- `crates/noloong-agent-core/tests/core.rs`
-- `crates/noloong-agent-core/tests/conformance.rs`
 
-**Estimated scope:** S
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
 
-#### Checkpoint: Extension and Tool Surfaces
+**Estimated scope:** M
 
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc`
+## Checkpoint: Streaming
+
+- [ ] `cargo test -p noloong-agent-core --test anthropic_messages stream_`
 - [ ] `cargo test -p noloong-agent-core --test core`
-- [ ] `node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
+- [ ] `cargo test -p noloong-agent-core --test conformance`
 
-### Phase 5: Documentation and Verification
+## Phase 4: Replay and Runtime Integration
 
-#### Task 9: Update Architecture and README Documentation
+### Task 9: Replay Assistant Thinking and Supported History
 
-**Description:** Document the media model, provider mapping boundaries, and v1 limitations so future provider work can target the core abstractions instead of inventing per-provider payloads.
+**Description:** 支持同 provider/model scope 下的 Anthropic thinking replay，并明确处理不可渲染的 assistant media/history。
 
 **Acceptance criteria:**
-- [ ] Architecture doc explains `ContentBlock::Media`, `MediaSource`, and `MediaDelta`.
-- [ ] Architecture doc states that v1 is reference-first and has no `MediaStore`.
-- [ ] Architecture doc explains `video_url` mapping and provider-hosted video opt-in behavior for the built-in Chat provider.
-- [ ] README shows one text+image user message example.
-- [ ] README shows one tool output media example.
-- [ ] README links to OpenAI Chat Completions and Anthropic Messages docs as provider mapping references.
+
+- [ ] Matching prior `ThinkingBlock` renders as Anthropic thinking block with signature when available。
+- [ ] Cross-provider or cross-model thinking replay is ignored。
+- [ ] Assistant text + thinking + tool_use order is preserved as much as Anthropic Messages content blocks allow。
+- [ ] Unsupported assistant media returns clear provider error instead of silently dropping content。
 
 **Verification:**
-- [ ] `rg -n "ContentBlock::Media|MediaSource|MediaDelta|image_url|input_audio|file_id" README.md crates/noloong-agent-core/docs/ARCHITECTURE.md`
-- [ ] `git diff --check README.md crates/noloong-agent-core/docs/ARCHITECTURE.md plans/CURRENT_PLAN.md`
 
-**Dependencies:** Tasks 1-8
+- [ ] `payload_replays_thinking_with_matching_scope`
+- [ ] `payload_ignores_cross_provider_thinking_replay`
+- [ ] `payload_rejects_unrenderable_assistant_media`
+
+**Dependencies:** Tasks 4, 8
 
 **Files likely touched:**
+
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
+
+**Estimated scope:** S
+
+### Task 10: Runtime End-to-End Mock Tests
+
+**Description:** 用 mock Anthropic provider server 跑完整 `AgentRuntime` flow，证明 provider 可作为普通 `ModelProvider` 使用。
+
+**Acceptance criteria:**
+
+- [ ] runtime commits Anthropic streamed text into assistant message。
+- [ ] runtime commits Anthropic thinking into `ContentBlock::Thinking`。
+- [ ] runtime resolves Anthropic streamed tool call and executes local tool。
+- [ ] cancellation and idle timeout behavior matches Chat provider style。
+
+**Verification:**
+
+- [ ] `runtime_commits_anthropic_text_and_thinking`
+- [ ] `runtime_executes_anthropic_tool_call`
+- [ ] `cancellation_aborts_pending_anthropic_request`
+- [ ] `request_timeout_applies_before_anthropic_initial_response`
+
+**Dependencies:** Tasks 6-9
+
+**Files likely touched:**
+
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+
+**Estimated scope:** M
+
+## Checkpoint: Runtime Integration
+
+- [ ] `cargo test -p noloong-agent-core --test anthropic_messages`
+- [ ] `cargo test --workspace`
+- [ ] `cargo nextest run --workspace`
+
+## Phase 5: Live Gates and Documentation
+
+### Task 11: Add OpenRouter Anthropic-Compatible Live Gate
+
+**Description:** 添加 ignored live test，验证 OpenRouter Anthropic Messages-compatible endpoint 可以通过同一个 provider config 工作。
+
+**Acceptance criteria:**
+
+- [ ] Test reads `OPENROUTER_API_KEY`。
+- [ ] Test uses Bearer auth and `base_url = "https://openrouter.ai/api"`。
+- [ ] Test defaults to `openrouter/free` and can be overridden by `NOLOONG_OPENROUTER_ANTHROPIC_LIVE_MODEL`。
+- [ ] Test asserts exact visible sentinel text。
+- [ ] Test asserts tool-call path only when `NOLOONG_OPENROUTER_ANTHROPIC_TOOL_MODEL` names a tool-capable model；否则测试名和 skip 条件明确说明只覆盖 text compatibility。
+- [ ] No OpenRouter-specific constants enter runtime/phase/core types。
+
+**Verification:**
+
+- [ ] `cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_messages -- --ignored --nocapture`
+- [ ] `rg -n "openrouter|OPENROUTER" crates/noloong-agent-core/src -S` shows no provider preset leakage outside generic config support。
+
+**Dependencies:** Tasks 1-10
+
+**Files likely touched:**
+
+- `crates/noloong-agent-core/tests/anthropic_live.rs`
 - `README.md`
 - `crates/noloong-agent-core/docs/ARCHITECTURE.md`
-- `plans/CURRENT_PLAN.md`
+- `plans/CONFORMANCE_MATRIX.md`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-#### Task 10: Run Final Quality Gates
+### Task 12: Add Optional Official Anthropic Diagnostic
 
-**Description:** Run the full local verification suite and keep real-provider tests explicitly ignored unless they are intentionally invoked.
+**Description:** 添加 ignored diagnostic tests，只有调用方显式设置 `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` 且提供有效 `ANTHROPIC_API_KEY` 时才直连 Anthropic official Messages API。当前用户没有官方 key，因此这不是必需 gate。
 
 **Acceptance criteria:**
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- [ ] `cargo nextest run --workspace` passes.
-- [ ] `cargo test --workspace` passes if nextest is unavailable.
-- [ ] Existing OpenRouter DeepSeek live test still passes when manually run with `OPENROUTER_API_KEY`.
-- [ ] No OpenRouter, DeepSeek, or provider-specific media constants are added under `crates/noloong-agent-core/src`.
+
+- [ ] Test skips by default unless `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1`。
+- [ ] Test reads `ANTHROPIC_API_KEY` only after opt-in。
+- [ ] Test model defaults to `claude-sonnet-4-5` and can be overridden by `NOLOONG_ANTHROPIC_LIVE_MODEL`。
+- [ ] Test enables thinking and asserts a non-empty thinking event or thinking block。
+- [ ] Test asserts exact visible sentinel text。
+- [ ] Test includes a tool-call path and verifies tool execution。
+- [ ] Test includes one image or document payload path supported by official Anthropic API。
 
 **Verification:**
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo nextest run --workspace`
-- [ ] `cargo test --workspace`
-- [ ] `cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture`
-- [ ] `rg -n "openrouter|deepseek|OPENROUTER|deepseek-v4" crates/noloong-agent-core/src -S`
 
-**Dependencies:** Tasks 1-9
+- [ ] `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1 cargo test -p noloong-agent-core --test anthropic_live official_anthropic_messages -- --ignored --nocapture`
+
+**Dependencies:** Tasks 1-10
 
 **Files likely touched:**
-- None expected beyond fixes required by earlier tasks.
+
+- `crates/noloong-agent-core/tests/anthropic_live.rs`
+- `README.md`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `plans/CONFORMANCE_MATRIX.md`
+
+**Estimated scope:** S
+
+### Task 13: Update Documentation and Conformance Matrix
+
+**Description:** 更新 README、架构文档和验证矩阵，让 Anthropic provider 的能力和边界可审计。
+
+**Acceptance criteria:**
+
+- [ ] README contains a minimal `AnthropicMessagesProvider` example。
+- [ ] `ARCHITECTURE.md` explains Anthropic provider boundaries, thinking replay, media limitations, and OpenRouter-compatible config。
+- [ ] `CONFORMANCE_MATRIX.md` lists Anthropic payload, streaming, replay, live gates, and vendor-neutrality checks。
+- [ ] `CURRENT_PLAN.md` remains implementation-ready and matches actual decisions。
+
+**Verification:**
+
+- [ ] `rg -n "AnthropicMessagesProvider|AnthropicMessagesProviderConfig|anthropic_live|OpenRouter Anthropic" README.md crates/noloong-agent-core/docs/ARCHITECTURE.md plans/CONFORMANCE_MATRIX.md plans/CURRENT_PLAN.md`
+- [ ] `git diff --check README.md crates/noloong-agent-core/docs/ARCHITECTURE.md plans`
+
+**Dependencies:** Tasks 1-12
+
+**Files likely touched:**
+
+- `README.md`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `plans/CONFORMANCE_MATRIX.md`
+- `plans/CURRENT_PLAN.md`
+
+**Estimated scope:** S
+
+## Final Quality Gate
+
+### Task 14: Run Full Verification
+
+**Description:** 运行完整质量门，确保 Anthropic provider 不破坏现有 Chat/JSON-RPC/runtime 行为。
+
+**Acceptance criteria:**
+
+- [ ] `cargo fmt --check` passes。
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes。
+- [ ] `cargo test --workspace` passes。
+- [ ] `cargo nextest run --workspace` passes。
+- [ ] `cargo test -p noloong-agent-core --examples` passes。
+- [ ] JS fixtures still pass `node --check`。
+- [ ] OpenRouter Anthropic-compatible ignored live gate passes when `OPENROUTER_API_KEY` exists。
+- [ ] Official Anthropic diagnostic is skipped by default and only runs when explicitly opted in。
+
+**Verification:**
+
+- [ ] `cargo fmt --check`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
+- [ ] `cargo nextest run --workspace`
+- [ ] `cargo test -p noloong-agent-core --examples`
+- [ ] `node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
+- [ ] `node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs`
+- [ ] `node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs`
+- [ ] `cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_messages -- --ignored --nocapture`
+- [ ] `git diff --check`
+
+**Dependencies:** Tasks 1-13
+
+**Files likely touched:**
+
+- Any files changed by prior tasks, only for fixes required by checks.
 
 **Estimated scope:** S
 
@@ -348,28 +464,42 @@
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Event log bloat from inline media | High | Make reference-first the default, keep inline optional, and document that large blobs should use URI/provider refs until `MediaStore` exists. |
-| Provider wire shapes diverge | Medium | Keep core media model generic and isolate all OpenAI-compatible details in `chat_completions.rs`. |
-| Silent media loss in unsupported roles | High | Fail fast with provider errors for unsupported system/assistant media instead of dropping content. |
-| Video support becomes fake support | Medium | Map Chat-compatible URI/inline video to `video_url`, but keep provider-hosted video refs opt-in. |
-| Audio transcript duplicates visible text | Medium | Store provider transcript in media metadata; only provider `content` becomes `TextDelta`. |
-| JSON-RPC extensions fall out of sync | Medium | Use serde contract directly and add JS fixture tests for media stream and tool output. |
+| Anthropic streaming event model differs from Chat SSE | High | Build parser from Anthropic event names and block indexes; do not reuse Chat chunk assumptions except shared SSE framing. |
+| Thinking signature replay is subtle | High | Preserve raw/signature metadata and add same-provider replay tests before live gate. |
+| Files API behavior depends on beta headers | Medium | Keep provider file support opt-in and test headers explicitly. |
+| OpenRouter Anthropic-compatible endpoint diverges from official Anthropic | Medium | Support auth/version/base URL through config; keep OpenRouter-specific values in tests/docs only. |
+| Media support may be overclaimed | Medium | v1 supports image/document/file only; audio/video fail fast with provider-specific error. |
+| Tool JSON stream can be partial/malformed | Medium | Accumulate by content block index and document fallback/error policy in tests. |
 
 ## Parallelization Opportunities
 
-- Tasks 3 and 4 should be sequential because they share Chat input rendering.
-- Tasks 7 and 8 can run in parallel after Tasks 1 and 2.
-- Task 9 can start after public API names stabilize, but final doc examples should wait until Tasks 3-8 are implemented.
-- Task 10 must run last.
+- Tasks 3 and 4 can be implemented by one agent while another writes request payload tests, after Task 2 lands.
+- Tasks 6 and 7 can proceed in parallel after Task 3 because text lifecycle and tool JSON accumulation are separable.
+- Task 8 should wait for Task 6 because thinking uses the same content block lifecycle.
+- Tasks 11 and 12 can be implemented in parallel after runtime mock tests pass.
+- Task 13 can start once public type names stabilize, but final docs should wait for live gate outcomes.
+
+## Final Acceptance Criteria
+
+- [ ] `noloong-agent-core` exposes a built-in `AnthropicMessagesProvider` as a normal `ModelProvider`。
+- [ ] Anthropic Messages payload mapping supports text/system/tools/tool results/thinking/image/document/file boundaries.
+- [ ] Anthropic SSE streaming supports text, thinking, tool use, stop reasons, errors, cancellation, and timeouts.
+- [ ] Same-provider thinking replay works and cross-provider replay is ignored.
+- [ ] OpenRouter Anthropic-compatible endpoint works through generic provider config without OpenRouter preset leakage.
+- [ ] Full local quality gate and ignored live gates pass.
+
+## Assumptions
+
+- `OPENROUTER_API_KEY` exists in the environment for OpenRouter Anthropic-compatible live gate.
+- Official Anthropic diagnostic requires explicit `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` and a valid `ANTHROPIC_API_KEY`; it is not part of the current required gate.
+- OpenRouter live model is selected via `NOLOONG_OPENROUTER_ANTHROPIC_LIVE_MODEL` if endpoint/model behavior changes.
+- No API keys are committed, logged, or stored in event metadata.
+- No core runtime API changes are required beyond exporting the new provider types.
 
 ## References
 
-- OpenAI Chat Completions API: https://platform.openai.com/docs/api-reference/chat/create-chat-completion
-- OpenAI Images and vision guide: https://platform.openai.com/docs/guides/images-vision?api-mode=chat
-- OpenAI Audio guide: https://platform.openai.com/docs/guides/audio
+- Anthropic Messages API: https://docs.anthropic.com/en/api/messages
 - Anthropic Messages examples: https://docs.anthropic.com/en/api/messages-examples
-- Anthropic Files API: https://docs.anthropic.com/en/docs/build-with-claude/files
-
-## Open Questions
-
-- None. Defaults chosen: reference-first media representation, core plus Chat Completions I/O in v1, and `video_url` for Chat-compatible URI/inline video while provider-hosted video refs remain opt-in.
+- Anthropic streaming: https://platform.claude.com/docs/en/build-with-claude/streaming
+- Anthropic Files API: https://platform.claude.com/docs/en/build-with-claude/files
+- OpenRouter Anthropic Messages endpoint: https://openrouter.ai/docs/api/api-reference/anthropic-messages/create-messages

@@ -733,6 +733,122 @@ merge 策略：
 
 历史 assistant message replay 时，只有 descriptor 的 provider id 和 model 都匹配当前 config，才会把 `ThinkingBlock.raw` 写回对应 Chat Completions reasoning 字段。这样可以避免跨 provider/model 注入不兼容 raw reasoning。
 
+## Built-in Anthropic Messages Provider
+
+内置 `AnthropicMessagesProvider` 也是普通 `ModelProvider`。它只负责 Anthropic Messages wire format 和 SSE event model，不改变 runtime、phase graph 或 core message 类型。
+
+配置项：
+
+- `id`
+- `base_url`
+- `model`
+- `api_key`
+- `api_key_env`
+- `auth_scheme`
+- `headers`
+- `extra_body`
+- `max_tokens`
+- `temperature`
+- `request_timeout`
+- `stream_idle_timeout`
+- `anthropic_version`
+- `beta_headers`
+- `thinking`
+- `allow_files_api_media`
+
+官方 Anthropic 默认值：
+
+- base URL：`https://api.anthropic.com`
+- API key env：`ANTHROPIC_API_KEY`
+- auth header：`x-api-key`
+- version header：`anthropic-version: 2023-06-01`
+- `max_tokens: 1024`
+
+兼容 Anthropic Messages 的其它 endpoint 应由调用方配置，例如 OpenRouter：
+
+- `base_url("https://openrouter.ai/api")`
+- `api_key_env("OPENROUTER_API_KEY")`
+- `auth_scheme(AnthropicAuthScheme::Bearer)`
+- `without_anthropic_version()`
+
+core 不提供 OpenRouter、Claude 或任何 vendor/model preset。
+
+### Anthropic Request Mapping
+
+`build_anthropic_payload` 负责把 `ModelRequest` 转成 Messages body：
+
+- `model`
+- `max_tokens`
+- `stream: true`
+- `temperature`
+- `thinking`
+- `tools`
+- top-level `system`
+- `messages`
+- caller-owned `extra_body`
+
+message 映射规则：
+
+- `System` -> top-level `system` text blocks，不进入 `messages` array。
+- `User` -> `{ role: "user", content: [...] }`。
+- `Assistant` -> `{ role: "assistant", content: [...] }`。
+- `ToolResult` -> `{ role: "user", content: [{ type: "tool_result", ... }] }`。
+- `Custom(role)` fail-fast，因为 Anthropic Messages 不接受 arbitrary role。
+
+tool 映射规则：
+
+- `ToolSpec` -> Anthropic `tools` array，保留 `name`、`description`、`input_schema`。
+- assistant `ContentBlock::ToolCall` -> `tool_use` block。
+- tool result message -> user role `tool_result` block。
+- tool result content 可包含 text/json/media；不支持的 media 会返回 provider error。
+
+### Anthropic Media Input
+
+Anthropic provider v1 支持：
+
+- `MediaKind::Image + Inline(base64)` -> `image` base64 source，需要 `mime_type`。
+- `MediaKind::Image + Uri` -> `image` URL source。
+- `MediaKind::File + Inline(base64)` -> `document` base64 source，需要 `mime_type`，`name` 映射为 title。
+- `MediaKind::File + Uri` -> `document` URL source。
+- `MediaKind::File + Provider` -> opt-in Files API file source。只有 `allow_files_api_media(true)` 且 provider id 匹配当前 provider 时才允许，同时自动添加 Files API beta header。
+
+Anthropic provider v1 不支持 audio/video/custom media kind，也不支持 system media 或 assistant media replay。它们会 fail-fast，而不是静默丢弃。
+
+### Anthropic Streaming
+
+Anthropic Messages 使用与 Chat Completions 不同的 SSE event model。provider 复用 crate-private SSE framing decoder，但 event parser 独立处理：
+
+- `message_start` -> `Started`。
+- `content_block_delta.text_delta` -> `TextDelta`。
+- `content_block_start` with `tool_use` -> 按 content block index 建立 partial tool call。
+- `content_block_delta.input_json_delta` -> 按 index 聚合 JSON fragment。
+- `content_block_stop` -> emit `ToolCall`。
+- `content_block_delta.thinking_delta` -> `ThinkingDelta` with `ThinkingKind::Raw`。
+- `content_block_delta.signature_delta` -> 更新 thinking metadata/raw snapshot/replay descriptor。
+- `message_delta.stop_reason` -> `StopReason`。
+- `message_stop` -> `Finished`。
+- stream `error` -> `Failed` event，后续 `assistant.commit` 会让 run failed。
+
+tool `input_json_delta` 如果不是合法 JSON，会保留为 string，和 Chat Completions provider 的 malformed tool arguments 策略一致。
+
+### Anthropic Thinking Replay
+
+`enable_thinking(budget_tokens)` 才会在 request body 中发送 Anthropic extended thinking config。provider 默认不请求 thinking。
+
+每个 Anthropic thinking delta 会携带 replay descriptor：
+
+```json
+{
+  "v": 1,
+  "kind": "anthropic_messages_thinking_replay",
+  "providerId": "provider-id",
+  "model": "model-name",
+  "signature": "signature-if-seen"
+}
+```
+
+历史 assistant message replay 时，只有 descriptor 的 provider id 和 model 都匹配当前 config，才会把 prior `ThinkingBlock` 渲染为 Anthropic `thinking` block，并带回 signature。跨 provider 或跨 model 的 thinking 会被忽略，避免把不兼容 raw reasoning 注入另一个 endpoint。
+
 ## Cancellation 和 Timeout
 
 核心使用 `CancellationToken`，内部是 atomic flag 加 `Notify`。
@@ -788,6 +904,7 @@ node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
 
 ```bash
 cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
+cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_messages -- --ignored --nocapture
 ```
 
 真实 provider 测试当前覆盖：
@@ -804,8 +921,10 @@ cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 - tool call
 - tool execution
 - text+image+audio+video input payload acceptance
+- Anthropic-compatible OpenRouter Messages endpoint
+- Anthropic Messages provider text compatibility through `openrouter/free`
 
-这个测试保持 ignored，因为它依赖外部网络、账户、模型可用性和 provider 当前行为。
+这些测试保持 ignored，因为它们依赖外部网络、账户、模型可用性和 provider 当前行为。当前 Anthropic Messages 外部门只要求 OpenRouter；官方 Anthropic 测试作为显式 opt-in diagnostic 保留，只有设置 `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` 且提供有效 `ANTHROPIC_API_KEY` 时才运行。
 
 ## 当前架构边界
 
@@ -813,6 +932,7 @@ cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 
 - core provider 不硬编码 OpenRouter、DeepSeek 或其它 vendor preset。
 - `ChatCompletionsProvider` 是内置 provider，但仍只是 `ModelProvider`。
+- `AnthropicMessagesProvider` 是内置 provider，但仍只是 `ModelProvider`。
 - phase graph 是主要 loop 扩展点，不把所有扩展都压进 callback。
 - event log 是状态事实来源，`AgentState` 是 event replay 的结果。
 - thinking replay 只在同 provider/model scope 内发生。
@@ -826,7 +946,7 @@ cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 1. 持久化 event store：SQLite/PostgreSQL/object store。
 2. 更细粒度 phase hooks：例如 before/after model request、before/after assistant commit。
 3. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
-4. 更完整的 Responses API 和 Anthropic Messages provider。
+4. 更完整的 Responses API provider。
 5. 更严格的 JSON-RPC extension conformance suite。
 6. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 7. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。

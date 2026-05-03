@@ -1,0 +1,295 @@
+use noloong_agent_core::{
+    BoxFuture, CancellationToken, ContentBlock, Result, ToolOutput, ToolProvider, ToolRequest,
+    ToolSpec,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    time::{Duration, sleep},
+};
+
+#[derive(Clone, Debug)]
+pub struct MockResponse {
+    pub status: u16,
+    pub content_type: &'static str,
+    pub body: &'static str,
+}
+
+impl MockResponse {
+    pub fn new(status: u16, content_type: &'static str, body: &'static str) -> Self {
+        Self {
+            status,
+            content_type,
+            body,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CapturedRequest {
+    pub raw: String,
+    pub headers: BTreeMap<String, String>,
+    pub json: Value,
+}
+
+impl CapturedRequest {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+}
+
+pub struct MockServer {
+    address: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockServer {
+    pub async fn spawn(
+        status: u16,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> Result<Self> {
+        Self::spawn_many(vec![MockResponse::new(status, content_type, body)]).await
+    }
+
+    pub async fn spawn_many(responses: Vec<MockResponse>) -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_slot = Arc::clone(&requests);
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.expect("mock server accept failed");
+                let request = read_http_request(&mut socket)
+                    .await
+                    .expect("mock server read failed");
+                request_slot
+                    .lock()
+                    .expect("request lock poisoned")
+                    .push(request);
+                let body = response.body;
+                let response = format!(
+                    "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    response.status,
+                    response.content_type,
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("mock server write failed");
+            }
+        });
+        Ok(Self { address, requests })
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    pub fn request_json(&self) -> Value {
+        self.request().json
+    }
+
+    pub fn request(&self) -> CapturedRequest {
+        let request = self
+            .requests
+            .lock()
+            .expect("request lock poisoned")
+            .first()
+            .cloned()
+            .expect("request was not received");
+        parse_request(request)
+    }
+
+    pub fn requests_json(&self) -> Vec<Value> {
+        self.requests()
+            .into_iter()
+            .map(|request| request.json)
+            .collect()
+    }
+
+    pub fn requests(&self) -> Vec<CapturedRequest> {
+        self.requests
+            .lock()
+            .expect("request lock poisoned")
+            .iter()
+            .cloned()
+            .map(parse_request)
+            .collect()
+    }
+}
+
+pub struct HangingServer {
+    address: String,
+}
+
+impl HangingServer {
+    pub async fn spawn() -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("mock server accept failed");
+            sleep(Duration::from_secs(5)).await;
+        });
+        Ok(Self { address })
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+}
+
+fn parse_request(raw: String) -> CapturedRequest {
+    let (head, body) = raw.split_once("\r\n\r\n").expect("request body separator");
+    CapturedRequest {
+        headers: parse_headers(head),
+        json: serde_json::from_str(body).expect("request body is valid JSON"),
+        raw,
+    }
+}
+
+fn parse_headers(head: &str) -> BTreeMap<String, String> {
+    head.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> std::io::Result<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end = loop {
+        let read = socket.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(String::from_utf8_lossy(&buffer).to_string());
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = find_header_end(&buffer) {
+            break index;
+        }
+    };
+    let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .or_else(|| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+    let total_len = header_end + 4 + content_length;
+    while buffer.len() < total_len {
+        let read = socket.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    Ok(String::from_utf8_lossy(&buffer).to_string())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+pub struct LiveEchoTool;
+
+impl ToolProvider for LiveEchoTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "live_echo".into(),
+            description: "Echoes a value for live model tool-call conformance tests.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "type": "string"
+                    }
+                },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+            execution_mode: None,
+        }
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        request: ToolRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ToolOutput> {
+        Box::pin(async move {
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text {
+                    text: request
+                        .arguments
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                }],
+                details: request.arguments,
+                is_error: false,
+                updates: Vec::new(),
+            })
+        })
+    }
+}
+
+pub const RED_DOT_PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+pub fn silent_wav_base64() -> String {
+    let sample_rate = 8_000_u32;
+    let samples = sample_rate / 5;
+    let data_size = samples * 2;
+    let mut bytes = Vec::with_capacity(44 + data_size as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    bytes.extend(std::iter::repeat_n(0_u8, data_size as usize));
+    base64_encode(&bytes)
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        encoded.push(TABLE[(first >> 2) as usize] as char);
+        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
+}

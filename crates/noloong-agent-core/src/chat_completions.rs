@@ -1,3 +1,5 @@
+use crate::sse::SseDecoder;
+use crate::tool_arguments::parse_tool_arguments;
 use crate::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaDelta,
     MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
@@ -376,7 +378,7 @@ impl ModelProvider for ChatCompletionsProvider {
                 let Some(chunk) = chunk else {
                     break;
                 };
-                for data in decoder.push(&String::from_utf8_lossy(&chunk)) {
+                for data in decoder.push(&chunk) {
                     if data == "[DONE]" {
                         state.done = true;
                         break;
@@ -986,73 +988,6 @@ impl ReasoningField {
 }
 
 #[derive(Default)]
-struct SseDecoder {
-    buffer: String,
-    pending_cr: bool,
-}
-
-impl SseDecoder {
-    fn push(&mut self, chunk: &str) -> Vec<String> {
-        self.push_normalized(chunk);
-        self.drain_frames()
-    }
-
-    fn finish(&mut self) -> Vec<String> {
-        if !self.buffer.trim().is_empty() {
-            self.buffer.push_str("\n\n");
-        }
-        self.drain_frames()
-    }
-
-    fn push_normalized(&mut self, chunk: &str) {
-        for character in chunk.chars() {
-            match character {
-                '\r' => {
-                    self.buffer.push('\n');
-                    self.pending_cr = true;
-                }
-                '\n' if self.pending_cr => {
-                    self.pending_cr = false;
-                }
-                '\n' => {
-                    self.buffer.push('\n');
-                    self.pending_cr = false;
-                }
-                character => {
-                    self.buffer.push(character);
-                    self.pending_cr = false;
-                }
-            }
-        }
-    }
-
-    fn drain_frames(&mut self) -> Vec<String> {
-        let mut frames = Vec::new();
-        while let Some(index) = self.buffer.find("\n\n") {
-            let frame = self.buffer[..index].to_string();
-            self.buffer.drain(..index + 2);
-            if let Some(data) = parse_sse_frame(&frame) {
-                frames.push(data);
-            }
-        }
-        frames
-    }
-}
-
-fn parse_sse_frame(frame: &str) -> Option<String> {
-    let data = frame
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(|line| line.strip_prefix(' ').unwrap_or(line).to_string())
-        .collect::<Vec<_>>();
-    if data.is_empty() {
-        None
-    } else {
-        Some(data.join("\n"))
-    }
-}
-
-#[derive(Default)]
 struct ChatStreamState {
     replay_scope: ReasoningReplayScope,
     tool_calls: BTreeMap<u64, PartialToolCall>,
@@ -1278,12 +1213,7 @@ impl PartialToolCall {
     }
 
     fn to_event(&self) -> ModelStreamEvent {
-        let arguments = if self.arguments_json.trim().is_empty() {
-            Value::Object(Map::new())
-        } else {
-            serde_json::from_str(&self.arguments_json)
-                .unwrap_or_else(|_| Value::String(self.arguments_json.clone()))
-        };
+        let arguments = parse_tool_arguments(&self.arguments_json);
         ModelStreamEvent::ToolCall {
             tool_call: ToolCall {
                 id: self.id.clone(),
@@ -1540,6 +1470,18 @@ mod tests {
         assert!(decoder.push("data: one\r").is_empty());
         assert!(decoder.push("\ndata: two\r").is_empty());
         assert_eq!(decoder.push("\n\r\n"), ["one\ntwo"]);
+    }
+
+    #[test]
+    fn sse_decoder_preserves_utf8_split_across_chunks() {
+        let mut decoder = SseDecoder::default();
+
+        assert!(
+            decoder
+                .push([b'd', b'a', b't', b'a', b':', b' ', 0xE4])
+                .is_empty()
+        );
+        assert_eq!(decoder.push([0xBD, 0xA0, b'\n', b'\n']), ["你"]);
     }
 
     #[test]

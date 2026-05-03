@@ -1,10 +1,14 @@
 use noloong_agent_core::{
-    AgentEventKind, AgentMessage, AgentRuntime, BoxFuture, CancellationToken,
-    ChatCompletionsProvider, ChatCompletionsProviderConfig, ContentBlock, MediaBlock, MediaKind,
-    MessageRole, ModelStreamEvent, Result, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    AgentEventKind, AgentMessage, AgentRuntime, ChatCompletionsProvider,
+    ChatCompletionsProviderConfig, ContentBlock, MediaBlock, MediaKind, MessageRole,
+    ModelStreamEvent, Result,
 };
 use serde_json::json;
 use std::sync::Arc;
+
+pub mod support;
+
+use support::{LiveEchoTool, RED_DOT_PNG_BASE64, silent_wav_base64};
 
 #[tokio::test]
 #[ignore = "requires OPENROUTER_API_KEY and external OpenRouter access"]
@@ -381,95 +385,4 @@ fn openrouter_nemotron_omni_provider(max_tokens: u64) -> Result<ChatCompletionsP
             }),
         ),
     )
-}
-
-struct LiveEchoTool;
-
-impl ToolProvider for LiveEchoTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "live_echo".into(),
-            description: "Echoes a value for live model tool-call conformance tests.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "value": {
-                        "type": "string"
-                    }
-                },
-                "required": ["value"],
-                "additionalProperties": false
-            }),
-            execution_mode: None,
-        }
-    }
-
-    fn execute_tool<'a>(
-        &'a self,
-        request: ToolRequest,
-        _cancellation: CancellationToken,
-    ) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            Ok(ToolOutput {
-                content: vec![ContentBlock::Text {
-                    text: request
-                        .arguments
-                        .get("value")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                }],
-                details: request.arguments,
-                is_error: false,
-                updates: Vec::new(),
-            })
-        })
-    }
-}
-
-const RED_DOT_PNG_BASE64: &str =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
-
-fn silent_wav_base64() -> String {
-    let sample_rate = 8_000_u32;
-    let samples = sample_rate / 5;
-    let data_size = samples * 2;
-    let mut bytes = Vec::with_capacity(44 + data_size as usize);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16_u32.to_le_bytes());
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&1_u16.to_le_bytes());
-    bytes.extend_from_slice(&sample_rate.to_le_bytes());
-    bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    bytes.extend_from_slice(&2_u16.to_le_bytes());
-    bytes.extend_from_slice(&16_u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_size.to_le_bytes());
-    bytes.extend(std::iter::repeat_n(0_u8, data_size as usize));
-    base64_encode(&bytes)
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-        encoded.push(TABLE[(first >> 2) as usize] as char);
-        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-        if chunk.len() > 2 {
-            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-    }
-    encoded
 }

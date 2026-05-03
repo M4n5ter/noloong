@@ -6,11 +6,11 @@ use noloong_agent_core::{
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    time::{Duration, sleep},
-};
+use tokio::time::{Duration, sleep};
+
+pub mod support;
+
+use support::{HangingServer, MockServer};
 
 #[tokio::test]
 async fn payload_maps_messages_tools_and_replay_descriptor() -> Result<()> {
@@ -1018,109 +1018,4 @@ fn request_with_history() -> ModelRequest {
         }],
         metadata: Default::default(),
     }
-}
-
-struct MockServer {
-    address: String,
-    request: Arc<Mutex<Option<String>>>,
-}
-
-impl MockServer {
-    async fn spawn(status: u16, content_type: &'static str, body: &'static str) -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?.to_string();
-        let request = Arc::new(Mutex::new(None));
-        let request_slot = Arc::clone(&request);
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("mock server accept failed");
-            let request = read_http_request(&mut socket)
-                .await
-                .expect("mock server read failed");
-            *request_slot.lock().expect("request lock poisoned") = Some(request);
-            let response = format!(
-                "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("mock server write failed");
-        });
-        Ok(Self { address, request })
-    }
-
-    fn url(&self) -> String {
-        format!("http://{}", self.address)
-    }
-
-    fn request_json(&self) -> Value {
-        let request = self
-            .request
-            .lock()
-            .expect("request lock poisoned")
-            .clone()
-            .expect("request was not received");
-        let body = request
-            .split("\r\n\r\n")
-            .nth(1)
-            .expect("request body separator");
-        serde_json::from_str(body).expect("request body is valid JSON")
-    }
-}
-
-struct HangingServer {
-    address: String,
-}
-
-impl HangingServer {
-    async fn spawn() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?.to_string();
-        tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.expect("mock server accept failed");
-            sleep(Duration::from_secs(5)).await;
-        });
-        Ok(Self { address })
-    }
-
-    fn url(&self) -> String {
-        format!("http://{}", self.address)
-    }
-}
-
-async fn read_http_request(socket: &mut tokio::net::TcpStream) -> std::io::Result<String> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 1024];
-    let header_end = loop {
-        let read = socket.read(&mut chunk).await?;
-        if read == 0 {
-            return Ok(String::from_utf8_lossy(&buffer).to_string());
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        if let Some(index) = find_header_end(&buffer) {
-            break index;
-        }
-    };
-    let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
-    let content_length = headers
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("Content-Length:")
-                .or_else(|| line.strip_prefix("content-length:"))
-                .and_then(|value| value.trim().parse::<usize>().ok())
-        })
-        .unwrap_or(0);
-    let total_len = header_end + 4 + content_length;
-    while buffer.len() < total_len {
-        let read = socket.read(&mut chunk).await?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-    }
-    Ok(String::from_utf8_lossy(&buffer).to_string())
-}
-
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
