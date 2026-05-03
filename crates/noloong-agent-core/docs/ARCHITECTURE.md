@@ -1,6 +1,6 @@
 # noloong-agent-core 架构说明
 
-本文档描述 `noloong-agent-core` 当前的核心架构、运行流程、扩展边界和内置 Chat Completions provider 的工作方式。它关注的是 crate 内部的长期设计约束，而不是某一个应用层 agent 的具体产品形态。
+本文档描述 `noloong-agent-core` 当前的核心架构、运行流程、扩展边界和内置模型 provider 的工作方式。它关注的是 crate 内部的长期设计约束，而不是某一个应用层 agent 的具体产品形态。
 
 ## 设计定位
 
@@ -37,6 +37,8 @@
 - `src/agent.rs`：有状态 `Agent` UX layer。
 - `src/jsonrpc.rs`：stdio JSON-RPC extension bridge。
 - `src/chat_completions.rs`：内置 OpenAI-compatible Chat Completions provider。
+- `src/responses.rs`：内置 OpenAI Responses API provider。
+- `src/anthropic_messages.rs`：内置 Anthropic Messages provider。
 
 高层关系可以概括为：
 
@@ -733,6 +735,143 @@ merge 策略：
 
 历史 assistant message replay 时，只有 descriptor 的 provider id 和 model 都匹配当前 config，才会把 `ThinkingBlock.raw` 写回对应 Chat Completions reasoning 字段。这样可以避免跨 provider/model 注入不兼容 raw reasoning。
 
+## Built-in Responses API Provider
+
+内置 `ResponsesApiProvider` 也是普通 `ModelProvider`。它只负责 OpenAI Responses / OpenResponses wire format，不拥有 hidden conversation state，也不改变 runtime、phase graph 或 event sourcing 模型。
+
+v1 采用 stateless full-history 模式：
+
+- 每次从 `AgentState.messages` 构造完整 `input`。
+- 默认 `store = false`。
+- 不自动维护 `previous_response_id`。
+- 如果未来需要 stateful Responses，应由 context/phase 扩展显式管理 response id，而不是让 provider 隐式持有会话状态。
+
+配置项：
+
+- `id`
+- `base_url`
+- `model`
+- `api_key`
+- `api_key_env`
+- `headers`
+- `extra_body`
+- `max_output_tokens`
+- `temperature`
+- `request_timeout`
+- `stream_idle_timeout`
+- `store`
+- `reasoning`
+- `include_encrypted_reasoning`
+- `native_tools`
+- `function_tool_strict`
+- `allow_file_data_url_input`
+
+官方 OpenAI 默认值：
+
+- base URL：`https://api.openai.com/v1`
+- endpoint：`{base_url}/responses`
+- API key env：`OPENAI_API_KEY`
+- auth header：Bearer token
+- `stream: true`
+- `store: false`
+
+Responses-compatible endpoint 仍由调用方配置。比如 OpenRouter Responses Beta 可以在测试或应用层使用：
+
+- `base_url("https://openrouter.ai/api/v1")`
+- `api_key_env("OPENROUTER_API_KEY")`
+- `header("X-Title", "...")`
+- `extra_body(...)`
+
+core 不提供 OpenRouter、OpenAI model 或任何 vendor preset。
+
+### Responses Request Mapping
+
+`build_responses_payload` 负责把 `ModelRequest` 转成 Responses body：
+
+- `model`
+- `input`
+- `stream: true`
+- `store`
+- `max_output_tokens`
+- `temperature`
+- `reasoning`
+- `include`
+- top-level `instructions`
+- `tools`
+- caller-owned `extra_body`
+
+注意 `extra_body` 最后 merge，因此调用方可以为兼容 provider 添加或覆盖字段。
+
+message 映射规则：
+
+- `System` -> top-level `instructions`，不进入 `input` array。
+- `User` -> `{ type: "message", role: "user", content: [...] }`。
+- `Assistant` text/json -> completed assistant `message` item with `output_text`。
+- `Assistant` tool calls -> `function_call` items。
+- `Assistant` thinking -> 只有同 provider/model replay descriptor 匹配时，才渲染为 reasoning item。
+- `ToolResult` -> `function_call_output` item。
+- `Custom(role)` fail-fast，因为 Responses API 不接受 arbitrary role。
+
+tool 映射规则：
+
+- runtime `ToolSpec` -> Responses function tool。
+- `function_tool_strict` 可配置，但不污染 core `ToolSpec`。
+- `native_tools` 原样追加，用于 hosted tools pass-through。
+- stream 中的 function call 仍回到 core `ToolCall`，由现有 tool phases 执行。
+
+### Responses Media Input
+
+Responses provider v1 支持：
+
+- `MediaKind::Image + Uri` -> `input_image.image_url`。
+- `MediaKind::Image + Inline(base64)` -> data URL，需要 `mime_type`。
+- `MediaKind::Image + Provider` -> `input_image.file_id`，仅同 provider id。
+- `MediaKind::File + Uri` -> `input_file.file_url`。
+- `MediaKind::File + Provider` -> `input_file.file_id`，仅同 provider id。
+- `MediaKind::File + Inline(base64)` -> `input_file.file_data`，只有 `allow_file_data_url_input(true)` 时允许。
+
+audio、video、custom media kind、system media 和 assistant media replay 在 v1 中 fail-fast。这个 provider 不下载 URI、不上传 blob，也不管理文件生命周期。
+
+### Responses Streaming
+
+Responses SSE event model 不同于 Chat Completions。provider 复用 crate-private SSE framing decoder，但 parser 独立处理：
+
+- `response.created` -> `Started`。
+- `response.output_text.delta` -> `TextDelta`。
+- OpenRouter-compatible `response.content_part.delta` text -> `TextDelta`。
+- `response.output_item.added` with `function_call` -> 建立 partial tool call。
+- `response.function_call_arguments.delta` -> 聚合 JSON fragment。
+- `response.function_call_arguments.done` 或 function output item done -> emit `ToolCall`。
+- `response.reasoning_summary_text.delta` -> `ThinkingDelta` with `ThinkingKind::Summary`。
+- `response.reasoning_text.delta` -> `ThinkingDelta` with `ThinkingKind::Raw`。
+- encrypted reasoning item -> `ThinkingDelta` with `ThinkingKind::Encrypted` and raw snapshot。
+- `response.completed` / `response.done` -> emit pending tool calls and `Finished(Stop)`。
+- `response.incomplete` with max-token reason -> `Finished(Length)`。
+- `response.failed` / `response.error` / stream `error` -> `Failed`。
+
+tool arguments 如果不是合法 JSON，会保留为 string，和其它 built-in provider 的 malformed tool arguments 策略一致。
+
+### Responses Thinking Replay
+
+Responses reasoning request config 是显式 opt-in：
+
+- `ResponsesReasoningEffort::{Minimal, Low, Medium, High, XHigh, Custom}`
+- `ResponsesReasoningSummary::{Auto, Concise, Detailed, None, Custom}`
+- `include_encrypted_reasoning(true)` 会添加 `include: ["reasoning.encrypted_content"]`。
+
+每个 Responses thinking delta 会携带 replay descriptor：
+
+```json
+{
+  "v": 1,
+  "kind": "openai_responses_reasoning_replay",
+  "providerId": "provider-id",
+  "model": "model-name"
+}
+```
+
+历史 assistant message replay 时，只有 descriptor 的 provider id 和 model 都匹配当前 config，才会把 prior `ThinkingBlock.raw` 渲染为 Responses reasoning item。跨 provider 或跨 model 的 thinking 会被忽略。
+
 ## Built-in Anthropic Messages Provider
 
 内置 `AnthropicMessagesProvider` 也是普通 `ModelProvider`。它只负责 Anthropic Messages wire format 和 SSE event model，不改变 runtime、phase graph 或 core message 类型。
@@ -862,7 +1001,7 @@ tool `input_json_delta` 如果不是合法 JSON，会保留为 string，和 Chat
 - tool execution 前。
 - stdio JSON-RPC request 等待中。
 
-Chat Completions provider 有两层 timeout：
+built-in HTTP provider 有两层 timeout：
 
 - `request_timeout`：等待初始 HTTP response。
 - `stream_idle_timeout`：stream chunk 空闲超时。
@@ -905,6 +1044,7 @@ node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
 ```bash
 cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_messages -- --ignored --nocapture
+cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 ```
 
 真实 provider 测试当前覆盖：
@@ -923,8 +1063,11 @@ cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_mess
 - text+image+audio+video input payload acceptance
 - Anthropic-compatible OpenRouter Messages endpoint
 - Anthropic Messages provider text compatibility through `openrouter/free`
+- OpenRouter Responses-compatible endpoint
+- Responses provider text compatibility through `openrouter/free`
+- optional Responses tool/reasoning gates through explicitly declared model env vars
 
-这些测试保持 ignored，因为它们依赖外部网络、账户、模型可用性和 provider 当前行为。当前 Anthropic Messages 外部门只要求 OpenRouter；官方 Anthropic 测试作为显式 opt-in diagnostic 保留，只有设置 `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` 且提供有效 `ANTHROPIC_API_KEY` 时才运行。
+这些测试保持 ignored，因为它们依赖外部网络、账户、模型可用性和 provider 当前行为。当前 Anthropic Messages 和 Responses 外部门只要求 OpenRouter；官方 Anthropic 测试作为显式 opt-in diagnostic 保留，只有设置 `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` 且提供有效 `ANTHROPIC_API_KEY` 时才运行。
 
 ## 当前架构边界
 
@@ -932,6 +1075,7 @@ cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_mess
 
 - core provider 不硬编码 OpenRouter、DeepSeek 或其它 vendor preset。
 - `ChatCompletionsProvider` 是内置 provider，但仍只是 `ModelProvider`。
+- `ResponsesApiProvider` 是内置 provider，但仍只是 `ModelProvider`。
 - `AnthropicMessagesProvider` 是内置 provider，但仍只是 `ModelProvider`。
 - phase graph 是主要 loop 扩展点，不把所有扩展都压进 callback。
 - event log 是状态事实来源，`AgentState` 是 event replay 的结果。
@@ -946,7 +1090,7 @@ cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_mess
 1. 持久化 event store：SQLite/PostgreSQL/object store。
 2. 更细粒度 phase hooks：例如 before/after model request、before/after assistant commit。
 3. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
-4. 更完整的 Responses API provider。
+4. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
 5. 更严格的 JSON-RPC extension conformance suite。
 6. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 7. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。

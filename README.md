@@ -29,7 +29,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> noloong_agent_core::Result<()> {
     let provider = ChatCompletionsProvider::new(
-        ChatCompletionsProviderConfig::new("openai-chat", "gpt-4.1-mini")
+        ChatCompletionsProviderConfig::new("openai-chat", "gpt-5.5-mini")
             .api_key_env("OPENAI_API_KEY")
             .max_completion_tokens(512),
     )?;
@@ -46,6 +46,40 @@ async fn main() -> noloong_agent_core::Result<()> {
 ```
 
 Provider-specific compatible APIs should be configured by the caller through `base_url`, `api_key_env`, headers, and `extra_body`; the core provider intentionally does not hardcode vendor/model presets. OpenAI Chat Completions uses `max_completion_tokens` for the generated-token upper bound, including visible output and reasoning tokens. Some compatible providers still require their legacy or provider-specific field names, so those overrides should stay in caller-owned `extra_body`.
+
+Built-in OpenAI Responses API provider:
+
+```rust
+use noloong_agent_core::{
+    AgentRuntime, ResponsesApiProvider, ResponsesApiProviderConfig,
+    ResponsesReasoningConfig, ResponsesReasoningEffort,
+};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> noloong_agent_core::Result<()> {
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("openai-responses", "gpt-5.5-mini")
+            .api_key_env("OPENAI_API_KEY")
+            .max_output_tokens(1024)
+            .reasoning(
+                ResponsesReasoningConfig::new()
+                    .effort(ResponsesReasoningEffort::Low),
+            ),
+    )?;
+
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(provider))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("Think briefly, then say hello").await?;
+    println!("messages: {}", report.state.messages.len());
+    Ok(())
+}
+```
+
+Responses-compatible routers stay caller-owned as well. For example, OpenRouter can be configured with `base_url("https://openrouter.ai/api/v1")`, `api_key_env("OPENROUTER_API_KEY")`, optional headers such as `X-Title`, and provider-specific request fields through `extra_body`; core does not provide an OpenRouter or model preset.
 
 Built-in Anthropic Messages provider:
 
@@ -99,6 +133,8 @@ OpenAI-compatible Chat Completions does not define a single standard thinking fi
 
 Anthropic Messages exposes extended thinking as stream events. The built-in provider keeps it off by default, enables it with `enable_thinking(budget_tokens)`, records `thinking_delta` as `ThinkingDelta`, preserves `signature_delta` in metadata/raw snapshots, and only replays prior thinking into assistant history when provider id and model match.
 
+OpenAI Responses exposes reasoning as first-class response items and summary/text deltas. The built-in provider maps reasoning summary text to `ThinkingKind::Summary`, raw reasoning text to `ThinkingKind::Raw`, encrypted reasoning payloads to `ThinkingKind::Encrypted`, and replays prior reasoning only when provider id and model match.
+
 ## Media I/O
 
 Messages can carry provider-neutral media blocks. The core stores media as references by default, with inline base64 available for small payloads when the caller already owns encoded data:
@@ -134,11 +170,14 @@ let output = ToolOutput {
 
 The built-in Chat Completions provider maps image URI/inline media to `image_url`, inline WAV/MP3 audio to `input_audio`, video URI/inline media to `video_url`, and provider file references to `file_id`. Provider-hosted video references are passed as `file_id` only when `allow_provider_video_file_media(true)` is explicitly configured. It does not download media URIs or manage blob storage; a future `MediaStore` can be added without changing the message model.
 
+The built-in Responses provider maps image URI/inline/provider media to `input_image` and file URI/provider media to `input_file`. Inline file data is opt-in through `allow_file_data_url_input(true)`. Audio, video, custom media kinds, system media, and assistant media replay fail fast in this provider v1.
+
 The built-in Anthropic Messages provider maps image URI/inline media to `image` blocks and file URI/inline media to `document` blocks. Provider-hosted Anthropic file ids are opt-in through `allow_files_api_media(true)`, which also adds the Files API beta header. Audio, video, custom media kinds, and system media fail fast in this provider v1.
 
 Provider mapping references:
 
 - OpenAI Chat Completions API: <https://platform.openai.com/docs/api-reference/chat/create-chat-completion>
+- OpenAI Responses API: <https://platform.openai.com/docs/api-reference/responses/create>
 - OpenAI vision guide: <https://platform.openai.com/docs/guides/images-vision?api-mode=chat>
 - OpenAI audio guide: <https://platform.openai.com/docs/guides/audio>
 - Anthropic Messages examples: <https://docs.anthropic.com/en/api/messages-examples>
@@ -163,10 +202,13 @@ Manual external gate:
 ```bash
 cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_messages -- --ignored --nocapture
+cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 ```
 
 The OpenRouter live test requires `OPENROUTER_API_KEY`. It routes `deepseek/deepseek-v4-flash` to the official DeepSeek provider with thinking enabled, uses the generic `openrouter/free` router for image input coverage, and uses `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` for audio and video input coverage because the free router currently reports no endpoints for input audio/video. Provider-specific request details are constructed in tests through generic `ChatCompletionsProviderConfig` and `extra_body`, not in core provider code. The manual gate uses larger live output budgets so thinking, visible text, tool-call streaming, and multimodal payload acceptance can be observed. It is intentionally excluded from default CI because it depends on external network access and provider availability.
 
 The Anthropic-compatible live gate uses OpenRouter and requires `OPENROUTER_API_KEY`. The text gate defaults to `openrouter/free` and can be overridden with `NOLOONG_OPENROUTER_ANTHROPIC_LIVE_MODEL`; the tool gate runs only when `NOLOONG_OPENROUTER_ANTHROPIC_TOOL_MODEL` names a tool-capable model. Official Anthropic live tests are present only as explicit opt-in diagnostics and require `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` plus a valid `ANTHROPIC_API_KEY`.
+
+The Responses-compatible live gate also uses OpenRouter and requires only `OPENROUTER_API_KEY`. The text gate defaults to `openrouter/free` and can be overridden with `NOLOONG_OPENROUTER_RESPONSES_LIVE_MODEL`; tool and reasoning gates run only when `NOLOONG_OPENROUTER_RESPONSES_TOOL_MODEL` or `NOLOONG_OPENROUTER_RESPONSES_REASONING_MODEL` names a capable model.
 
 GitHub Actions runs the default local gate on push and pull request. Live provider gates stay manual.

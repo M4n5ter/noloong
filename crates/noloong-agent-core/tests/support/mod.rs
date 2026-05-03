@@ -1,6 +1,6 @@
 use noloong_agent_core::{
-    BoxFuture, CancellationToken, ContentBlock, Result, ToolOutput, ToolProvider, ToolRequest,
-    ToolSpec,
+    AgentEventKind, BoxFuture, CancellationToken, ContentBlock, MessageRole, ModelStreamEvent,
+    Result, RunReport, ThinkingBlock, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
@@ -12,6 +12,107 @@ use tokio::{
     net::TcpListener,
     time::{Duration, sleep},
 };
+
+pub fn skip_when_env_missing(name: &str) -> bool {
+    if std::env::var(name).is_ok() {
+        return false;
+    }
+    eprintln!("skipping live test because {name} is not set");
+    true
+}
+
+pub fn assert_exact_assistant_text(report: &RunReport, sentinel: &str) {
+    let visible_text = assistant_visible_text(report);
+    assert_eq!(
+        visible_text.trim(),
+        sentinel,
+        "assistant visible text did not match sentinel; visible text: {visible_text}"
+    );
+}
+
+pub fn assert_assistant_text_contains(report: &RunReport, expected: &str) {
+    let visible_text = assistant_visible_text(report);
+    assert!(
+        visible_text.contains(expected),
+        "assistant visible text did not include expected sentinel `{expected}`; visible text: {visible_text}"
+    );
+}
+
+pub fn assistant_visible_text(report: &RunReport) -> String {
+    report
+        .state
+        .messages
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::Assistant))
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+pub fn has_exact_tool_execution(report: &RunReport, expected_value: &str) -> bool {
+    has_tool_execution(report, |text| text == expected_value)
+}
+
+pub fn has_visible_thinking(report: &RunReport, provider_id: &str) -> bool {
+    has_thinking_event(report, provider_id, false) || has_thinking_block(report, true, false)
+}
+
+pub fn has_visible_or_raw_thinking_event_and_block(report: &RunReport, provider_id: &str) -> bool {
+    has_thinking_event(report, provider_id, true) && has_thinking_block(report, false, true)
+}
+
+pub fn has_thinking_event(report: &RunReport, provider_id: &str, allow_raw: bool) -> bool {
+    report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ModelStreamEvent {
+                provider,
+                event: ModelStreamEvent::ThinkingDelta { delta }
+            } if provider == provider_id
+                && (
+                    delta.text_delta.as_deref().is_some_and(|text| !text.trim().is_empty())
+                    || (allow_raw && delta.raw_snapshot.is_some())
+                )
+        )
+    })
+}
+
+pub fn has_thinking_block(report: &RunReport, assistant_only: bool, allow_raw: bool) -> bool {
+    report.state.messages.iter().any(|message| {
+        (!assistant_only || matches!(message.role, MessageRole::Assistant))
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { thinking } if thinking_has_signal(thinking, allow_raw)
+                )
+            })
+    })
+}
+
+fn has_tool_execution(report: &RunReport, matches_text: impl Fn(&str) -> bool) -> bool {
+    report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolExecutionCompleted { output, .. }
+                if !output.is_error
+                    && output.content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if matches_text(text))
+                    })
+        )
+    })
+}
+
+fn thinking_has_signal(thinking: &ThinkingBlock, allow_raw: bool) -> bool {
+    thinking
+        .text
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+        || (allow_raw && thinking.raw.is_some())
+}
 
 #[derive(Clone, Debug)]
 pub struct MockResponse {

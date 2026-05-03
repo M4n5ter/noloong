@@ -6,8 +6,10 @@ mod chat_completions;
 mod error;
 mod jsonrpc;
 mod phase;
+mod provider_utils;
 mod providers;
 mod reducer;
+mod responses;
 mod runtime;
 mod sse;
 mod store;
@@ -35,6 +37,10 @@ pub use providers::{
     ModelRequest, ModelStreamSink, ToolCallHook, ToolProvider, ToolRequest,
 };
 pub use reducer::{apply_event, reduce_events};
+pub use responses::{
+    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesReasoningConfig,
+    ResponsesReasoningEffort, ResponsesReasoningSummary,
+};
 pub use runtime::{
     AgentEventSink, AgentInput, AgentRuntime, AgentRuntimeBuilder, RunReport, RuntimeQueues,
 };

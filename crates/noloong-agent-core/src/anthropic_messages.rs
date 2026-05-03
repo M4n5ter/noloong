@@ -1,3 +1,7 @@
+use crate::provider_utils::{
+    ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
+    resolve_api_key,
+};
 use crate::sse::SseDecoder;
 use crate::tool_arguments::parse_tool_arguments;
 use crate::{
@@ -6,12 +10,11 @@ use crate::{
     ModelStreamSink, Result, StopReason, ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall,
     ToolSpec,
 };
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
-    env,
     fmt::{Debug, Formatter},
     time::Duration,
 };
@@ -204,17 +207,7 @@ impl AnthropicMessagesProvider {
     }
 
     fn api_key(&self) -> Result<Option<String>> {
-        if let Some(api_key) = &self.config.api_key {
-            return Ok(Some(api_key.clone()));
-        }
-        let Some(api_key_env) = &self.config.api_key_env else {
-            return Ok(None);
-        };
-        env::var(api_key_env).map(Some).map_err(|_| {
-            AgentCoreError::Provider(format!(
-                "missing API key environment variable: {api_key_env}"
-            ))
-        })
+        resolve_api_key(&self.config.api_key, &self.config.api_key_env)
     }
 }
 
@@ -279,7 +272,7 @@ impl ModelProvider for AnthropicMessagesProvider {
                 };
                 for data in decoder.push(&chunk) {
                     for event in state.apply_chunk(&data)? {
-                        emit_event(&stream, &mut events, event).await?;
+                        emit_model_stream_event(&stream, &mut events, event).await?;
                     }
                 }
                 if state.done {
@@ -289,36 +282,19 @@ impl ModelProvider for AnthropicMessagesProvider {
 
             for data in decoder.finish() {
                 for event in state.apply_chunk(&data)? {
-                    emit_event(&stream, &mut events, event).await?;
+                    emit_model_stream_event(&stream, &mut events, event).await?;
                 }
             }
             for event in state.finish_events() {
-                emit_event(&stream, &mut events, event).await?;
+                emit_model_stream_event(&stream, &mut events, event).await?;
             }
             Ok(events)
         })
     }
 }
 
-async fn emit_event(
-    stream: &ModelStreamSink,
-    events: &mut Vec<ModelStreamEvent>,
-    event: ModelStreamEvent,
-) -> Result<()> {
-    stream(event.clone()).await?;
-    events.push(event);
-    Ok(())
-}
-
 fn headers_from_config(config: &AnthropicMessagesProviderConfig) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    for (name, value) in &config.headers {
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|error| AgentCoreError::Provider(format!("invalid header name: {error}")))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|error| AgentCoreError::Provider(format!("invalid header value: {error}")))?;
-        headers.insert(name, value);
-    }
+    let mut headers = headers_from_map(&config.headers)?;
     if let Some(version) = &config.anthropic_version {
         let value = HeaderValue::from_str(version).map_err(|error| {
             AgentCoreError::Provider(format!("invalid anthropic-version header: {error}"))
@@ -715,13 +691,17 @@ fn replay_thinking(
         thinking.replay_descriptor.as_ref()?.clone(),
     )
     .ok()?;
-    if descriptor.v != 1 || descriptor.kind != ANTHROPIC_THINKING_REPLAY_KIND {
-        return None;
-    }
-    if descriptor.provider_id.as_str() != config.id.as_str()
-        || descriptor.model.as_str() != config.model.as_str()
-    {
-        return None;
+    match replay_scope_match(
+        descriptor.v,
+        &descriptor.kind,
+        ANTHROPIC_THINKING_REPLAY_KIND,
+        &descriptor.provider_id,
+        &config.id,
+        &descriptor.model,
+        &config.model,
+    ) {
+        ReplayScopeMatch::Match => {}
+        ReplayScopeMatch::Ignore | ReplayScopeMatch::Unsupported => return None,
     }
     let text = thinking
         .raw

@@ -1,3 +1,7 @@
+use crate::provider_utils::{
+    ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
+    resolve_api_key,
+};
 use crate::sse::SseDecoder;
 use crate::tool_arguments::parse_tool_arguments;
 use crate::{
@@ -6,12 +10,10 @@ use crate::{
     ModelStreamEvent, ModelStreamSink, Result, StopReason, ThinkingBlock, ThinkingDelta,
     ThinkingKind, ToolCall, ToolSpec,
 };
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
-    env,
     fmt::{Debug, Formatter},
     time::Duration,
 };
@@ -300,17 +302,7 @@ impl ChatCompletionsProvider {
     }
 
     fn api_key(&self) -> Result<Option<String>> {
-        if let Some(api_key) = &self.config.api_key {
-            return Ok(Some(api_key.clone()));
-        }
-        let Some(api_key_env) = &self.config.api_key_env else {
-            return Ok(None);
-        };
-        env::var(api_key_env).map(Some).map_err(|_| {
-            AgentCoreError::Provider(format!(
-                "missing API key environment variable: {api_key_env}"
-            ))
-        })
+        resolve_api_key(&self.config.api_key, &self.config.api_key_env)
     }
 }
 
@@ -332,7 +324,7 @@ impl ModelProvider for ChatCompletionsProvider {
             let mut request_builder = self
                 .client
                 .post(self.endpoint())
-                .headers(headers_from_config(&self.config)?)
+                .headers(headers_from_map(&self.config.headers)?)
                 .json(&payload);
             if let Some(api_key) = self.api_key()? {
                 request_builder = request_builder.bearer_auth(api_key);
@@ -357,7 +349,7 @@ impl ModelProvider for ChatCompletionsProvider {
             }
 
             let mut events = Vec::new();
-            emit_event(
+            emit_model_stream_event(
                 &stream,
                 &mut events,
                 ModelStreamEvent::Started { stream_id },
@@ -384,7 +376,7 @@ impl ModelProvider for ChatCompletionsProvider {
                         break;
                     }
                     for event in state.apply_chunk(&data)? {
-                        emit_event(&stream, &mut events, event).await?;
+                        emit_model_stream_event(&stream, &mut events, event).await?;
                     }
                 }
                 if state.done {
@@ -395,38 +387,16 @@ impl ModelProvider for ChatCompletionsProvider {
             for data in decoder.finish() {
                 if data != "[DONE]" {
                     for event in state.apply_chunk(&data)? {
-                        emit_event(&stream, &mut events, event).await?;
+                        emit_model_stream_event(&stream, &mut events, event).await?;
                     }
                 }
             }
             for event in state.finish_events() {
-                emit_event(&stream, &mut events, event).await?;
+                emit_model_stream_event(&stream, &mut events, event).await?;
             }
             Ok(events)
         })
     }
-}
-
-fn headers_from_config(config: &ChatCompletionsProviderConfig) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    for (name, value) in &config.headers {
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|error| AgentCoreError::Provider(format!("invalid header name: {error}")))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|error| AgentCoreError::Provider(format!("invalid header value: {error}")))?;
-        headers.insert(name, value);
-    }
-    Ok(headers)
-}
-
-async fn emit_event(
-    stream: &ModelStreamSink,
-    events: &mut Vec<ModelStreamEvent>,
-    event: ModelStreamEvent,
-) -> Result<()> {
-    stream(event.clone()).await?;
-    events.push(event);
-    Ok(())
 }
 
 fn build_chat_payload(
@@ -863,40 +833,18 @@ fn replay_reasoning(
     )
     .ok()?;
     match replay_scope_match(
-        config,
         descriptor.v,
         &descriptor.kind,
         OPENAI_CHAT_REASONING_REPLAY_KIND,
         &descriptor.provider_id,
+        &config.id,
         &descriptor.model,
+        &config.model,
     ) {
         ReplayScopeMatch::Match => {}
         ReplayScopeMatch::Ignore | ReplayScopeMatch::Unsupported => return None,
     }
     Some((descriptor.field.wire_name().into(), thinking.raw.clone()?))
-}
-
-enum ReplayScopeMatch {
-    Match,
-    Ignore,
-    Unsupported,
-}
-
-fn replay_scope_match(
-    config: &ChatCompletionsProviderConfig,
-    version: u64,
-    kind: &str,
-    expected_kind: &str,
-    provider_id: &str,
-    model: &str,
-) -> ReplayScopeMatch {
-    if version != 1 || kind != expected_kind {
-        return ReplayScopeMatch::Unsupported;
-    }
-    if provider_id != config.id.as_str() || model != config.model.as_str() {
-        return ReplayScopeMatch::Ignore;
-    }
-    ReplayScopeMatch::Match
 }
 
 enum MediaReplay {
@@ -915,12 +863,13 @@ fn replay_media(config: &ChatCompletionsProviderConfig, media: &MediaBlock) -> M
         return MediaReplay::Unsupported;
     };
     match replay_scope_match(
-        config,
         descriptor.v,
         &descriptor.kind,
         OPENAI_CHAT_MEDIA_REPLAY_KIND,
         &descriptor.provider_id,
+        &config.id,
         &descriptor.model,
+        &config.model,
     ) {
         ReplayScopeMatch::Match => {}
         ReplayScopeMatch::Ignore => return MediaReplay::Ignore,
