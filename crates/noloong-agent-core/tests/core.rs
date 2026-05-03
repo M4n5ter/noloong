@@ -2,10 +2,11 @@ use noloong_agent_core::{
     AfterToolCallContext, AfterToolCallResult, AgentCoreError, AgentEffect, AgentEventKind,
     AgentMessage, AgentRuntime, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
     CancellationToken, ContentBlock, ContextPatch, ContextProvider, ContextRequest, EventStore,
-    InMemoryEventStore, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
-    PHASE_CONTEXT_PREPARE, PhaseContext, PhaseNode, PhaseOutput, Result, RunStatus, StopReason,
-    ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall, ToolCallHook, ToolExecutionMode,
-    ToolOutput, ToolProvider, ToolRequest, ToolSpec, ToolUpdate, reduce_events,
+    InMemoryEventStore, MediaBlock, MediaDelta, MediaEncoding, MediaKind, MediaSource,
+    ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, PHASE_CONTEXT_PREPARE,
+    PhaseContext, PhaseNode, PhaseOutput, Result, RunStatus, StopReason, ThinkingBlock,
+    ThinkingDelta, ThinkingKind, ToolCall, ToolCallHook, ToolExecutionMode, ToolOutput,
+    ToolProvider, ToolRequest, ToolSpec, ToolUpdate, reduce_events,
 };
 use serde_json::json;
 use std::sync::{
@@ -60,6 +61,72 @@ fn thinking_type_serde_round_trips_structured_payloads() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn media_type_serde_round_trips_provider_neutral_payloads() -> Result<()> {
+    let media = MediaBlock {
+        mime_type: Some("image/png".into()),
+        name: Some("plot.png".into()),
+        ..MediaBlock::uri(MediaKind::Image, "https://example.test/plot.png")
+    };
+    let block = ContentBlock::Media {
+        media: media.clone(),
+    };
+    let encoded_block = serde_json::to_value(&block)?;
+
+    assert_eq!(encoded_block["type"], "media");
+    assert_eq!(encoded_block["media"]["kind"], "image");
+    assert_eq!(encoded_block["media"]["source"]["type"], "uri");
+    assert_eq!(
+        encoded_block["media"]["source"]["uri"],
+        "https://example.test/plot.png"
+    );
+    assert_eq!(encoded_block["media"]["mimeType"], "image/png");
+    assert_eq!(
+        serde_json::from_value::<ContentBlock>(encoded_block)?,
+        block
+    );
+
+    let custom = serde_json::from_value::<ContentBlock>(json!({
+        "type": "media",
+        "media": {
+            "kind": "spectrogram",
+            "source": {
+                "type": "inline",
+                "data": "abc",
+                "encoding": "zstd"
+            },
+            "mimeType": "application/octet-stream"
+        }
+    }))?;
+    assert!(matches!(
+        custom,
+        ContentBlock::Media {
+            media: MediaBlock {
+                kind: MediaKind::Custom(kind),
+                source: MediaSource::Inline {
+                    encoding: MediaEncoding::Custom(encoding),
+                    ..
+                },
+                ..
+            },
+        } if kind == "spectrogram" && encoding == "zstd"
+    ));
+
+    let event = ModelStreamEvent::MediaDelta {
+        delta: MediaDelta::from_inline_base64_delta(MediaKind::Audio, "YWJj"),
+    };
+    let encoded_event = serde_json::to_value(&event)?;
+    assert_eq!(encoded_event["type"], "media_delta");
+    assert_eq!(encoded_event["kind"], "audio");
+    assert_eq!(encoded_event["dataDelta"], "YWJj");
+    assert_eq!(
+        serde_json::from_value::<ModelStreamEvent>(encoded_event)?,
+        event
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn event_log_replays_to_report_state() -> Result<()> {
     let runtime = native_runtime().build()?;
@@ -78,6 +145,54 @@ async fn event_log_replays_to_report_state() -> Result<()> {
                 if tool_call_id == "call-1"
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn assistant_commit_media_ordering() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(MediaOrderModel))
+        .with_tool(Arc::new(DelayedTool::new(
+            "lookup",
+            Duration::from_millis(0),
+        )))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("media").await?;
+    let assistant = report
+        .state
+        .messages
+        .iter()
+        .find(|message| matches!(message.role, noloong_agent_core::MessageRole::Assistant))
+        .expect("assistant message should be committed");
+
+    assert!(matches!(
+        assistant.content.as_slice(),
+        [
+            ContentBlock::Thinking { .. },
+            ContentBlock::Text { text },
+            ContentBlock::Media {
+                media:
+                    MediaBlock {
+                        kind: MediaKind::Image,
+                        source:
+                            MediaSource::Inline {
+                                data,
+                                encoding: MediaEncoding::Base64
+                            },
+                        mime_type: Some(mime_type),
+                        ..
+                    },
+            },
+            ContentBlock::Text { text: tail },
+            ContentBlock::ToolCall { tool_call },
+        ] if text == "answer "
+            && data == "abc123"
+            && mime_type == "image/png"
+            && tail == "tail"
+            && tool_call.name == "lookup"
+    ));
     Ok(())
 }
 
@@ -407,6 +522,96 @@ async fn tool_hooks_can_block_and_rewrite_results() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn tool_output_media_preserved() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(MediaToolModel))
+        .with_tool(Arc::new(MediaTool))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("media tool").await?;
+
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { content, .. }
+                    if matches!(
+                        content.first(),
+                        Some(ContentBlock::Media {
+                            media:
+                                MediaBlock {
+                                    kind: MediaKind::Image,
+                                    source: MediaSource::Uri { uri },
+                                    ..
+                                },
+                        }) if uri == "https://example.test/tool.png"
+                    )
+            )
+        })
+    }));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolExecutionUpdate { update, .. }
+                if matches!(
+                    update.content.first(),
+                    Some(ContentBlock::Media {
+                        media:
+                            MediaBlock {
+                                kind: MediaKind::Audio,
+                                source:
+                                    MediaSource::Inline {
+                                        data,
+                                        encoding: MediaEncoding::Base64,
+                                    },
+                                ..
+                            },
+                    }) if data == "YXVkaW8="
+                )
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn after_tool_hook_can_rewrite_to_media() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(MediaToolModel))
+        .with_tool(Arc::new(MediaTool))
+        .with_tool_hook(Arc::new(MediaRewriteHook))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("media tool").await?;
+
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { content, .. }
+                    if matches!(
+                        content.first(),
+                        Some(ContentBlock::Media {
+                            media:
+                                MediaBlock {
+                                    kind: MediaKind::File,
+                                    source:
+                                        MediaSource::Provider {
+                                            provider_id,
+                                            id,
+                                        },
+                                    ..
+                                },
+                        }) if provider_id == "hook-provider" && id == "file-1"
+                    )
+            )
+        })
+    }));
+    Ok(())
+}
+
 fn native_runtime() -> noloong_agent_core::AgentRuntimeBuilder {
     AgentRuntime::builder()
         .with_model_provider(Arc::new(NativeModel {
@@ -601,6 +806,131 @@ impl ModelProvider for FailingModel {
     }
 }
 
+struct MediaOrderModel;
+
+impl ModelProvider for MediaOrderModel {
+    fn id(&self) -> &str {
+        "media-order-model"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        stream: ModelStreamSink,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            let mut image_start = MediaDelta::from_inline_base64_delta(MediaKind::Image, "abc");
+            image_start.mime_type = Some("image/png".into());
+            image_start.name = Some("plot.png".into());
+            let mut image_end = MediaDelta::from_inline_base64_delta(MediaKind::Image, "123");
+            image_end.done = true;
+            let events = vec![
+                ModelStreamEvent::Started {
+                    stream_id: "media-order".into(),
+                },
+                ModelStreamEvent::ThinkingDelta {
+                    delta: ThinkingDelta::from_text("think"),
+                },
+                ModelStreamEvent::TextDelta {
+                    text: "answer ".into(),
+                },
+                ModelStreamEvent::MediaDelta { delta: image_start },
+                ModelStreamEvent::MediaDelta { delta: image_end },
+                ModelStreamEvent::TextDelta {
+                    text: "tail".into(),
+                },
+                ModelStreamEvent::ToolCall {
+                    tool_call: ToolCall {
+                        id: "lookup-call".into(),
+                        name: "lookup".into(),
+                        arguments: json!({}),
+                    },
+                },
+                ModelStreamEvent::Finished {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ];
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+struct MediaToolModel;
+
+impl ModelProvider for MediaToolModel {
+    fn id(&self) -> &str {
+        "media-tool-model"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        stream: ModelStreamSink,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            let events = vec![
+                ModelStreamEvent::Started {
+                    stream_id: "media-tool".into(),
+                },
+                ModelStreamEvent::ToolCall {
+                    tool_call: ToolCall {
+                        id: "media-call".into(),
+                        name: "media_tool".into(),
+                        arguments: json!({}),
+                    },
+                },
+                ModelStreamEvent::Finished {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ];
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+struct MediaTool;
+
+impl ToolProvider for MediaTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "media_tool".into(),
+            description: "Return media content".into(),
+            input_schema: json!({ "type": "object" }),
+            execution_mode: None,
+        }
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        _request: ToolRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ToolOutput> {
+        Box::pin(async {
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Media {
+                    media: MediaBlock::uri(MediaKind::Image, "https://example.test/tool.png"),
+                }],
+                details: json!({}),
+                is_error: false,
+                updates: vec![ToolUpdate {
+                    content: vec![ContentBlock::Media {
+                        media: MediaBlock::inline_base64(MediaKind::Audio, "YXVkaW8="),
+                    }],
+                    details: json!({ "step": "media" }),
+                }],
+            })
+        })
+    }
+}
+
 struct FailingContext;
 
 impl ContextProvider for FailingContext {
@@ -786,6 +1116,26 @@ impl ToolCallHook for TestToolHook {
                     is_error: Some(false),
                 }),
             )
+        })
+    }
+}
+
+struct MediaRewriteHook;
+
+impl ToolCallHook for MediaRewriteHook {
+    fn after_tool_call<'a>(
+        &'a self,
+        _context: AfterToolCallContext,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<AfterToolCallResult>> {
+        Box::pin(async {
+            Ok(Some(AfterToolCallResult {
+                content: Some(vec![ContentBlock::Media {
+                    media: MediaBlock::provider(MediaKind::File, "hook-provider", "file-1"),
+                }]),
+                details: None,
+                is_error: Some(false),
+            }))
         })
     }
 }

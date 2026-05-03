@@ -1,7 +1,8 @@
 use crate::{
-    AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MessageRole, ModelProvider,
-    ModelRequest, ModelStreamEvent, ModelStreamSink, Result, StopReason, ThinkingBlock,
-    ThinkingDelta, ThinkingKind, ToolCall, ToolSpec,
+    AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaDelta,
+    MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
+    ModelStreamEvent, ModelStreamSink, Result, StopReason, ThinkingBlock, ThinkingDelta,
+    ThinkingKind, ToolCall, ToolSpec,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use std::{
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const OPENAI_CHAT_REASONING_REPLAY_KIND: &str = "openai_chat_reasoning_replay";
+const OPENAI_CHAT_MEDIA_REPLAY_KIND: &str = "openai_chat_media_replay";
 
 #[derive(Clone)]
 pub struct ChatCompletionsProviderConfig {
@@ -31,6 +33,98 @@ pub struct ChatCompletionsProviderConfig {
     pub request_timeout: Duration,
     pub stream_idle_timeout: Duration,
     pub include_usage: bool,
+    pub image_detail: ChatImageDetail,
+    pub allow_provider_video_file_media: bool,
+    pub output_modalities: Vec<ChatOutputModality>,
+    pub output_audio: Option<ChatOutputAudioConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ChatImageDetail {
+    #[default]
+    Auto,
+    Low,
+    High,
+    Custom(String),
+}
+
+impl ChatImageDetail {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Custom(detail) => detail,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatOutputModality {
+    Text,
+    Audio,
+    Custom(String),
+}
+
+impl ChatOutputModality {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Text => "text",
+            Self::Audio => "audio",
+            Self::Custom(modality) => modality,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatAudioFormat {
+    Wav,
+    Mp3,
+    Flac,
+    Opus,
+    Pcm16,
+    Custom(String),
+}
+
+impl ChatAudioFormat {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Wav => "wav",
+            Self::Mp3 => "mp3",
+            Self::Flac => "flac",
+            Self::Opus => "opus",
+            Self::Pcm16 => "pcm16",
+            Self::Custom(format) => format,
+        }
+    }
+
+    fn from_wire(format: &str) -> Self {
+        match format {
+            "wav" => Self::Wav,
+            "mp3" => Self::Mp3,
+            "flac" => Self::Flac,
+            "opus" => Self::Opus,
+            "pcm16" => Self::Pcm16,
+            _ => Self::Custom(format.into()),
+        }
+    }
+
+    fn mime_type(&self) -> Option<&'static str> {
+        match self {
+            Self::Wav => Some("audio/wav"),
+            Self::Mp3 => Some("audio/mpeg"),
+            Self::Flac => Some("audio/flac"),
+            Self::Opus => Some("audio/opus"),
+            Self::Pcm16 => Some("audio/pcm"),
+            Self::Custom(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatOutputAudioConfig {
+    pub format: ChatAudioFormat,
+    pub voice: String,
 }
 
 impl Debug for ChatCompletionsProviderConfig {
@@ -49,6 +143,13 @@ impl Debug for ChatCompletionsProviderConfig {
             .field("request_timeout", &self.request_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("include_usage", &self.include_usage)
+            .field("image_detail", &self.image_detail)
+            .field(
+                "allow_provider_video_file_media",
+                &self.allow_provider_video_file_media,
+            )
+            .field("output_modalities", &self.output_modalities)
+            .field("output_audio", &self.output_audio)
             .finish()
     }
 }
@@ -68,6 +169,10 @@ impl ChatCompletionsProviderConfig {
             request_timeout: Duration::from_secs(60),
             stream_idle_timeout: Duration::from_secs(300),
             include_usage: true,
+            image_detail: ChatImageDetail::default(),
+            allow_provider_video_file_media: false,
+            output_modalities: vec![ChatOutputModality::Text],
+            output_audio: None,
         }
     }
 
@@ -124,6 +229,46 @@ impl ChatCompletionsProviderConfig {
 
     pub fn include_usage(mut self, include_usage: bool) -> Self {
         self.include_usage = include_usage;
+        self
+    }
+
+    pub fn image_detail(mut self, image_detail: ChatImageDetail) -> Self {
+        self.image_detail = image_detail;
+        self
+    }
+
+    pub fn allow_provider_video_file_media(
+        mut self,
+        allow_provider_video_file_media: bool,
+    ) -> Self {
+        self.allow_provider_video_file_media = allow_provider_video_file_media;
+        self
+    }
+
+    pub fn output_modalities(
+        mut self,
+        output_modalities: impl IntoIterator<Item = ChatOutputModality>,
+    ) -> Self {
+        self.output_modalities = output_modalities.into_iter().collect();
+        self
+    }
+
+    pub fn enable_audio_output(
+        mut self,
+        format: ChatAudioFormat,
+        voice: impl Into<String>,
+    ) -> Self {
+        if !self
+            .output_modalities
+            .iter()
+            .any(|modality| modality.as_str() == "audio")
+        {
+            self.output_modalities.push(ChatOutputModality::Audio);
+        }
+        self.output_audio = Some(ChatOutputAudioConfig {
+            format,
+            voice: voice.into(),
+        });
         self
     }
 }
@@ -305,11 +450,53 @@ fn build_chat_payload(
     if let Some(temperature) = config.temperature {
         payload.insert("temperature".into(), json!(temperature));
     }
+    let output_modalities = effective_output_modalities(config)?;
+    if output_modalities != ["text"] {
+        payload.insert(
+            "modalities".into(),
+            Value::Array(
+                output_modalities
+                    .iter()
+                    .map(|modality| Value::String((*modality).into()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(audio) = &config.output_audio {
+        payload.insert(
+            "audio".into(),
+            json!({
+                "format": audio.format.as_str(),
+                "voice": audio.voice,
+            }),
+        );
+    }
     if !request.tools.is_empty() {
         payload.insert("tools".into(), Value::Array(to_chat_tools(&request.tools)));
     }
     payload.extend(config.extra_body.clone());
     Ok(Value::Object(payload))
+}
+
+fn effective_output_modalities(config: &ChatCompletionsProviderConfig) -> Result<Vec<&str>> {
+    let mut modalities = if config.output_modalities.is_empty() {
+        vec!["text"]
+    } else {
+        config
+            .output_modalities
+            .iter()
+            .map(ChatOutputModality::as_str)
+            .collect::<Vec<_>>()
+    };
+    let has_audio = modalities.contains(&"audio");
+    if config.output_audio.is_some() && !has_audio {
+        modalities.push("audio");
+    } else if config.output_audio.is_none() && has_audio {
+        return Err(AgentCoreError::Provider(
+            "audio output modality requires output audio config".into(),
+        ));
+    }
+    Ok(modalities)
 }
 
 fn to_chat_messages(
@@ -325,7 +512,7 @@ fn to_chat_messages(
             })),
             MessageRole::User | MessageRole::Custom(_) => messages.push(json!({
                 "role": message.role.as_str(),
-                "content": render_content_text(&message.content)?
+                "content": render_user_content(config, &message.content)?
             })),
             MessageRole::Assistant => messages.push(to_assistant_message(config, message)?),
             MessageRole::ToolResult => {
@@ -341,7 +528,7 @@ fn to_assistant_message(
     message: &AgentMessage,
 ) -> Result<Value> {
     let mut rendered = Map::new();
-    let mut text_parts = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls = Vec::new();
     for block in &message.content {
         match block {
@@ -352,6 +539,17 @@ fn to_assistant_message(
                     rendered.entry(field).or_insert(value);
                 }
             }
+            ContentBlock::Media { media } => match replay_media(config, media) {
+                MediaReplay::RenderAudio(value) => {
+                    rendered.entry("audio").or_insert(value);
+                }
+                MediaReplay::Ignore => {}
+                MediaReplay::Unsupported => {
+                    return Err(AgentCoreError::Provider(
+                            "assistant media blocks cannot be rendered for chat completions without a matching replay descriptor".into(),
+                        ));
+                }
+            },
             ContentBlock::ToolCall { tool_call } => {
                 tool_calls.push(json!({
                     "id": tool_call.id,
@@ -378,6 +576,221 @@ fn to_assistant_message(
     Ok(Value::Object(rendered))
 }
 
+fn render_user_content(
+    config: &ChatCompletionsProviderConfig,
+    content: &[ContentBlock],
+) -> Result<Value> {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut content_parts: Option<Vec<Value>> = None;
+    for block in content {
+        match block {
+            ContentBlock::Media { media } => {
+                let parts = content_parts.get_or_insert_with(|| {
+                    text_parts
+                        .drain(..)
+                        .filter(|text| !text.is_empty())
+                        .map(chat_text_part)
+                        .collect()
+                });
+                parts.push(media_to_chat_content_part(config, media)?);
+            }
+            block => {
+                if let Some(text) = render_text_block(block)? {
+                    if let Some(parts) = &mut content_parts {
+                        if !text.is_empty() {
+                            parts.push(chat_text_part(text));
+                        }
+                    } else {
+                        text_parts.push(text);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(parts) = content_parts {
+        Ok(Value::Array(parts))
+    } else {
+        Ok(Value::String(text_parts.join("\n")))
+    }
+}
+
+fn chat_text_part(text: String) -> Value {
+    json!({ "type": "text", "text": text })
+}
+
+fn media_to_chat_content_part(
+    config: &ChatCompletionsProviderConfig,
+    media: &MediaBlock,
+) -> Result<Value> {
+    match &media.kind {
+        MediaKind::Image => image_to_chat_content_part(config, media),
+        MediaKind::Audio => audio_to_chat_content_part(media),
+        MediaKind::File => file_to_chat_content_part(config, media),
+        MediaKind::Video => video_to_chat_content_part(config, media),
+        MediaKind::Custom(_) => Err(AgentCoreError::Provider(
+            "custom media kinds cannot be rendered by the built-in chat completions provider"
+                .into(),
+        )),
+    }
+}
+
+fn image_to_chat_content_part(
+    config: &ChatCompletionsProviderConfig,
+    media: &MediaBlock,
+) -> Result<Value> {
+    let url = match &media.source {
+        MediaSource::Uri { uri } => uri.clone(),
+        MediaSource::Inline {
+            data,
+            encoding: MediaEncoding::Base64,
+        } => {
+            let mime_type = media.mime_type.as_deref().ok_or_else(|| {
+                AgentCoreError::Provider("inline image media requires mime_type".into())
+            })?;
+            format!("data:{mime_type};base64,{data}")
+        }
+        MediaSource::Inline { .. } => {
+            return Err(AgentCoreError::Provider(
+                "inline image media must use base64 encoding".into(),
+            ));
+        }
+        MediaSource::Provider { .. } => {
+            return Err(AgentCoreError::Provider(
+                "provider-referenced image media cannot be rendered as chat completions image_url"
+                    .into(),
+            ));
+        }
+    };
+    Ok(json!({
+        "type": "image_url",
+        "image_url": {
+            "url": url,
+            "detail": config.image_detail.as_str()
+        }
+    }))
+}
+
+fn audio_to_chat_content_part(media: &MediaBlock) -> Result<Value> {
+    let MediaSource::Inline {
+        data,
+        encoding: MediaEncoding::Base64,
+    } = &media.source
+    else {
+        return Err(AgentCoreError::Provider(
+            "chat completions audio input requires inline base64 media".into(),
+        ));
+    };
+    let format = input_audio_format(media)?;
+    Ok(json!({
+        "type": "input_audio",
+        "input_audio": {
+            "data": data,
+            "format": format
+        }
+    }))
+}
+
+fn video_to_chat_content_part(
+    config: &ChatCompletionsProviderConfig,
+    media: &MediaBlock,
+) -> Result<Value> {
+    let url = match &media.source {
+        MediaSource::Uri { uri } => uri.clone(),
+        MediaSource::Inline {
+            data,
+            encoding: MediaEncoding::Base64,
+        } => {
+            let mime_type = media.mime_type.as_deref().ok_or_else(|| {
+                AgentCoreError::Provider("inline video media requires mime_type".into())
+            })?;
+            format!("data:{mime_type};base64,{data}")
+        }
+        MediaSource::Inline { .. } => {
+            return Err(AgentCoreError::Provider(
+                "inline video media must use base64 encoding".into(),
+            ));
+        }
+        MediaSource::Provider { .. } => {
+            if config.allow_provider_video_file_media {
+                return provider_file_to_chat_content_part(config, media);
+            }
+            return Err(AgentCoreError::Provider(
+                "provider video media requires allow_provider_video_file_media(true)".into(),
+            ));
+        }
+    };
+    Ok(json!({
+        "type": "video_url",
+        "video_url": {
+            "url": url
+        }
+    }))
+}
+
+fn input_audio_format(media: &MediaBlock) -> Result<&'static str> {
+    match media.mime_type.as_deref() {
+        Some("audio/wav" | "audio/x-wav") => Ok("wav"),
+        Some("audio/mpeg" | "audio/mp3") => Ok("mp3"),
+        Some(mime_type) => Err(AgentCoreError::Provider(format!(
+            "unsupported chat completions input audio MIME type: {mime_type}"
+        ))),
+        None => Err(AgentCoreError::Provider(
+            "chat completions input audio requires mime_type".into(),
+        )),
+    }
+}
+
+fn file_to_chat_content_part(
+    config: &ChatCompletionsProviderConfig,
+    media: &MediaBlock,
+) -> Result<Value> {
+    match &media.source {
+        MediaSource::Provider { .. } => provider_file_to_chat_content_part(config, media),
+        MediaSource::Inline {
+            data,
+            encoding: MediaEncoding::Base64,
+        } => {
+            let mut file = Map::new();
+            file.insert("file_data".into(), Value::String(data.clone()));
+            if let Some(name) = &media.name {
+                file.insert("filename".into(), Value::String(name.clone()));
+            }
+            Ok(json!({
+                "type": "file",
+                "file": file
+            }))
+        }
+        MediaSource::Inline { .. } => Err(AgentCoreError::Provider(
+            "inline file media must use base64 encoding".into(),
+        )),
+        MediaSource::Uri { .. } => Err(AgentCoreError::Provider(
+            "chat completions file input does not support URI media".into(),
+        )),
+    }
+}
+
+fn provider_file_to_chat_content_part(
+    config: &ChatCompletionsProviderConfig,
+    media: &MediaBlock,
+) -> Result<Value> {
+    let MediaSource::Provider { provider_id, id } = &media.source else {
+        return Err(AgentCoreError::Provider(
+            "provider file media requires a provider source".into(),
+        ));
+    };
+    if provider_id != &config.id {
+        return Err(AgentCoreError::Provider(
+            "provider media source does not match the chat completions provider id".into(),
+        ));
+    }
+    Ok(json!({
+        "type": "file",
+        "file": {
+            "file_id": id
+        }
+    }))
+}
+
 fn to_tool_result_messages(message: &AgentMessage) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
     for block in &message.content {
@@ -402,22 +815,25 @@ fn to_tool_result_messages(message: &AgentMessage) -> Result<Vec<Value>> {
 fn render_content_text(content: &[ContentBlock]) -> Result<String> {
     let mut parts = Vec::new();
     for block in content {
-        match block {
-            ContentBlock::Text { text } => parts.push(text.clone()),
-            ContentBlock::Json { value } => parts.push(value.to_string()),
-            ContentBlock::Thinking { thinking } => {
-                if let Some(text) = &thinking.text {
-                    parts.push(text.clone());
-                }
-            }
-            ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => {
-                return Err(AgentCoreError::Provider(
-                    "tool blocks cannot be rendered as chat message text".into(),
-                ));
-            }
+        if let Some(text) = render_text_block(block)? {
+            parts.push(text);
         }
     }
     Ok(parts.join("\n"))
+}
+
+fn render_text_block(block: &ContentBlock) -> Result<Option<String>> {
+    match block {
+        ContentBlock::Text { text } => Ok(Some(text.clone())),
+        ContentBlock::Json { value } => Ok(Some(value.to_string())),
+        ContentBlock::Thinking { thinking } => Ok(thinking.text.clone()),
+        ContentBlock::Media { .. } => Err(AgentCoreError::Provider(
+            "media blocks cannot be rendered as chat message text".into(),
+        )),
+        ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => Err(
+            AgentCoreError::Provider("tool blocks cannot be rendered as chat message text".into()),
+        ),
+    }
 }
 
 fn to_chat_tools(tools: &[ToolSpec]) -> Vec<Value> {
@@ -444,16 +860,80 @@ fn replay_reasoning(
         thinking.replay_descriptor.as_ref()?.clone(),
     )
     .ok()?;
-    if descriptor.v != 1 || descriptor.kind != OPENAI_CHAT_REASONING_REPLAY_KIND {
-        return None;
-    }
-    if descriptor.provider_id.as_str() != config.id.as_str() {
-        return None;
-    }
-    if descriptor.model.as_str() != config.model.as_str() {
-        return None;
+    match replay_scope_match(
+        config,
+        descriptor.v,
+        &descriptor.kind,
+        OPENAI_CHAT_REASONING_REPLAY_KIND,
+        &descriptor.provider_id,
+        &descriptor.model,
+    ) {
+        ReplayScopeMatch::Match => {}
+        ReplayScopeMatch::Ignore | ReplayScopeMatch::Unsupported => return None,
     }
     Some((descriptor.field.wire_name().into(), thinking.raw.clone()?))
+}
+
+enum ReplayScopeMatch {
+    Match,
+    Ignore,
+    Unsupported,
+}
+
+fn replay_scope_match(
+    config: &ChatCompletionsProviderConfig,
+    version: u64,
+    kind: &str,
+    expected_kind: &str,
+    provider_id: &str,
+    model: &str,
+) -> ReplayScopeMatch {
+    if version != 1 || kind != expected_kind {
+        return ReplayScopeMatch::Unsupported;
+    }
+    if provider_id != config.id.as_str() || model != config.model.as_str() {
+        return ReplayScopeMatch::Ignore;
+    }
+    ReplayScopeMatch::Match
+}
+
+enum MediaReplay {
+    RenderAudio(Value),
+    Ignore,
+    Unsupported,
+}
+
+fn replay_media(config: &ChatCompletionsProviderConfig, media: &MediaBlock) -> MediaReplay {
+    let Some(replay_descriptor) = &media.replay_descriptor else {
+        return MediaReplay::Unsupported;
+    };
+    let Ok(descriptor) =
+        serde_json::from_value::<ChatMediaReplayDescriptor>(replay_descriptor.clone())
+    else {
+        return MediaReplay::Unsupported;
+    };
+    match replay_scope_match(
+        config,
+        descriptor.v,
+        &descriptor.kind,
+        OPENAI_CHAT_MEDIA_REPLAY_KIND,
+        &descriptor.provider_id,
+        &descriptor.model,
+    ) {
+        ReplayScopeMatch::Match => {}
+        ReplayScopeMatch::Ignore => return MediaReplay::Ignore,
+        ReplayScopeMatch::Unsupported => return MediaReplay::Unsupported,
+    }
+    if descriptor.field != MediaReplayField::Audio || !matches!(&media.kind, MediaKind::Audio) {
+        return MediaReplay::Unsupported;
+    }
+    let MediaSource::Provider { provider_id, id } = &media.source else {
+        return MediaReplay::Unsupported;
+    };
+    if provider_id != &config.id {
+        return MediaReplay::Unsupported;
+    }
+    MediaReplay::RenderAudio(json!({ "id": id }))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -464,6 +944,22 @@ struct ChatReasoningReplayDescriptor {
     provider_id: String,
     model: String,
     field: ReasoningField,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatMediaReplayDescriptor {
+    v: u64,
+    kind: String,
+    provider_id: String,
+    model: String,
+    field: MediaReplayField,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MediaReplayField {
+    Audio,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -596,6 +1092,9 @@ impl ChatStreamState {
             {
                 events.push(ModelStreamEvent::TextDelta { text: text.into() });
             }
+            if let Some(delta) = self.extract_audio_delta(delta) {
+                events.push(ModelStreamEvent::MediaDelta { delta });
+            }
             if let Some(delta) = self.extract_thinking_delta(delta) {
                 events.push(ModelStreamEvent::ThinkingDelta { delta });
             }
@@ -704,6 +1203,55 @@ impl ChatStreamState {
             replay_descriptor: Some(replay_descriptor),
             metadata,
         })
+    }
+
+    fn extract_audio_delta(&self, delta: &Map<String, Value>) -> Option<MediaDelta> {
+        let audio = delta.get("audio")?.as_object()?;
+        let data_delta = audio
+            .get("data")
+            .or_else(|| audio.get("delta"))
+            .and_then(Value::as_str)
+            .filter(|data| !data.is_empty())
+            .map(ToString::to_string);
+        let source = audio
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(|id| MediaSource::Provider {
+                provider_id: self.replay_scope.provider_id.clone(),
+                id: id.into(),
+            });
+        let format = audio.get("format").and_then(Value::as_str);
+        let mime_type = format
+            .and_then(|format| ChatAudioFormat::from_wire(format).mime_type())
+            .map(str::to_string);
+        let replay_descriptor = source.as_ref().and_then(|_| {
+            serde_json::to_value(ChatMediaReplayDescriptor {
+                v: 1,
+                kind: OPENAI_CHAT_MEDIA_REPLAY_KIND.into(),
+                provider_id: self.replay_scope.provider_id.clone(),
+                model: self.replay_scope.model.clone(),
+                field: MediaReplayField::Audio,
+            })
+            .ok()
+        });
+        let mut metadata = Map::new();
+        for key in ["id", "transcript", "expires_at", "expiresAt", "format"] {
+            if let Some(value) = audio.get(key) {
+                metadata.insert(key.into(), value.clone());
+            }
+        }
+        let delta = MediaDelta {
+            kind: MediaKind::Audio,
+            data_delta,
+            source,
+            mime_type,
+            name: None,
+            replay_descriptor,
+            metadata,
+            done: audio.get("done").and_then(Value::as_bool).unwrap_or(false),
+        };
+        (!delta.is_empty()).then_some(delta)
     }
 }
 

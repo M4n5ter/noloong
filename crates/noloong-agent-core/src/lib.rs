@@ -12,7 +12,10 @@ mod store;
 mod types;
 
 pub use agent::{Agent, AgentBuilder};
-pub use chat_completions::{ChatCompletionsProvider, ChatCompletionsProviderConfig};
+pub use chat_completions::{
+    ChatAudioFormat, ChatCompletionsProvider, ChatCompletionsProviderConfig, ChatImageDetail,
+    ChatOutputAudioConfig, ChatOutputModality,
+};
 pub use error::{AgentCoreError, Result};
 pub use jsonrpc::{StdioExtension, StdioExtensionConfig};
 pub use phase::{

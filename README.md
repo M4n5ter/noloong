@@ -9,6 +9,8 @@
 - Process extensions: newline-delimited JSON-RPC 2.0 over stdio.
 - UX layer: `Agent` with persistent state, subscriptions, `prompt`, `continue_run`, `reset`, `abort`, `wait_for_idle`, steering, and follow-up queues.
 
+Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md).
+
 ## Examples
 
 ```bash
@@ -65,6 +67,49 @@ Thinking is represented as structured data instead of plain text. `ContentBlock:
 
 OpenAI-compatible Chat Completions does not define a single standard thinking field. The built-in provider extracts common compatible fields such as `reasoning`, `reasoning_content`, `reasoning_text`, and `reasoning_details`, while provider-specific request parameters stay in caller-owned config.
 
+## Media I/O
+
+Messages can carry provider-neutral media blocks. The core stores media as references by default, with inline base64 available for small payloads when the caller already owns encoded data:
+
+```rust
+use noloong_agent_core::{
+    AgentMessage, ContentBlock, MediaBlock, MediaKind,
+};
+
+let user_message = AgentMessage::user("user-1", "Describe this image");
+let image = ContentBlock::Media {
+    media: MediaBlock::uri(MediaKind::Image, "https://example.test/diagram.png"),
+};
+```
+
+Tool outputs use the same `Vec<ContentBlock>` surface, so tools can return images, audio, video references, or files without a separate tool-specific media API:
+
+```rust
+use noloong_agent_core::{
+    ContentBlock, MediaBlock, MediaKind, ToolOutput,
+};
+use serde_json::Value;
+
+let output = ToolOutput {
+    content: vec![ContentBlock::Media {
+        media: MediaBlock::provider(MediaKind::File, "openai-chat", "file_123"),
+    }],
+    details: Value::Null,
+    is_error: false,
+    updates: Vec::new(),
+};
+```
+
+The built-in Chat Completions provider maps image URI/inline media to `image_url`, inline WAV/MP3 audio to `input_audio`, video URI/inline media to `video_url`, and provider file references to `file_id`. Provider-hosted video references are passed as `file_id` only when `allow_provider_video_file_media(true)` is explicitly configured. It does not download media URIs or manage blob storage; a future `MediaStore` can be added without changing the message model.
+
+Provider mapping references:
+
+- OpenAI Chat Completions API: <https://platform.openai.com/docs/api-reference/chat/create-chat-completion>
+- OpenAI vision guide: <https://platform.openai.com/docs/guides/images-vision?api-mode=chat>
+- OpenAI audio guide: <https://platform.openai.com/docs/guides/audio>
+- Anthropic Messages examples: <https://docs.anthropic.com/en/api/messages-examples>
+- Anthropic Files API: <https://docs.anthropic.com/en/docs/build-with-claude/files>
+
 ## Verification
 
 The conformance source of truth is [`plans/CONFORMANCE_MATRIX.md`](plans/CONFORMANCE_MATRIX.md). Update that matrix whenever a core capability, invariant, or verification command changes.
@@ -85,6 +130,6 @@ Manual external gate:
 cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
 ```
 
-The OpenRouter live test requires `OPENROUTER_API_KEY` and routes `deepseek/deepseek-v4-flash` to the official DeepSeek provider with thinking enabled. It constructs that provider-specific route in the test through generic `ChatCompletionsProviderConfig`, including `provider.only = ["deepseek"]`, `allow_fallbacks = false`, `require_parameters = true`, `reasoning.enabled = true`, and `include_reasoning = true`. The manual gate uses a larger live output budget so thinking, visible text, and tool-call streaming can be observed together. It is intentionally excluded from default CI because it depends on external network access and provider availability.
+The OpenRouter live test requires `OPENROUTER_API_KEY`. It routes `deepseek/deepseek-v4-flash` to the official DeepSeek provider with thinking enabled, uses the generic `openrouter/free` router for image input coverage, and uses `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` for audio and video input coverage because the free router currently reports no endpoints for input audio/video. Provider-specific request details are constructed in tests through generic `ChatCompletionsProviderConfig` and `extra_body`, not in core provider code. The manual gate uses larger live output budgets so thinking, visible text, tool-call streaming, and multimodal payload acceptance can be observed. It is intentionally excluded from default CI because it depends on external network access and provider availability.
 
 GitHub Actions runs the default local gate on push and pull request. The live OpenRouter gate stays manual.

@@ -1,7 +1,8 @@
 use noloong_agent_core::{
-    AgentMessage, CancellationToken, ChatCompletionsProvider, ChatCompletionsProviderConfig,
-    ContentBlock, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, Result, StopReason,
-    ThinkingBlock, ToolCall, ToolExecutionMode, ToolSpec,
+    AgentMessage, AgentRuntime, CancellationToken, ChatAudioFormat, ChatCompletionsProvider,
+    ChatCompletionsProviderConfig, ChatImageDetail, ChatOutputModality, ContentBlock, MediaBlock,
+    MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
+    ModelStreamEvent, Result, StopReason, ThinkingBlock, ToolCall, ToolExecutionMode, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -81,6 +82,435 @@ async fn payload_does_not_replay_reasoning_across_provider_scope() -> Result<()>
 
     let body = server.request_json();
     assert!(body["messages"][2].get("reasoning").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_text_only_remains_string() -> Result<()> {
+    let body = captured_request_body(
+        simple_request(),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["content"], "hello");
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_image_uri_content_part() -> Result<()> {
+    let mut image = MediaBlock::uri(MediaKind::Image, "https://example.test/image.png");
+    image.mime_type = Some("image/png".into());
+    let body = captured_request_body(
+        request_with_user_content(vec![
+            ContentBlock::Text {
+                text: "describe".into(),
+            },
+            ContentBlock::Media { media: image },
+        ]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .image_detail(ChatImageDetail::High),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "describe");
+    assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+    assert_eq!(
+        body["messages"][0]["content"][1]["image_url"]["url"],
+        "https://example.test/image.png"
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1]["image_url"]["detail"],
+        "high"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_image_inline_content_part() -> Result<()> {
+    let mut image = MediaBlock::inline_base64(MediaKind::Image, "aW1hZ2U=");
+    image.mime_type = Some("image/png".into());
+    let body = captured_request_body(
+        request_with_user_content(vec![ContentBlock::Media { media: image }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(
+        body["messages"][0]["content"][0]["image_url"]["url"],
+        "data:image/png;base64,aW1hZ2U="
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0]["image_url"]["detail"],
+        "auto"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_system_media_rejected() -> Result<()> {
+    let error = stream_request(
+        ModelRequest {
+            messages: vec![AgentMessage {
+                id: "system-1".into(),
+                role: MessageRole::System,
+                content: vec![ContentBlock::Media {
+                    media: MediaBlock::uri(MediaKind::Image, "https://example.test/image.png"),
+                }],
+                metadata: Default::default(),
+            }],
+            ..simple_request()
+        },
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("media blocks cannot be rendered")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_audio_inline_wav() -> Result<()> {
+    let mut audio = MediaBlock::inline_base64(MediaKind::Audio, "UklGRg==");
+    audio.mime_type = Some("audio/wav".into());
+    let body = captured_request_body(
+        request_with_user_content(vec![ContentBlock::Media { media: audio }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["content"][0]["type"], "input_audio");
+    assert_eq!(
+        body["messages"][0]["content"][0]["input_audio"]["data"],
+        "UklGRg=="
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0]["input_audio"]["format"],
+        "wav"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_audio_uri_rejected() -> Result<()> {
+    let error = stream_request(
+        request_with_user_content(vec![ContentBlock::Media {
+            media: MediaBlock::uri(MediaKind::Audio, "https://example.test/audio.wav"),
+        }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio input requires inline base64")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_file_provider_reference() -> Result<()> {
+    let body = captured_request_body(
+        request_with_user_content(vec![ContentBlock::Media {
+            media: MediaBlock::provider(MediaKind::File, "test-chat", "file-123"),
+        }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["content"][0]["type"], "file");
+    assert_eq!(
+        body["messages"][0]["content"][0]["file"]["file_id"],
+        "file-123"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_file_uri_rejected() -> Result<()> {
+    let error = stream_request(
+        request_with_user_content(vec![ContentBlock::Media {
+            media: MediaBlock::uri(MediaKind::File, "https://example.test/file.pdf"),
+        }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("file input does not support URI")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_video_uri_content_part() -> Result<()> {
+    let body = captured_request_body(
+        request_with_user_content(vec![ContentBlock::Media {
+            media: MediaBlock::uri(MediaKind::Video, "https://example.test/video.mp4"),
+        }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["content"][0]["type"], "video_url");
+    assert_eq!(
+        body["messages"][0]["content"][0]["video_url"]["url"],
+        "https://example.test/video.mp4"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_video_inline_content_part() -> Result<()> {
+    let mut video = MediaBlock::inline_base64(MediaKind::Video, "dmllbw==");
+    video.mime_type = Some("video/mp4".into());
+    let body = captured_request_body(
+        request_with_user_content(vec![ContentBlock::Media { media: video }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["content"][0]["type"], "video_url");
+    assert_eq!(
+        body["messages"][0]["content"][0]["video_url"]["url"],
+        "data:video/mp4;base64,dmllbw=="
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_provider_video_default_rejected() -> Result<()> {
+    let error = stream_request(
+        request_with_user_content(vec![ContentBlock::Media {
+            media: MediaBlock::provider(MediaKind::Video, "test-chat", "file-123"),
+        }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("provider video media requires"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_provider_video_file_mapping_when_enabled() -> Result<()> {
+    let body = captured_request_body(
+        request_with_user_content(vec![ContentBlock::Media {
+            media: MediaBlock::provider(MediaKind::Video, "test-chat", "file-123"),
+        }]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .allow_provider_video_file_media(true),
+    )
+    .await?;
+
+    assert_eq!(
+        body["messages"][0]["content"][0]["file"]["file_id"],
+        "file-123"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_audio_output_config() -> Result<()> {
+    let body = captured_request_body(
+        simple_request(),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .output_modalities([ChatOutputModality::Text])
+            .enable_audio_output(ChatAudioFormat::Wav, "alloy"),
+    )
+    .await?;
+
+    assert_eq!(body["modalities"], json!(["text", "audio"]));
+    assert_eq!(body["audio"]["format"], "wav");
+    assert_eq!(body["audio"]["voice"], "alloy");
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_audio_modality_requires_audio_config() -> Result<()> {
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url("http://127.0.0.1:9")
+            .without_api_key()
+            .output_modalities([ChatOutputModality::Audio]),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("audio output modality requires output audio config")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stream_audio_delta_to_media_event() -> Result<()> {
+    let response = concat!(
+        "data: {\"choices\":[{\"delta\":{\"audio\":{\"id\":\"audio-1\",\"data\":\"abc\",\"format\":\"wav\",\"transcript\":\"hello\",\"expires_at\":123}},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"123\",\"done\":true}},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server = MockServer::spawn(200, "text/event-stream", response).await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let events = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+    let audio_events = events
+        .iter()
+        .filter_map(|event| match event {
+            ModelStreamEvent::MediaDelta { delta } => Some(delta),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(audio_events.len(), 2);
+    assert_eq!(audio_events[0].kind, MediaKind::Audio);
+    assert_eq!(audio_events[0].data_delta.as_deref(), Some("abc"));
+    assert_eq!(audio_events[0].mime_type.as_deref(), Some("audio/wav"));
+    assert_eq!(audio_events[0].metadata["transcript"], "hello");
+    assert!(matches!(
+        &audio_events[0].source,
+        Some(MediaSource::Provider {
+            provider_id,
+            id,
+        }) if provider_id == "test-chat" && id == "audio-1"
+    ));
+    assert_eq!(audio_events[1].data_delta.as_deref(), Some("123"));
+    assert!(audio_events[1].done);
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_commits_streamed_audio_with_provider_source_and_data() -> Result<()> {
+    let response = concat!(
+        "data: {\"choices\":[{\"delta\":{\"audio\":{\"id\":\"audio-1\",\"data\":\"abc\",\"format\":\"wav\"}},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"audio\":{\"id\":\"audio-1\",\"data\":\"123\",\"done\":true}},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server = MockServer::spawn(200, "text/event-stream", response).await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(provider))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("audio").await?;
+    let assistant = report
+        .state
+        .messages
+        .iter()
+        .find(|message| matches!(message.role, MessageRole::Assistant))
+        .expect("assistant message should be committed");
+    let media = assistant
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Media { media } => Some(media),
+            _ => None,
+        })
+        .expect("assistant message should contain streamed audio media");
+
+    assert_eq!(media.kind, MediaKind::Audio);
+    assert_eq!(media.mime_type.as_deref(), Some("audio/wav"));
+    assert!(matches!(
+        &media.source,
+        MediaSource::Provider {
+            provider_id,
+            id,
+        } if provider_id == "test-chat" && id == "audio-1"
+    ));
+    let data = media
+        .data
+        .as_ref()
+        .expect("streamed audio data should be preserved alongside provider source");
+    assert_eq!(data.data, "abc123");
+    assert_eq!(data.encoding, MediaEncoding::Base64);
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_assistant_audio_replay() -> Result<()> {
+    let body = captured_request_body(
+        request_with_assistant_media(assistant_audio_replay_block(
+            "test-chat",
+            "test-model",
+            "test-chat",
+        )),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["messages"][0]["role"], "assistant");
+    assert_eq!(body["messages"][0]["audio"]["id"], "audio-1");
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_assistant_media_cross_provider_ignored() -> Result<()> {
+    let body = captured_request_body(
+        request_with_assistant_media(assistant_audio_replay_block(
+            "other-chat",
+            "test-model",
+            "other-chat",
+        )),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert!(body["messages"][0].get("audio").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_assistant_unsupported_media_rejected() -> Result<()> {
+    let error = stream_request(
+        request_with_assistant_media(ContentBlock::Media {
+            media: MediaBlock::uri(MediaKind::Image, "https://example.test/image.png"),
+        }),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("assistant media blocks cannot be rendered")
+    );
     Ok(())
 }
 
@@ -450,6 +880,71 @@ fn simple_request() -> ModelRequest {
         tools: Vec::new(),
         metadata: Default::default(),
     }
+}
+
+fn request_with_user_content(content: Vec<ContentBlock>) -> ModelRequest {
+    ModelRequest {
+        messages: vec![AgentMessage {
+            id: "user-1".into(),
+            role: MessageRole::User,
+            content,
+            metadata: Default::default(),
+        }],
+        ..simple_request()
+    }
+}
+
+fn request_with_assistant_media(block: ContentBlock) -> ModelRequest {
+    ModelRequest {
+        messages: vec![AgentMessage::assistant("assistant-1", vec![block])],
+        ..simple_request()
+    }
+}
+
+fn assistant_audio_replay_block(
+    descriptor_provider_id: &str,
+    descriptor_model: &str,
+    source_provider_id: &str,
+) -> ContentBlock {
+    let mut media = MediaBlock::provider(MediaKind::Audio, source_provider_id, "audio-1");
+    media.replay_descriptor = Some(json!({
+        "v": 1,
+        "kind": "openai_chat_media_replay",
+        "providerId": descriptor_provider_id,
+        "model": descriptor_model,
+        "field": "audio"
+    }));
+    ContentBlock::Media { media }
+}
+
+async fn captured_request_body(
+    request: ModelRequest,
+    config: ChatCompletionsProviderConfig,
+) -> Result<Value> {
+    stream_request(request, config).await
+}
+
+async fn stream_request(
+    request: ModelRequest,
+    config: ChatCompletionsProviderConfig,
+) -> Result<Value> {
+    let server = MockServer::spawn(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
+    .await?;
+    let provider = ChatCompletionsProvider::new(config.base_url(server.url()).without_api_key())?;
+
+    provider
+        .stream_model(
+            request,
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    Ok(server.request_json())
 }
 
 fn request_with_history() -> ModelRequest {

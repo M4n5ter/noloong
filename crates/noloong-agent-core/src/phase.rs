@@ -1,8 +1,8 @@
 use crate::runtime::ToolRuntimeHandles;
 use crate::{
     AfterToolCallContext, AgentEffect, AgentMessage, BeforeToolCallContext, ContentBlock,
-    ContextRequest, ModelRequest, ModelStreamEvent, Result, ThinkingBlock, ToolCall,
-    ToolExecutionMode, ToolOutput, TurnDecision,
+    ContextRequest, MediaBlock, MediaDelta, MediaSource, ModelRequest, ModelStreamEvent, Result,
+    ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, TurnDecision,
     providers::{BoxFuture, CancellationToken, ModelStreamSink},
 };
 use crate::{AgentRuntime, AgentState};
@@ -220,11 +220,13 @@ async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
 async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     let mut output = PhaseOutput::from_scratch(context.scratch);
     let mut thinking: Option<ThinkingBlock> = None;
+    let mut media: Option<MediaBlock> = None;
     let mut text = String::new();
     let mut content = Vec::new();
     for event in &output.scratch.model_events {
         match event {
             ModelStreamEvent::ThinkingDelta { delta } => {
+                flush_media(&mut content, &mut media);
                 flush_text(&mut content, &mut text);
                 if !delta.is_empty() {
                     if thinking
@@ -241,11 +243,33 @@ async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
             }
             ModelStreamEvent::TextDelta { text: delta } => {
                 flush_thinking(&mut content, &mut thinking);
+                flush_media(&mut content, &mut media);
                 text.push_str(delta);
+            }
+            ModelStreamEvent::MediaDelta { delta } => {
+                if delta.is_empty() {
+                    continue;
+                }
+                flush_thinking(&mut content, &mut thinking);
+                flush_text(&mut content, &mut text);
+                if media
+                    .as_ref()
+                    .is_some_and(|block| media_delta_starts_new_block(block, delta))
+                {
+                    flush_media(&mut content, &mut media);
+                }
+                match &mut media {
+                    Some(block) => block.apply_delta(delta),
+                    None => media = MediaBlock::from_delta(delta),
+                }
+                if delta.done {
+                    flush_media(&mut content, &mut media);
+                }
             }
             ModelStreamEvent::ToolCall { tool_call } => {
                 flush_thinking(&mut content, &mut thinking);
                 flush_text(&mut content, &mut text);
+                flush_media(&mut content, &mut media);
                 content.push(ContentBlock::ToolCall {
                     tool_call: tool_call.clone(),
                 });
@@ -260,6 +284,7 @@ async fn assistant_commit(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     }
     flush_thinking(&mut content, &mut thinking);
     flush_text(&mut content, &mut text);
+    flush_media(&mut content, &mut media);
     let message = AgentMessage::assistant(
         format!("assistant-{}-{}", context.run_id, context.turn_id),
         content,
@@ -285,6 +310,25 @@ fn flush_text(content: &mut Vec<ContentBlock>, text: &mut String) {
             text: std::mem::take(text),
         });
     }
+}
+
+fn flush_media(content: &mut Vec<ContentBlock>, media: &mut Option<MediaBlock>) {
+    if let Some(media) = media.take() {
+        content.push(ContentBlock::Media { media });
+    }
+}
+
+fn media_delta_starts_new_block(block: &MediaBlock, delta: &MediaDelta) -> bool {
+    if block.kind != delta.kind {
+        return true;
+    }
+    let Some(source) = &delta.source else {
+        return false;
+    };
+    if block.source == *source {
+        return false;
+    }
+    !matches!(&block.source, MediaSource::Inline { .. })
 }
 
 async fn tool_call_resolve(context: PhaseContext<'_>) -> Result<PhaseOutput> {

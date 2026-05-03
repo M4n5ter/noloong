@@ -1,6 +1,7 @@
 use noloong_agent_core::{
-    AgentEventKind, AgentRuntime, ContextPatch, EventStore, InMemoryEventStore, ModelStreamEvent,
-    Result, RunStatus, StdioExtension, StdioExtensionConfig, reduce_events,
+    AgentEventKind, AgentRuntime, ContentBlock, ContextPatch, EventStore, InMemoryEventStore,
+    MediaEncoding, MediaKind, MediaSource, ModelStreamEvent, Result, RunStatus, StdioExtension,
+    StdioExtensionConfig, reduce_events,
 };
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -115,6 +116,89 @@ async fn stdio_model_stream_notifications_are_incremental() -> Result<()> {
         .expect("stream delta should be sent");
     assert_eq!(text, "delayed chunk");
     run.await.expect("runtime task joins")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn jsonrpc_model_stream_media_delta() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--media-stream".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let report = runtime.run("media").await?;
+
+    let assistant = report
+        .state
+        .messages
+        .iter()
+        .find(|message| matches!(message.role, noloong_agent_core::MessageRole::Assistant))
+        .expect("assistant message should be committed");
+    assert!(assistant.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Media {
+                media:
+                    noloong_agent_core::MediaBlock {
+                        kind: MediaKind::Image,
+                        source:
+                            MediaSource::Inline {
+                                data,
+                                encoding: MediaEncoding::Base64,
+                            },
+                        ..
+                    },
+            } if data == "aW1hZ2U="
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn jsonrpc_tool_output_media() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([fixture.to_string_lossy().to_string(), "--media-tool".into()])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let report = runtime.run("tool media").await?;
+
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { content, .. }
+                    if matches!(
+                        content.first(),
+                        Some(ContentBlock::Media {
+                            media:
+                                noloong_agent_core::MediaBlock {
+                                    kind: MediaKind::File,
+                                    source:
+                                        MediaSource::Provider {
+                                            provider_id,
+                                            id,
+                                        },
+                                    ..
+                                },
+                        }) if provider_id == "fixture-model" && id == "fixture-file-1"
+                    )
+            )
+        })
+    }));
     Ok(())
 }
 

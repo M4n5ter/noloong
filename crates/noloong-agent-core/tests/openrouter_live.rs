@@ -1,7 +1,7 @@
 use noloong_agent_core::{
-    AgentEventKind, AgentRuntime, BoxFuture, CancellationToken, ChatCompletionsProvider,
-    ChatCompletionsProviderConfig, ContentBlock, ModelStreamEvent, Result, ToolOutput,
-    ToolProvider, ToolRequest, ToolSpec,
+    AgentEventKind, AgentMessage, AgentRuntime, BoxFuture, CancellationToken,
+    ChatCompletionsProvider, ChatCompletionsProviderConfig, ContentBlock, MediaBlock, MediaKind,
+    MessageRole, ModelStreamEvent, Result, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -17,6 +17,24 @@ async fn openrouter_deepseek_v4_flash_official_provider_with_thinking() -> Resul
 async fn openrouter_deepseek_v4_flash_official_provider_with_builtin_chat_completions() -> Result<()>
 {
     run_openrouter_deepseek_tool_live().await
+}
+
+#[tokio::test]
+#[ignore = "requires OPENROUTER_API_KEY and external OpenRouter access"]
+async fn openrouter_free_router_image_input() -> Result<()> {
+    run_openrouter_free_router_image_live().await
+}
+
+#[tokio::test]
+#[ignore = "requires OPENROUTER_API_KEY and external OpenRouter access"]
+async fn openrouter_nemotron_omni_free_image_audio_input() -> Result<()> {
+    run_openrouter_nemotron_omni_image_audio_live().await
+}
+
+#[tokio::test]
+#[ignore = "requires OPENROUTER_API_KEY and external OpenRouter access"]
+async fn openrouter_nemotron_omni_free_video_input() -> Result<()> {
+    run_openrouter_nemotron_omni_video_live().await
 }
 
 async fn run_openrouter_deepseek_text_live() -> Result<()> {
@@ -133,6 +151,165 @@ async fn run_openrouter_deepseek_tool_live() -> Result<()> {
     Ok(())
 }
 
+async fn run_openrouter_free_router_image_live() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(openrouter_free_router_provider(768)?))
+        .max_turns(1)
+        .build()?;
+
+    let mut image = MediaBlock::inline_base64(MediaKind::Image, RED_DOT_PNG_BASE64);
+    image.mime_type = Some("image/png".into());
+
+    let report = runtime
+        .run(AgentMessage {
+            id: "user-openrouter-free-image".into(),
+            role: MessageRole::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "You will receive one tiny PNG image. Think briefly, then reply with exactly this sentinel in visible text: noloong-free-image-ok".into(),
+                },
+                ContentBlock::Media { media: image },
+            ],
+            metadata: Default::default(),
+        })
+        .await?;
+
+    let visible_text = report
+        .state
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        visible_text.contains("noloong-free-image-ok"),
+        "OpenRouter free router image response did not include expected sentinel; visible text: {visible_text}"
+    );
+    Ok(())
+}
+
+async fn run_openrouter_nemotron_omni_image_audio_live() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(openrouter_nemotron_omni_provider(768)?))
+        .max_turns(1)
+        .build()?;
+
+    let mut image = MediaBlock::inline_base64(MediaKind::Image, RED_DOT_PNG_BASE64);
+    image.mime_type = Some("image/png".into());
+    let mut audio = MediaBlock::inline_base64(MediaKind::Audio, silent_wav_base64());
+    audio.mime_type = Some("audio/wav".into());
+
+    let report = runtime
+        .run(AgentMessage {
+            id: "user-nemotron-omni-image-audio".into(),
+            role: MessageRole::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "You will receive exactly two media attachments: one tiny PNG image and one silent WAV audio clip. Think briefly, then reply with exactly this sentinel in visible text: noloong-omni-image-audio-ok".into(),
+                },
+                ContentBlock::Media { media: image },
+                ContentBlock::Media { media: audio },
+            ],
+            metadata: Default::default(),
+        })
+        .await?;
+
+    let has_thinking_event = report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ModelStreamEvent {
+                provider,
+                event: ModelStreamEvent::ThinkingDelta { delta }
+            } if provider == "openrouter-nemotron-omni-free"
+                && delta.text_delta.as_deref().is_some_and(|text| !text.trim().is_empty())
+        )
+    });
+    let visible_text = report
+        .state
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        has_thinking_event,
+        "Nemotron Omni image/audio OpenRouter route did not return reasoning"
+    );
+    assert!(
+        visible_text.contains("noloong-omni-image-audio-ok"),
+        "Nemotron Omni image/audio response did not include expected sentinel; visible text: {visible_text}"
+    );
+    Ok(())
+}
+
+async fn run_openrouter_nemotron_omni_video_live() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(openrouter_nemotron_omni_provider(768)?))
+        .max_turns(1)
+        .build()?;
+
+    let video = MediaBlock::uri(
+        MediaKind::Video,
+        "https://www.w3schools.com/html/mov_bbb.mp4",
+    );
+
+    let report = runtime
+        .run(AgentMessage {
+            id: "user-nemotron-omni-video".into(),
+            role: MessageRole::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "You will receive one MP4 video URL. Think briefly, then reply with exactly this sentinel in visible text: noloong-omni-video-ok".into(),
+                },
+                ContentBlock::Media { media: video },
+            ],
+            metadata: Default::default(),
+        })
+        .await?;
+
+    let has_thinking_event = report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ModelStreamEvent {
+                provider,
+                event: ModelStreamEvent::ThinkingDelta { delta }
+            } if provider == "openrouter-nemotron-omni-free"
+                && delta.text_delta.as_deref().is_some_and(|text| !text.trim().is_empty())
+        )
+    });
+    let visible_text = report
+        .state
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        has_thinking_event,
+        "Nemotron Omni video OpenRouter route did not return reasoning"
+    );
+    assert!(
+        visible_text.contains("noloong-omni-video-ok"),
+        "Nemotron Omni video response did not include expected sentinel; visible text: {visible_text}"
+    );
+    Ok(())
+}
+
 fn openrouter_deepseek_runtime(max_tokens: u64) -> Result<AgentRuntime> {
     AgentRuntime::builder()
         .with_model_provider(Arc::new(openrouter_deepseek_provider(max_tokens)?))
@@ -160,6 +337,45 @@ fn openrouter_deepseek_provider(max_tokens: u64) -> Result<ChatCompletionsProvid
             "provider",
             json!({
                 "only": ["deepseek"],
+                "allow_fallbacks": false,
+                "require_parameters": true
+            }),
+        ),
+    )
+}
+
+fn openrouter_free_router_provider(max_tokens: u64) -> Result<ChatCompletionsProvider> {
+    ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("openrouter-free-router", "openrouter/free")
+            .base_url("https://openrouter.ai/api/v1")
+            .api_key_env("OPENROUTER_API_KEY")
+            .header("X-Title", "noloong-agent-core-live-test")
+            .include_usage(false)
+            .temperature(0.0)
+            .extra_body("max_tokens", json!(max_tokens))
+            .extra_body("reasoning", json!({ "enabled": true }))
+            .extra_body("include_reasoning", json!(true)),
+    )
+}
+
+fn openrouter_nemotron_omni_provider(max_tokens: u64) -> Result<ChatCompletionsProvider> {
+    ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new(
+            "openrouter-nemotron-omni-free",
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        )
+        .base_url("https://openrouter.ai/api/v1")
+        .api_key_env("OPENROUTER_API_KEY")
+        .header("X-Title", "noloong-agent-core-live-test")
+        .include_usage(false)
+        .temperature(0.0)
+        .extra_body("max_tokens", json!(max_tokens))
+        .extra_body("reasoning", json!({ "enabled": true }))
+        .extra_body("include_reasoning", json!(true))
+        .extra_body(
+            "provider",
+            json!({
+                "only": ["nvidia"],
                 "allow_fallbacks": false,
                 "require_parameters": true
             }),
@@ -209,4 +425,51 @@ impl ToolProvider for LiveEchoTool {
             })
         })
     }
+}
+
+const RED_DOT_PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+fn silent_wav_base64() -> String {
+    let sample_rate = 8_000_u32;
+    let samples = sample_rate / 5;
+    let data_size = samples * 2;
+    let mut bytes = Vec::with_capacity(44 + data_size as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    bytes.extend(std::iter::repeat_n(0_u8, data_size as usize));
+    base64_encode(&bytes)
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        encoded.push(TABLE[(first >> 2) as usize] as char);
+        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
 }

@@ -12,6 +12,8 @@ const streamHangs = process.argv.includes("--stream-hangs");
 const streamNoResponse = process.argv.includes("--stream-no-response");
 const crashOnModel = process.argv.includes("--crash-on-model");
 const requestTimeoutOnModel = process.argv.includes("--request-timeout-on-model");
+const mediaStream = process.argv.includes("--media-stream");
+const mediaTool = process.argv.includes("--media-tool");
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -106,6 +108,18 @@ for await (const line of rl) {
       stream(streamId, { type: "finished", stop_reason: "stop" });
       continue;
     }
+    if (mediaStream) {
+      stream(streamId, {
+        type: "media_delta",
+        kind: "image",
+        dataDelta: "aW1hZ2U=",
+        mimeType: "image/png",
+        done: true,
+      });
+      stream(streamId, { type: "finished", stop_reason: "stop" });
+      result(id, { streamId });
+      continue;
+    }
     if (delayedStream) {
       stream(streamId, { type: "text_delta", text: "delayed chunk" });
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -148,6 +162,29 @@ for await (const line of rl) {
   }
 
   if (method === "tool/execute") {
+    if (mediaTool) {
+      result(id, {
+        content: [
+          {
+            type: "media",
+            media: {
+              kind: "file",
+              source: {
+                type: "provider",
+                providerId: "fixture-model",
+                id: "fixture-file-1",
+              },
+              mimeType: "application/pdf",
+              name: "fixture.pdf",
+            },
+          },
+        ],
+        details: { source: "stdio-fixture" },
+        isError: false,
+        updates: [],
+      });
+      continue;
+    }
     result(id, {
       content: [{ type: "text", text: params.request.arguments.text }],
       details: { source: "stdio-fixture" },

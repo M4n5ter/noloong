@@ -1,305 +1,375 @@
-# Implementation Plan: Built-in Chat Completions Provider
+# Implementation Plan: Multimodal LLM Provider I/O
 
 ## Overview
-为 `noloong-agent-core` 增加一个内置 OpenAI-compatible Chat Completions provider，同时把现有 text-only thinking 模型升级为结构化 thinking。目标不是把 OpenRouter 或 DeepSeek 写死进 core，而是提供一个稳定的 Rust 内置 provider、可配置的 Chat Completions wire adapter、可扩展的 thinking extraction/replay 机制，以及一个必须通过的 OpenRouter DeepSeek official live gate。
 
-## Implementation Status
-本计划已落地到当前工作区。最终 gate 已覆盖 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo nextest run --workspace`、`cargo test --workspace`、`cargo test -p noloong-agent-core --examples`、三个 Node fixture `node --check`，以及 manual OpenRouter live gate `cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture`。
+为 `noloong-agent-core` 增加 provider-neutral 的多模态输入输出能力，让 image、audio、video、file 可以作为 message content、model stream output、tool output、JSON-RPC extension payload 在 core 中稳定流转。第一轮采用 reference-first 设计：事件日志优先保存 URI 或 provider reference，小体积 inline base64 作为可选 source；不在 v1 引入 `MediaStore` 或隐式下载/上传 blob。
+
+当前重点是让 core data model 和内置 Chat Completions provider 具备正确边界，而不是把某个厂商的 wire shape 直接泄漏进公共 API。OpenAI Chat Completions 支持 image/audio/file content parts 和 audio output；Anthropic Messages 使用 typed image/document/file source blocks。core 应抽象成统一 media block，再由 provider adapter 做各自映射。
 
 ## Architecture Decisions
-- Provider 形态：新增内置 `ChatCompletionsProvider`，实现现有 `ModelProvider` trait；外部 JS/TS/Python provider 仍通过 JSON-RPC 扩展接入，二者并行存在。
-- 协议目标：实现 OpenAI Chat Completions 兼容协议的 streaming SSE path，默认 POST 到 `{base_url}/chat/completions`，而不是引入新的 runtime phase。
-- Thinking 模型：把 `ContentBlock::Thinking { text }` 和 `ModelStreamEvent::ThinkingDelta { text }` 升级为结构化类型，支持 display text、raw JSON/object/list、summary、redacted/encrypted/replay metadata。
-- Thinking extraction：内置识别 `reasoning_content`, `reasoning`, `reasoning_text`, `reasoning_details`，同时保留配置式 field rules，避免把 vendor-specific 字段散落在 core loop。
-- Replay 策略：同 provider/model 下允许把 replay descriptor 写回 assistant message；跨 provider/model 默认只保留可展示 summary/text，不泄露 raw thinking；descriptor scope 包含 `providerId` 和 `model`。
-- OpenRouter live gate：必须使用 `OPENROUTER_API_KEY`、model `deepseek/deepseek-v4-flash`、provider `deepseek` official-only、thinking enabled；这些 provider-specific 参数只在测试/调用方 config 中组装，不进入 core provider 硬编码 preset；该测试保持 ignored/manual，不进入默认 CI。
-- HTTP 依赖：执行实现前先用 `cargo search --registry crates-io` 确认主流版本；优先使用 `reqwest`，SSE parser 优先手写轻量 parser，只有复杂度明显上升才引入专门 SSE crate。
+
+- 公共 API 使用一个 `ContentBlock::Media { media: MediaBlock }`，不拆成多个 provider-specific block，也不新增 `Image`、`Audio`、`Video` 三套平行结构。
+- `MediaSource` 默认 reference-first：`Uri`、`Provider`、`Inline` 三种 source；`Inline` 只保存调用方已经提供的编码数据，不在 core 内做文件读取、下载或 base64 编码。
+- v1 不引入 `MediaStore` trait。后续如果需要大 blob 生命周期、缓存、去重或加密存储，再单独增加 store abstraction。
+- video 在 core 中是一等 `MediaKind::Video`；内置 Chat Completions provider 会把 URI/inline base64 映射到 `video_url`，provider file/ref 仍需要通过配置显式允许后才透传。
+- Chat Completions provider 只实现标准兼容映射和显式配置开关，不硬编码 OpenRouter、DeepSeek 或其它 provider preset。
+- 多模态输出通过 `ModelStreamEvent::MediaDelta` 表达，并由 `assistant_commit` 折叠为 `ContentBlock::Media`，保持 thinking、text、media、tool call 的相对顺序。
+- JSON-RPC bridge 不新增方法；外部 JS/TS/Python 扩展通过现有 serde JSON contract 直接收发新的 `media` content block 和 `media_delta` stream event。
+
+## Public API Shape
+
+- `ContentBlock` 新增 variant：`Media { media: MediaBlock }`。
+- 新增 `MediaKind`：`Image`、`Audio`、`Video`、`File`、`Custom(String)`；serde 使用 snake_case string，未知值反序列化为 `Custom`。
+- 新增 `MediaEncoding`：`Base64`、`Custom(String)`；v1 内置 Chat provider 只消费 `Base64` inline source。
+- 新增 `MediaSource`，serde 使用 tagged snake_case object：
+  - `Uri { uri: String }`
+  - `Inline { data: String, encoding: MediaEncoding }`
+  - `Provider { provider_id: String, id: String }`
+- 新增 `MediaBlock` 字段：
+  - `kind: MediaKind`
+  - `source: MediaSource`
+  - `data: Option<EncodedMediaData>`
+  - `mime_type: Option<String>`
+  - `name: Option<String>`
+  - `replay_descriptor: Option<Value>`
+  - `metadata: Map<String, Value>`
+- 新增 `MediaDelta` 字段：
+  - `kind: MediaKind`
+  - `data_delta: Option<String>`
+  - `source: Option<MediaSource>`
+  - `mime_type: Option<String>`
+  - `name: Option<String>`
+  - `replay_descriptor: Option<Value>`
+  - `metadata: Map<String, Value>`
+  - `done: bool`
+- `ModelStreamEvent` 新增 `MediaDelta { delta: MediaDelta }`。
+- Helper constructors:
+  - `MediaBlock::uri(kind, uri)`
+  - `MediaBlock::inline_base64(kind, data)`
+  - `MediaBlock::provider(kind, provider_id, id)`
+  - `MediaDelta::from_inline_base64_delta(kind, data_delta)`
 
 ## Dependency Graph
-1. Structured thinking public API
-2. Assistant commit/reducer/test migration
-3. Chat Completions config and payload model
-4. SSE transport and chunk parser
-5. Thinking extraction/replay
-6. Tool call streaming accumulation
-7. OpenRouter DeepSeek caller-side config and live test
-8. Docs, examples, lint/test cleanup
+
+1. Core media serde types
+2. Assistant commit media folding
+3. Chat Completions input content part mapping
+4. Chat Completions output media parsing
+5. JSON-RPC and tool coverage
+6. Docs and examples
+7. Full quality gate and optional live gate
 
 ## Task List
 
-### Phase 1: Thinking Foundation
+### Phase 1: Core Media Foundation
 
-#### Task 1: Introduce Structured Thinking Types
-**Description:** Replace text-only thinking with first-class structured thinking types that can represent provider raw payloads, summaries, replay descriptors, and redacted placeholders without forcing every provider into plain text.
+#### Task 1: Add Provider-neutral Media Types
+
+**Description:** Add the core media data model to `types.rs` so every message-bearing surface can represent image, audio, video, and file content without provider-specific JSON.
+
 **Acceptance criteria:**
-- [ ] `ContentBlock::Thinking` stores a `ThinkingBlock`, not only a `String`
-- [ ] `ModelStreamEvent::ThinkingDelta` stores a `ThinkingDelta`, not only a `String`
-- [ ] Types serialize with stable camelCase fields and deserialize through serde without custom callers needing manual JSON handling
-- [ ] Text-only thinking remains easy to construct through helper constructors
+- [ ] `ContentBlock::Media { media: MediaBlock }` exists and round-trips through serde.
+- [ ] `MediaKind`, `MediaEncoding`, `MediaSource`, `MediaBlock`, and `MediaDelta` are public and exported through `lib.rs`.
+- [ ] Unknown media kind and encoding values deserialize into `Custom(String)` instead of failing.
+- [ ] Helper constructors cover URI, inline base64, and provider reference sources.
+
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core thinking_type_serde`
+- [ ] `cargo test -p noloong-agent-core media_type_serde`
 - [ ] `cargo test -p noloong-agent-core --test core`
+
 **Dependencies:** None
+
 **Files likely touched:**
 - `crates/noloong-agent-core/src/types.rs`
+- `crates/noloong-agent-core/src/lib.rs`
 - `crates/noloong-agent-core/tests/core.rs`
+
 **Estimated scope:** M
 
-#### Task 2: Migrate Assistant Commit and Existing Tests
-**Description:** Update assistant commit logic so thinking deltas are accumulated into coherent `ThinkingBlock` content while preserving existing text/tool ordering semantics.
+#### Task 2: Fold Media Stream Events Into Assistant Messages
+
+**Description:** Extend assistant commit logic so streamed media deltas become committed `ContentBlock::Media` blocks while preserving the existing ordering contract for thinking, text, and tool calls.
+
 **Acceptance criteria:**
-- [ ] Adjacent text thinking deltas commit into one thinking block before text/tool blocks
-- [ ] JSON/raw thinking deltas preserve latest raw snapshot and append display text when available
-- [ ] Tool call boundaries close any open thinking/text accumulation before committing tool calls
-- [ ] Existing OpenRouter fixture and conformance tests are migrated to structured thinking assertions
+- [ ] `ModelStreamEvent::MediaDelta` is accepted by `assistant_commit`.
+- [ ] Media deltas flush any open text/thinking before starting a media block.
+- [ ] Repeated inline base64 `data_delta` chunks append into one media block until `done` or until another content type starts.
+- [ ] Source-only media deltas commit a media block without requiring inline data.
+- [ ] Tool call boundaries flush any open media block before committing the tool call.
+
 **Verification:**
+- [ ] `cargo test -p noloong-agent-core --test core assistant_commit_media_ordering`
 - [ ] `cargo test -p noloong-agent-core --test conformance`
-- [ ] `cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture`
+
 **Dependencies:** Task 1
+
 **Files likely touched:**
 - `crates/noloong-agent-core/src/phase.rs`
+- `crates/noloong-agent-core/tests/core.rs`
 - `crates/noloong-agent-core/tests/conformance.rs`
-- `crates/noloong-agent-core/tests/openrouter_live.rs`
-- `crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs`
+
 **Estimated scope:** M
 
-#### Checkpoint: Structured Thinking
+#### Checkpoint: Core Media Model
+
 - [ ] `cargo fmt --check`
 - [ ] `cargo test -p noloong-agent-core --test core`
 - [ ] `cargo test -p noloong-agent-core --test conformance`
 
-### Phase 2: Chat Completions Provider
+### Phase 2: Chat Completions Input Mapping
 
-#### Task 3: Add Provider Configuration and Builder API
-**Description:** Add a Rust-native `ChatCompletionsProvider` with explicit config for base URL, model, auth, headers, request body extensions, timeout, stream idle timeout, and thinking behavior.
-**Acceptance criteria:**
-- [ ] Provider implements `ModelProvider` and can be registered through existing `AgentRuntimeBuilder::with_model_provider`
-- [ ] Config supports API key from environment without exposing secrets in events or metadata
-- [ ] Config supports static headers and extra JSON body fields for compatible providers
-- [ ] `lib.rs` exports the provider and config types
-**Verification:**
-- [ ] `cargo test -p noloong-agent-core chat_completions_config`
-- [ ] `cargo test -p noloong-agent-core --test core`
-**Dependencies:** Task 1
-**Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/src/lib.rs`
-- `crates/noloong-agent-core/Cargo.toml`
-- `Cargo.toml`
-**Estimated scope:** M
+#### Task 3: Render Text and Media Content Parts
 
-#### Task 4: Build Chat Completions Payload Mapping
-**Description:** Convert `ModelRequest` into an OpenAI-compatible Chat Completions request body, including messages, tools, token limits, temperature, and provider-specific extra body fields.
+**Description:** Update the built-in Chat Completions payload builder so user/custom messages can be rendered as OpenAI-compatible content parts when they contain media, while pure text messages keep the existing compact string content.
+
 **Acceptance criteria:**
-- [ ] `System`, `User`, `Assistant`, and `ToolResult` messages map to valid Chat Completions roles
-- [ ] `ToolSpec` maps to `tools: [{ type: "function", function: ... }]`
-- [ ] Assistant tool calls replay with `tool_calls` and JSON-stringified arguments
-- [ ] Structured thinking replay is only included when the descriptor says it is valid for the same provider family
+- [ ] Pure text user/custom messages still serialize as string `content`.
+- [ ] Mixed text/media user/custom messages serialize as content parts array.
+- [ ] `MediaKind::Image` with `Uri` maps to `image_url.url`.
+- [ ] `MediaKind::Image` with inline base64 maps to a data URL in `image_url.url`.
+- [ ] `ChatCompletionsProviderConfig` exposes `image_detail`, defaulting to `auto`.
+- [ ] System messages reject media with a clear provider error instead of silently dropping it.
+
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_`
-**Dependencies:** Tasks 1, 3
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_text_only_remains_string`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_image_uri_content_part`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_image_inline_content_part`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_system_media_rejected`
+
+**Dependencies:** Tasks 1, 2
+
 **Files likely touched:**
 - `crates/noloong-agent-core/src/chat_completions.rs`
 - `crates/noloong-agent-core/tests/chat_completions.rs`
+
 **Estimated scope:** M
 
-#### Task 5: Implement Streaming SSE Transport
-**Description:** Implement the network streaming path for Chat Completions using SSE frames, cancellation, stream idle timeout, structured HTTP errors, and terminal `[DONE]` handling.
+#### Task 4: Map Audio, File, and Video Inputs Safely
+
+**Description:** Add deterministic Chat Completions mappings for audio and file media, and define fail-fast behavior for unsupported source/kind combinations.
+
 **Acceptance criteria:**
-- [ ] Provider emits `Started` before first content event
-- [ ] Provider parses `data: {json}` frames and ignores comments/empty SSE lines
-- [ ] Provider treats `data: [DONE]` as stream completion when no explicit terminal chunk arrives
-- [ ] Cancellation returns `AgentCoreError::Aborted`
-- [ ] Non-2xx responses return a structured provider error that includes status and body excerpt, without logging API keys
+- [ ] Inline base64 audio with `audio/wav` maps to `input_audio` format `wav`.
+- [ ] Inline base64 audio with `audio/mpeg` or `audio/mp3` maps to `input_audio` format `mp3`.
+- [ ] Audio URI and unsupported audio MIME types return clear provider errors; no implicit downloads.
+- [ ] Provider file references map to `file.file_id`.
+- [ ] Inline file source maps to `file.file_data` and uses `MediaBlock.name` as `filename` when present.
+- [ ] File URI returns a clear provider error because Chat Completions file URL input is not portable.
+- [ ] Video URI/inline media maps to `video_url`.
+- [ ] Optional config `allow_provider_video_file_media` allows provider-referenced `Video` to map to `file_id` for compatible providers; provider-referenced `File` maps to `file_id` directly.
+
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions sse_`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions http_error_`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_audio_inline_wav`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_audio_uri_rejected`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_file_provider_reference`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_file_uri_rejected`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_video_uri_content_part`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_video_inline_content_part`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_provider_video_default_rejected`
+
 **Dependencies:** Task 3
+
 **Files likely touched:**
 - `crates/noloong-agent-core/src/chat_completions.rs`
 - `crates/noloong-agent-core/tests/chat_completions.rs`
-- `crates/noloong-agent-core/Cargo.toml`
+
 **Estimated scope:** M
 
-#### Checkpoint: Provider Skeleton
+#### Checkpoint: Chat Input Mapping
+
 - [ ] `cargo fmt --check`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_ sse_`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_`
 - [ ] `cargo test -p noloong-agent-core --test core`
 
-### Phase 3: Stream Semantics
+### Phase 3: Chat Completions Output Mapping
 
-#### Task 6: Parse Text, Finish Reasons, and Usage
-**Description:** Map Chat Completions chunks into core stream events for normal text responses, finish reasons, and optional usage metadata without changing the core event ordering contract.
+#### Task 5: Parse Chat Audio Output Into Media Events
+
+**Description:** Extend Chat Completions stream parsing so provider audio output can be represented as `MediaDelta` and committed as assistant media content.
+
 **Acceptance criteria:**
-- [ ] `choices[].delta.content` emits `ModelStreamEvent::TextDelta`
-- [ ] `finish_reason` maps `stop`, `length`, `tool_calls`, `function_call`, `content_filter`, and unknown values into `StopReason`
-- [ ] `stream_options.include_usage=true` is sent by default when compatible
-- [ ] Usage fields are stored in event or message metadata only if the current public types can represent them cleanly; otherwise they remain provider-local until a separate usage API is designed
+- [ ] `ChatCompletionsProviderConfig` supports output `modalities`, audio `format`, and audio `voice` through typed helpers while keeping `extra_body` available.
+- [ ] Request payload includes `modalities` and `audio` only when configured.
+- [ ] Stream chunks with audio base64 data emit `ModelStreamEvent::MediaDelta`.
+- [ ] Audio transcript is stored in media metadata, not forced into `TextDelta`.
+- [ ] Audio output id, expiry, provider id, model, format, and streamed payload are preserved in `MediaBlock.source`, `MediaBlock.data`, `replay_descriptor`, or metadata as appropriate.
+
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions text_stream_`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions finish_reason_`
-**Dependencies:** Task 5
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_audio_output_config`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions stream_audio_delta_to_media_event`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions stream_audio_metadata_preserved`
+
+**Dependencies:** Tasks 1, 2, 4
+
 **Files likely touched:**
 - `crates/noloong-agent-core/src/chat_completions.rs`
 - `crates/noloong-agent-core/tests/chat_completions.rs`
+
+**Estimated scope:** M
+
+#### Task 6: Replay Assistant Media Where Chat Supports It
+
+**Description:** Add same-provider replay for assistant media outputs so a later Chat Completions turn can reference prior provider-hosted audio or file output when the provider contract supports it.
+
+**Acceptance criteria:**
+- [ ] Assistant `MediaBlock` with matching Chat replay descriptor can render top-level assistant `audio` when it represents previous Chat audio output.
+- [ ] Cross-provider or cross-model media replay is ignored or rejected consistently with thinking replay rules.
+- [ ] Unsupported assistant media history returns a clear provider error instead of silently dropping media content.
+- [ ] Text and tool call replay behavior from the existing provider remains unchanged.
+
+**Verification:**
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_assistant_audio_replay`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_assistant_media_cross_provider_ignored`
+- [ ] `cargo test -p noloong-agent-core --test chat_completions payload_assistant_unsupported_media_rejected`
+
+**Dependencies:** Task 5
+
+**Files likely touched:**
+- `crates/noloong-agent-core/src/chat_completions.rs`
+- `crates/noloong-agent-core/tests/chat_completions.rs`
+
 **Estimated scope:** S
 
-#### Task 7: Implement Streaming Tool Call Accumulation
-**Description:** Accumulate fragmented Chat Completions `tool_calls` chunks by provider index and emit complete core `ToolCall` events after arguments are parseable or at finish.
-**Acceptance criteria:**
-- [ ] Multiple interleaved `tool_calls` indexes are accumulated independently
-- [ ] Function name/id updates are merged as chunks arrive
-- [ ] JSON arguments are parsed from fragmented `function.arguments`
-- [ ] Legacy single `function_call` is supported for compatible older providers
-**Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions tool_call_`
-- [ ] `cargo test -p noloong-agent-core --test conformance tool_`
-**Dependencies:** Task 5
-**Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
-**Estimated scope:** M
+#### Checkpoint: Chat Output Mapping
 
-#### Task 8: Implement Thinking Extraction and Replay
-**Description:** Implement provider-compatible reasoning extraction based on the Python reference: text reasoning fields are streamed as display text; object/list reasoning details are merged and preserved as raw replay payloads.
-**Acceptance criteria:**
-- [ ] Extracts `reasoning_content`, `reasoning`, `reasoning_text`, and `reasoning_details`
-- [ ] Handles string, object with `text` or `summary`, dict `reasoning_details`, and list `reasoning_details`
-- [ ] Merges cumulative and incremental provider payloads without duplicating display text
-- [ ] Produces replay descriptor `{ v, kind, providerId, model, field }` for same-provider/model replay; raw replay payload remains in the thinking raw snapshot
-- [ ] Summary-only thinking is represented as `ThinkingKind::Summary`
-**Verification:**
-- [ ] `cargo test -p noloong-agent-core --test chat_completions thinking_text_`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions thinking_details_`
-- [ ] `cargo test -p noloong-agent-core --test chat_completions thinking_replay_`
-**Dependencies:** Tasks 1, 4, 5
-**Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/src/types.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
-**Estimated scope:** M
-
-#### Checkpoint: Complete Stream Semantics
 - [ ] `cargo test -p noloong-agent-core --test chat_completions`
 - [ ] `cargo test -p noloong-agent-core --test conformance`
 - [ ] `cargo test --workspace`
 
-### Phase 4: OpenRouter DeepSeek Gate
+### Phase 4: Extension and Tool Coverage
 
-#### Task 9: Add OpenRouter DeepSeek Official Live Config
-**Description:** Add the required real model route in the live test by composing generic `ChatCompletionsProviderConfig`, without hardcoding OpenRouter or DeepSeek in core provider code.
+#### Task 7: Cover JSON-RPC Extension Media Contract
+
+**Description:** Update JSON-RPC tests and fixtures so non-Rust model providers and tools can send and receive media content through the existing bridge without new bridge methods.
+
 **Acceptance criteria:**
-- [ ] `crates/noloong-agent-core/src` contains no OpenRouter/DeepSeek-specific constants or constructors
-- [ ] Live test config uses `base_url = "https://openrouter.ai/api/v1"`
-- [ ] Live test config uses `model = "deepseek/deepseek-v4-flash"`
-- [ ] Live test config reads auth from `OPENROUTER_API_KEY`
-- [ ] Live test request body enforces `provider.only = ["deepseek"]`, `allow_fallbacks = false`, and `require_parameters = true`
-- [ ] Live test request body enables thinking with OpenRouter-compatible fields
+- [ ] A JS fixture can return a `media_delta` model stream event.
+- [ ] The runtime commits that external media stream into assistant message content.
+- [ ] A JS tool fixture can return `ContentBlock::Media` in `ToolOutput`.
+- [ ] JSON-RPC request payloads for model/tool calls include media blocks without custom bridge translation.
+
 **Verification:**
-- [ ] `rg -n "openrouter|deepseek|OPENROUTER|deepseek-v4" crates/noloong-agent-core/src -S` returns no matches
-- [ ] `cargo test -p noloong-agent-core --test chat_completions config_carries_provider_specific_body_without_core_presets`
-**Dependencies:** Tasks 3, 8
+- [ ] `cargo test -p noloong-agent-core --test jsonrpc jsonrpc_model_stream_media_delta`
+- [ ] `cargo test -p noloong-agent-core --test jsonrpc jsonrpc_tool_output_media`
+- [ ] `node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
+
+**Dependencies:** Tasks 1, 2
+
 **Files likely touched:**
-- `crates/noloong-agent-core/src/chat_completions.rs`
-- `crates/noloong-agent-core/tests/chat_completions.rs`
-- `crates/noloong-agent-core/tests/openrouter_live.rs`
+- `crates/noloong-agent-core/tests/jsonrpc.rs`
+- `crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
+
 **Estimated scope:** S
 
-#### Task 10: Replace JSON-RPC-only Live Test With Built-in Provider Live Test
-**Description:** Add a live test that exercises the new built-in provider directly against OpenRouter DeepSeek official routing and keeps the older JSON-RPC fixture as extension coverage if still useful.
+#### Task 8: Add Tool and Hook Regression Coverage
+
+**Description:** Verify that existing tool execution, tool updates, and after-tool hooks preserve media blocks because they already share the `Vec<ContentBlock>` surface.
+
 **Acceptance criteria:**
-- [ ] Ignored live test calls `ChatCompletionsProvider` directly
-- [ ] Test asserts at least one non-empty structured thinking event
-- [ ] Test asserts committed assistant message contains a non-empty thinking block
-- [ ] Test asserts final text contains an exact sentinel phrase and the built-in provider live path can stream a real tool call
-- [ ] Test fails if OpenRouter routes away from DeepSeek official provider
+- [ ] Tool output can contain image/audio/file media blocks.
+- [ ] Tool update can contain media blocks.
+- [ ] `AfterToolCallResult.content` can replace tool output with media content.
+- [ ] Tool error outputs remain text-only unless a tool explicitly returns media.
+
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --test openrouter_live openrouter_deepseek_v4_flash_official_provider_with_builtin_chat_completions -- --ignored --nocapture`
-**Dependencies:** Task 9
+- [ ] `cargo test -p noloong-agent-core --test core tool_output_media_preserved`
+- [ ] `cargo test -p noloong-agent-core --test core tool_update_media_preserved`
+- [ ] `cargo test -p noloong-agent-core --test core after_tool_hook_can_rewrite_to_media`
+
+**Dependencies:** Task 1
+
 **Files likely touched:**
-- `crates/noloong-agent-core/tests/openrouter_live.rs`
-- `crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs`
+- `crates/noloong-agent-core/tests/core.rs`
+- `crates/noloong-agent-core/tests/conformance.rs`
+
 **Estimated scope:** S
 
-#### Checkpoint: External Model Gate
-- [ ] `OPENROUTER_API_KEY` is present in the environment
-- [ ] `cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture`
-- [ ] Thinking event, thinking block, sentinel answer, visible text, and tool-call streaming are all observed across the ignored live gate
+#### Checkpoint: Extension and Tool Surfaces
 
-### Phase 5: Documentation and Hardening
+- [ ] `cargo test -p noloong-agent-core --test jsonrpc`
+- [ ] `cargo test -p noloong-agent-core --test core`
+- [ ] `node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs`
 
-#### Task 11: Update Examples and Public Documentation
-**Description:** Document how to use the built-in provider, how thinking is represented, and when to use JSON-RPC external providers instead.
+### Phase 5: Documentation and Verification
+
+#### Task 9: Update Architecture and README Documentation
+
+**Description:** Document the media model, provider mapping boundaries, and v1 limitations so future provider work can target the core abstractions instead of inventing per-provider payloads.
+
 **Acceptance criteria:**
-- [ ] README includes a minimal built-in Chat Completions example
-- [ ] README documents structured thinking semantics at a high level
-- [ ] README documents OpenRouter DeepSeek live verification command and why it is manual
-- [ ] Existing examples compile after thinking API migration
+- [ ] Architecture doc explains `ContentBlock::Media`, `MediaSource`, and `MediaDelta`.
+- [ ] Architecture doc states that v1 is reference-first and has no `MediaStore`.
+- [ ] Architecture doc explains `video_url` mapping and provider-hosted video opt-in behavior for the built-in Chat provider.
+- [ ] README shows one text+image user message example.
+- [ ] README shows one tool output media example.
+- [ ] README links to OpenAI Chat Completions and Anthropic Messages docs as provider mapping references.
+
 **Verification:**
-- [ ] `cargo test -p noloong-agent-core --examples`
-- [ ] `rg -n "ChatCompletionsProvider|ThinkingBlock|OPENROUTER_API_KEY|deepseek/deepseek-v4-flash" README.md crates/noloong-agent-core/examples`
-**Dependencies:** Tasks 1-10
+- [ ] `rg -n "ContentBlock::Media|MediaSource|MediaDelta|image_url|input_audio|file_id" README.md crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- [ ] `git diff --check README.md crates/noloong-agent-core/docs/ARCHITECTURE.md plans/CURRENT_PLAN.md`
+
+**Dependencies:** Tasks 1-8
+
 **Files likely touched:**
 - `README.md`
-- `crates/noloong-agent-core/examples/native_kernel.rs`
-- `crates/noloong-agent-core/examples/stateful_agent.rs`
-- `crates/noloong-agent-core/examples/stdio_ai_sdk.rs`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `plans/CURRENT_PLAN.md`
+
 **Estimated scope:** M
 
-#### Task 12: Final Quality Gate and CI Compatibility
-**Description:** Run the full local quality gate, fix all clippy warnings without broad lint suppression, and make sure default CI remains deterministic and does not require external network/model keys.
+#### Task 10: Run Final Quality Gates
+
+**Description:** Run the full local verification suite and keep real-provider tests explicitly ignored unless they are intentionally invoked.
+
 **Acceptance criteria:**
-- [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
-- [ ] `cargo nextest run --workspace` passes
-- [ ] `cargo test --workspace` passes if nextest is unavailable
-- [ ] OpenRouter live test remains ignored by default
+- [ ] `cargo fmt --check` passes.
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [ ] `cargo nextest run --workspace` passes.
+- [ ] `cargo test --workspace` passes if nextest is unavailable.
+- [ ] Existing OpenRouter DeepSeek live test still passes when manually run with `OPENROUTER_API_KEY`.
+- [ ] No OpenRouter, DeepSeek, or provider-specific media constants are added under `crates/noloong-agent-core/src`.
+
 **Verification:**
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo nextest run --workspace`
+- [ ] `cargo test --workspace`
 - [ ] `cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture`
-**Dependencies:** Tasks 1-11
+- [ ] `rg -n "openrouter|deepseek|OPENROUTER|deepseek-v4" crates/noloong-agent-core/src -S`
+
+**Dependencies:** Tasks 1-9
+
 **Files likely touched:**
-- Any files changed by prior tasks, only for fixes required by checks
-**Estimated scope:** M
+- None expected beyond fixes required by earlier tasks.
+
+**Estimated scope:** S
 
 ## Risks and Mitigations
+
 | Risk | Impact | Mitigation |
-|---|---:|---|
-| Thinking API break affects many tests and examples | High | Do the type migration first, keep helper constructors for text-only thinking, and run core/conformance tests before provider work |
-| Vendor-specific reasoning fields leak into core abstractions | High | Isolate extraction in `ChatCompletionsProvider` rules and store vendor payloads in structured `raw/replay` fields |
-| JSON/object thinking cannot be represented as a text delta | High | Separate display text from raw snapshot; `ThinkingDelta` can carry both |
-| SSE parsing becomes subtly incomplete | Medium | Keep parser minimal but test comments, multi-line data, empty lines, `[DONE]`, invalid JSON, and idle timeout |
-| Tool call fragments arrive interleaved | Medium | Accumulate by provider index/id and emit only complete core `ToolCall` events |
-| OpenRouter live test is flaky or routes to non-official provider | Medium | Require provider-only routing, no fallbacks, and keep test ignored/manual |
-| New HTTP dependencies create clippy or feature bloat | Medium | Add only required features, prefer rustls, and gate with workspace clippy |
+|------|--------|------------|
+| Event log bloat from inline media | High | Make reference-first the default, keep inline optional, and document that large blobs should use URI/provider refs until `MediaStore` exists. |
+| Provider wire shapes diverge | Medium | Keep core media model generic and isolate all OpenAI-compatible details in `chat_completions.rs`. |
+| Silent media loss in unsupported roles | High | Fail fast with provider errors for unsupported system/assistant media instead of dropping content. |
+| Video support becomes fake support | Medium | Map Chat-compatible URI/inline video to `video_url`, but keep provider-hosted video refs opt-in. |
+| Audio transcript duplicates visible text | Medium | Store provider transcript in media metadata; only provider `content` becomes `TextDelta`. |
+| JSON-RPC extensions fall out of sync | Medium | Use serde contract directly and add JS fixture tests for media stream and tool output. |
 
 ## Parallelization Opportunities
-- Tasks 1 and 2 are sequential and should be completed before other work.
-- After Task 3, Task 4 payload tests and Task 5 SSE transport tests can be implemented in parallel if write scopes are coordinated.
-- Tasks 6 and 7 can proceed in parallel after Task 5 because text/finish parsing and tool accumulation are independent.
-- Task 8 should wait for Tasks 4 and 5 because replay depends on payload conversion and extraction depends on chunk parsing.
-- Documentation in Task 11 can start after Task 9, but examples should wait until the API migration is final.
 
-## Final Acceptance Criteria
-- [ ] `noloong-agent-core` exposes a built-in Chat Completions provider that can be registered as a normal `ModelProvider`
-- [ ] Structured thinking supports text, summary, raw JSON/object/list, redaction, and replay metadata
-- [ ] Chat Completions streaming supports text deltas, thinking deltas, tool calls, finish reasons, errors, cancellation, and `[DONE]`
-- [ ] OpenRouter DeepSeek V4 Flash official-provider live test passes with thinking enabled using `OPENROUTER_API_KEY`
-- [ ] Default CI remains deterministic and does not require live model access
-- [ ] `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and workspace tests pass
-
-## Assumptions
-- This crate is still pre-1.0, so a controlled breaking change to thinking events/content is acceptable.
-- The first built-in provider is OpenAI-compatible Chat Completions; OpenAI Responses and Anthropic Messages remain future providers.
-- Usage accounting is not forced into public types in this plan unless it fits cleanly; correctness of streaming content and thinking comes first.
-- No API keys are committed, logged, or stored in event metadata.
-- Existing JSON-RPC extension APIs remain supported after the structured thinking migration.
+- Tasks 3 and 4 should be sequential because they share Chat input rendering.
+- Tasks 7 and 8 can run in parallel after Tasks 1 and 2.
+- Task 9 can start after public API names stabilize, but final doc examples should wait until Tasks 3-8 are implemented.
+- Task 10 must run last.
 
 ## References
-- OpenAI Chat Completions API reference: https://platform.openai.com/docs/api-reference/chat/create-chat-completion
-- OpenAI function calling with Chat Completions: https://developers.openai.com/cookbook/examples/how_to_call_functions_with_chat_models
-- OpenRouter DeepSeek V4 Flash: https://openrouter.ai/deepseek/deepseek-v4-flash
-- OpenRouter reasoning tokens: https://openrouter.ai/docs/use-cases/reasoning-tokens
-- OpenRouter provider routing: https://openrouter.ai/docs/features/provider-routing
+
+- OpenAI Chat Completions API: https://platform.openai.com/docs/api-reference/chat/create-chat-completion
+- OpenAI Images and vision guide: https://platform.openai.com/docs/guides/images-vision?api-mode=chat
+- OpenAI Audio guide: https://platform.openai.com/docs/guides/audio
+- Anthropic Messages examples: https://docs.anthropic.com/en/api/messages-examples
+- Anthropic Files API: https://docs.anthropic.com/en/docs/build-with-claude/files
+
+## Open Questions
+
+- None. Defaults chosen: reference-first media representation, core plus Chat Completions I/O in v1, and `video_url` for Chat-compatible URI/inline video while provider-hosted video refs remain opt-in.
