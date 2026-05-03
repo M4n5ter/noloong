@@ -82,6 +82,7 @@ pub enum AgentEffect {
     AppendMessage { message: AgentMessage },
     PatchContext { patch: ContextPatch },
     SetAvailableTools { tools: Vec<ToolSpec> },
+    CompactMessages { compaction: MessageCompaction },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +90,20 @@ pub enum AgentEffect {
 pub enum ContextPatch {
     Set { key: String, value: Value },
     Remove { key: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageCompaction {
+    pub summary_message: AgentMessage,
+    #[serde(default)]
+    pub retained_message_ids: Vec<MessageId>,
+    #[serde(default)]
+    pub dropped_message_ids: Vec<MessageId>,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -850,6 +865,7 @@ pub enum ExtensionCapability {
     ContextProvider { id: String },
     PhaseNode { id: String },
     PhaseHook { id: String },
+    CompactionSummarizer { id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

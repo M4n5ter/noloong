@@ -1,6 +1,6 @@
 use crate::{
-    AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentState, ContextPatch, Result,
-    RunStatus,
+    AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentState, ContextPatch,
+    MessageCompaction, MessageRole, Result, RunStatus, compacted_messages,
 };
 use std::collections::BTreeSet;
 
@@ -58,11 +58,7 @@ pub fn apply_event(state: &mut AgentState, event: &AgentEvent) -> Result<()> {
 pub fn validate_effect(effect: &AgentEffect) -> Result<()> {
     match effect {
         AgentEffect::AppendMessage { message } => {
-            if message.id.trim().is_empty() {
-                return Err(AgentCoreError::InvalidEffect(
-                    "message id must not be empty".to_string(),
-                ));
-            }
+            validate_message_id(&message.id)?;
         }
         AgentEffect::PatchContext { patch } => match patch {
             ContextPatch::Set { key, .. } | ContextPatch::Remove { key } => {
@@ -73,6 +69,7 @@ pub fn validate_effect(effect: &AgentEffect) -> Result<()> {
                 }
             }
         },
+        AgentEffect::CompactMessages { compaction } => validate_message_compaction(compaction)?,
         AgentEffect::SetAvailableTools { tools } => {
             let mut names = BTreeSet::new();
             for tool in tools {
@@ -93,8 +90,16 @@ pub fn validate_effect(effect: &AgentEffect) -> Result<()> {
     Ok(())
 }
 
-fn apply_effect(state: &mut AgentState, effect: &AgentEffect) -> Result<()> {
+pub fn validate_effect_for_state(state: &AgentState, effect: &AgentEffect) -> Result<()> {
     validate_effect(effect)?;
+    if let AgentEffect::CompactMessages { compaction } = effect {
+        validate_message_compaction_for_state(state, compaction)?;
+    }
+    Ok(())
+}
+
+fn apply_effect(state: &mut AgentState, effect: &AgentEffect) -> Result<()> {
+    validate_effect_for_state(state, effect)?;
     match effect {
         AgentEffect::AppendMessage { message } => {
             state.messages.push(message.clone());
@@ -114,6 +119,111 @@ fn apply_effect(state: &mut AgentState, effect: &AgentEffect) -> Result<()> {
                 .map(|tool| (tool.name.clone(), tool))
                 .collect();
         }
+        AgentEffect::CompactMessages { compaction } => {
+            let retained_ids = compaction
+                .retained_message_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let retained_messages = state
+                .messages
+                .iter()
+                .filter(|message| retained_ids.contains(message.id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            state.messages =
+                compacted_messages(compaction.summary_message.clone(), &retained_messages);
+        }
     }
     Ok(())
+}
+
+fn validate_message_id(id: &str) -> Result<()> {
+    if id.trim().is_empty() {
+        return Err(AgentCoreError::InvalidEffect(
+            "message id must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_message_compaction(compaction: &MessageCompaction) -> Result<()> {
+    validate_message_id(&compaction.summary_message.id)?;
+    if !matches!(compaction.summary_message.role, MessageRole::System) {
+        return Err(AgentCoreError::InvalidEffect(
+            "compaction summary message must use system role".into(),
+        ));
+    }
+    let retained_ids = unique_message_ids(&compaction.retained_message_ids, "retained")?;
+    let dropped_ids = unique_message_ids(&compaction.dropped_message_ids, "dropped")?;
+    if retained_ids.intersection(&dropped_ids).next().is_some() {
+        return Err(AgentCoreError::InvalidEffect(
+            "compaction retained and dropped message ids must not overlap".into(),
+        ));
+    }
+    if retained_ids.contains(compaction.summary_message.id.as_str())
+        || dropped_ids.contains(compaction.summary_message.id.as_str())
+    {
+        return Err(AgentCoreError::InvalidEffect(
+            "compaction summary message id must be new".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_message_compaction_for_state(
+    state: &AgentState,
+    compaction: &MessageCompaction,
+) -> Result<()> {
+    let existing_ids = state
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let retained_ids = compaction
+        .retained_message_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let dropped_ids = compaction
+        .dropped_message_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    for id in retained_ids.union(&dropped_ids) {
+        if !existing_ids.contains(id) {
+            return Err(AgentCoreError::InvalidEffect(format!(
+                "compaction references unknown message id: {id}"
+            )));
+        }
+    }
+    if existing_ids.contains(compaction.summary_message.id.as_str()) {
+        return Err(AgentCoreError::InvalidEffect(
+            "compaction summary message id must not already exist".into(),
+        ));
+    }
+    let covered_ids = retained_ids
+        .union(&dropped_ids)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if covered_ids != existing_ids {
+        return Err(AgentCoreError::InvalidEffect(
+            "compaction retained and dropped message ids must cover current messages".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn unique_message_ids<'a>(ids: &'a [String], label: &str) -> Result<BTreeSet<&'a str>> {
+    let mut unique = BTreeSet::new();
+    for id in ids {
+        validate_message_id(id)?;
+        if !unique.insert(id.as_str()) {
+            return Err(AgentCoreError::InvalidEffect(format!(
+                "duplicate {label} compaction message id: {id}"
+            )));
+        }
+    }
+    Ok(unique)
 }

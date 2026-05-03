@@ -18,6 +18,10 @@ const phaseHookMode =
   process.argv
     .find((arg) => arg.startsWith("--phase-hook-mode="))
     ?.slice("--phase-hook-mode=".length) ?? null;
+const compactionSummarizerMode =
+  process.argv
+    .find((arg) => arg.startsWith("--compaction-summarizer-mode="))
+    ?.slice("--compaction-summarizer-mode=".length) ?? null;
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -72,6 +76,12 @@ for await (const line of rl) {
     ];
     if (phaseHookMode) {
       capabilities.push({ type: "phase_hook", id: "fixture-phase-hook" });
+    }
+    if (compactionSummarizerMode) {
+      capabilities.push({
+        type: "compaction_summarizer",
+        id: "fixture-compaction",
+      });
     }
     result(id, {
       capabilities,
@@ -206,6 +216,18 @@ for await (const line of rl) {
       continue;
     }
     result(id, {});
+    continue;
+  }
+
+  if (method === "compaction/summarize") {
+    if (compactionSummarizerMode === "malformed") {
+      result(id, { summary: 42 });
+      continue;
+    }
+    result(id, {
+      summary: `fixture compaction summary: ${params.messagesToSummarize.length}`,
+      metadata: { fixtureCompaction: true },
+    });
     continue;
   }
 

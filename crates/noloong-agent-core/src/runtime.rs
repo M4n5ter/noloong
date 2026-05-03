@@ -1,13 +1,15 @@
 use crate::phase::{
-    PHASE_ASSISTANT_COMMIT, PHASE_CONTEXT_PREPARE, PHASE_INPUT_INGEST, PHASE_MODEL_REQUEST_PREPARE,
-    PHASE_MODEL_STREAM, PHASE_TOOL_CALL_RESOLVE, PHASE_TOOL_EXECUTE, PHASE_TURN_DECISION,
+    PHASE_ASSISTANT_COMMIT, PHASE_CONTEXT_COMPACT, PHASE_CONTEXT_PREPARE, PHASE_INPUT_INGEST,
+    PHASE_MODEL_REQUEST_PREPARE, PHASE_MODEL_STREAM, PHASE_TOOL_CALL_RESOLVE, PHASE_TOOL_EXECUTE,
+    PHASE_TURN_DECISION,
 };
-use crate::reducer::{apply_event, reduce_events, validate_effect};
+use crate::reducer::{apply_event, reduce_events, validate_effect_for_state};
 use crate::{
     AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentMessage, AgentState,
-    EventSinkFuture, EventStore, InMemoryEventStore, ModelProvider, ModelStreamEvent, PhaseContext,
-    PhaseHook, PhaseNode, PhaseScratch, Result, StdioExtension, StdioExtensionConfig, ToolCallHook,
-    ToolExecutionMode, ToolProvider, TurnDecision,
+    CompactionSummarizer, ContextCompactionConfig, EventSinkFuture, EventStore,
+    HeuristicTokenEstimator, InMemoryEventStore, ModelProvider, ModelStreamEvent, PhaseContext,
+    PhaseHook, PhaseNode, PhaseScratch, Result, StdioExtension, StdioExtensionConfig,
+    TokenEstimator, ToolCallHook, ToolExecutionMode, ToolProvider, TurnDecision,
 };
 use crate::{CancellationToken, ContextProvider, ModelStreamSink, StandardPhase};
 use std::{
@@ -30,6 +32,26 @@ pub trait RuntimeQueues: Send + Sync {
 pub(crate) struct ToolRuntimeHandles {
     pub tools: BTreeMap<String, Arc<dyn ToolProvider>>,
     pub hooks: Vec<Arc<dyn ToolCallHook>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ContextCompactionRuntime {
+    pub config: ContextCompactionConfig,
+    pub summarizer: Arc<dyn CompactionSummarizer>,
+    pub estimator: Arc<dyn TokenEstimator>,
+}
+
+enum ContextCompactionRegistration {
+    Direct {
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+        estimator: Arc<dyn TokenEstimator>,
+    },
+    SummarizerId {
+        config: ContextCompactionConfig,
+        summarizer_id: String,
+        estimator: Arc<dyn TokenEstimator>,
+    },
 }
 
 pub enum AgentInput {
@@ -72,6 +94,7 @@ pub struct AgentRuntime {
     tool_hooks: Vec<Arc<dyn ToolCallHook>>,
     phase_hooks: Vec<Arc<dyn PhaseHook>>,
     context_providers: Vec<Arc<dyn ContextProvider>>,
+    context_compaction: Option<ContextCompactionRuntime>,
     _stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
     run_counter: Arc<AtomicU64>,
@@ -320,6 +343,10 @@ impl AgentRuntime {
 
     pub fn phase_hooks(&self) -> &[Arc<dyn PhaseHook>] {
         &self.phase_hooks
+    }
+
+    pub(crate) fn context_compaction(&self) -> Option<&ContextCompactionRuntime> {
+        self.context_compaction.as_ref()
     }
 
     pub(crate) fn tool_handles(&self) -> ToolRuntimeHandles {
@@ -578,7 +605,7 @@ impl AgentRuntime {
         )
         .await?;
 
-        match validate_effect(&effect) {
+        match validate_effect_for_state(state, &effect) {
             Ok(()) => {
                 self.record_event(
                     state,
@@ -698,6 +725,8 @@ pub struct AgentRuntimeBuilder {
     tool_hooks: Vec<Arc<dyn ToolCallHook>>,
     phase_hooks: Vec<Arc<dyn PhaseHook>>,
     context_providers: Vec<Arc<dyn ContextProvider>>,
+    compaction_summarizers: BTreeMap<String, Arc<dyn CompactionSummarizer>>,
+    context_compaction: Option<ContextCompactionRegistration>,
     stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
 }
@@ -714,6 +743,8 @@ impl Default for AgentRuntimeBuilder {
             tool_hooks: Vec::new(),
             phase_hooks: Vec::new(),
             context_providers: Vec::new(),
+            compaction_summarizers: BTreeMap::new(),
+            context_compaction: None,
             stdio_extensions: Vec::new(),
             max_turns: 8,
         }
@@ -762,6 +793,58 @@ impl AgentRuntimeBuilder {
 
     pub fn with_context_provider(mut self, provider: Arc<dyn ContextProvider>) -> Self {
         self.context_providers.push(provider);
+        self
+    }
+
+    pub fn with_context_compaction(
+        self,
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+    ) -> Self {
+        self.with_context_compaction_estimator(
+            config,
+            summarizer,
+            Arc::new(HeuristicTokenEstimator),
+        )
+    }
+
+    pub fn with_context_compaction_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.context_compaction = Some(ContextCompactionRegistration::Direct {
+            config,
+            summarizer,
+            estimator,
+        });
+        self
+    }
+
+    pub fn with_context_compaction_summarizer_id(
+        self,
+        config: ContextCompactionConfig,
+        summarizer_id: impl Into<String>,
+    ) -> Self {
+        self.with_context_compaction_summarizer_id_and_estimator(
+            config,
+            summarizer_id,
+            Arc::new(HeuristicTokenEstimator),
+        )
+    }
+
+    pub fn with_context_compaction_summarizer_id_and_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer_id: impl Into<String>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.context_compaction = Some(ContextCompactionRegistration::SummarizerId {
+            config,
+            summarizer_id: summarizer_id.into(),
+            estimator,
+        });
         self
     }
 
@@ -833,6 +916,15 @@ impl AgentRuntimeBuilder {
                             id,
                         )));
                 }
+                crate::ExtensionCapability::CompactionSummarizer { id } => {
+                    self.compaction_summarizers.insert(
+                        id.clone(),
+                        Arc::new(crate::jsonrpc::StdioCompactionSummarizer::new(
+                            extension.clone(),
+                            id,
+                        )),
+                    );
+                }
             }
         }
         self.stdio_extensions.push(extension);
@@ -846,9 +938,15 @@ impl AgentRuntimeBuilder {
         if !self.model_providers.contains_key(&default_model_provider) {
             return Err(AgentCoreError::MissingModelProvider(default_model_provider));
         }
+        let context_compaction =
+            resolve_context_compaction(self.context_compaction, &self.compaction_summarizers)?;
+        let mut phases = self.phases;
+        if context_compaction.is_some() {
+            ensure_context_compaction_phase(&mut phases);
+        }
         Ok(AgentRuntime {
             event_store: self.event_store,
-            phases: self.phases,
+            phases,
             model_providers: self.model_providers,
             default_model_provider,
             tools: self.tools,
@@ -856,6 +954,7 @@ impl AgentRuntimeBuilder {
             tool_hooks: self.tool_hooks,
             phase_hooks: self.phase_hooks,
             context_providers: self.context_providers,
+            context_compaction,
             _stdio_extensions: self.stdio_extensions,
             max_turns: self.max_turns,
             run_counter: Arc::new(AtomicU64::new(0)),
@@ -877,6 +976,17 @@ fn default_phases() -> Vec<Arc<dyn PhaseNode>> {
     ]
 }
 
+fn ensure_context_compaction_phase(phases: &mut Vec<Arc<dyn PhaseNode>>) {
+    if phases.iter().any(|node| node.id() == PHASE_CONTEXT_COMPACT) {
+        return;
+    }
+    insert_before_phase(
+        phases,
+        PHASE_MODEL_REQUEST_PREPARE,
+        Arc::new(StandardPhase::ContextCompact),
+    );
+}
+
 fn insert_before_phase(
     phases: &mut Vec<Arc<dyn PhaseNode>>,
     before_phase_id: &str,
@@ -890,10 +1000,11 @@ fn insert_before_phase(
 }
 
 #[allow(dead_code)]
-fn _standard_phase_ids() -> [&'static str; 8] {
+fn _standard_phase_ids() -> [&'static str; 9] {
     [
         PHASE_INPUT_INGEST,
         PHASE_CONTEXT_PREPARE,
+        PHASE_CONTEXT_COMPACT,
         PHASE_MODEL_REQUEST_PREPARE,
         PHASE_MODEL_STREAM,
         PHASE_ASSISTANT_COMMIT,
@@ -901,4 +1012,42 @@ fn _standard_phase_ids() -> [&'static str; 8] {
         PHASE_TOOL_EXECUTE,
         PHASE_TURN_DECISION,
     ]
+}
+
+fn resolve_context_compaction(
+    registration: Option<ContextCompactionRegistration>,
+    summarizers: &BTreeMap<String, Arc<dyn CompactionSummarizer>>,
+) -> Result<Option<ContextCompactionRuntime>> {
+    let Some(registration) = registration else {
+        return Ok(None);
+    };
+    match registration {
+        ContextCompactionRegistration::Direct {
+            config,
+            summarizer,
+            estimator,
+        } => {
+            config.validate()?;
+            Ok(Some(ContextCompactionRuntime {
+                config,
+                summarizer,
+                estimator,
+            }))
+        }
+        ContextCompactionRegistration::SummarizerId {
+            config,
+            summarizer_id,
+            estimator,
+        } => {
+            config.validate()?;
+            let summarizer = summarizers.get(&summarizer_id).cloned().ok_or_else(|| {
+                AgentCoreError::Phase(format!("compaction summarizer not found: {summarizer_id}"))
+            })?;
+            Ok(Some(ContextCompactionRuntime {
+                config,
+                summarizer,
+                estimator,
+            }))
+        }
+    }
 }

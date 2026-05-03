@@ -1,22 +1,29 @@
+use crate::compaction::{
+    COMPACTION_METADATA_IS_SPLIT_TURN_KEY, COMPACTION_METADATA_MODE_KEY,
+    COMPACTION_METADATA_TOKENS_BEFORE_KEY,
+};
 use crate::runtime::ToolRuntimeHandles;
 use crate::{
     AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AfterModelRequestHookContext,
     AfterModelRequestHookResult, AfterToolCallContext, AgentEffect, AgentMessage,
     BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
     BeforeModelRequestHookContext, BeforeModelRequestHookResult, BeforeToolCallContext,
-    ContentBlock, ContextRequest, MediaBlock, MediaDelta, MediaSource, ModelRequest,
-    ModelStreamEvent, PhaseHook, Result, ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput,
-    TurnDecision,
+    CompactionDecision, ContentBlock, ContextCompactionMode, ContextRequest, MediaBlock,
+    MediaDelta, MediaSource, MessageCompaction, ModelRequest, ModelStreamEvent, PhaseHook, Result,
+    ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, TurnDecision, compacted_messages,
+    compaction_summary_message, plan_compaction,
+    provider_utils::collect_model_stream,
     providers::{BoxFuture, CancellationToken, ModelStreamSink},
 };
 use crate::{AgentRuntime, AgentState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 pub const PHASE_INPUT_INGEST: &str = "input.ingest";
 pub const PHASE_CONTEXT_PREPARE: &str = "context.prepare";
+pub const PHASE_CONTEXT_COMPACT: &str = "context.compact";
 pub const PHASE_MODEL_REQUEST_PREPARE: &str = "model.request.prepare";
 pub const PHASE_MODEL_STREAM: &str = "model.stream";
 pub const PHASE_ASSISTANT_COMMIT: &str = "assistant.commit";
@@ -46,6 +53,8 @@ pub struct PhaseScratch {
     pub input: Option<AgentMessage>,
     #[serde(default)]
     pub model_request: Option<ModelRequest>,
+    #[serde(default)]
+    pub request_messages_override: Option<Vec<AgentMessage>>,
     #[serde(default)]
     pub model_events: Vec<ModelStreamEvent>,
     #[serde(default)]
@@ -92,6 +101,7 @@ impl PhaseOutput {
 pub enum StandardPhase {
     InputIngest,
     ContextPrepare,
+    ContextCompact,
     ModelRequestPrepare,
     ModelStream,
     AssistantCommit,
@@ -105,6 +115,7 @@ impl PhaseNode for StandardPhase {
         match self {
             Self::InputIngest => PHASE_INPUT_INGEST,
             Self::ContextPrepare => PHASE_CONTEXT_PREPARE,
+            Self::ContextCompact => PHASE_CONTEXT_COMPACT,
             Self::ModelRequestPrepare => PHASE_MODEL_REQUEST_PREPARE,
             Self::ModelStream => PHASE_MODEL_STREAM,
             Self::AssistantCommit => PHASE_ASSISTANT_COMMIT,
@@ -119,6 +130,7 @@ impl PhaseNode for StandardPhase {
             match self {
                 Self::InputIngest => input_ingest(context).await,
                 Self::ContextPrepare => context_prepare(context).await,
+                Self::ContextCompact => context_compact(context).await,
                 Self::ModelRequestPrepare => model_request_prepare(context).await,
                 Self::ModelStream => model_stream(context).await,
                 Self::AssistantCommit => assistant_commit(context).await,
@@ -160,6 +172,100 @@ async fn context_prepare(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     Ok(output)
 }
 
+async fn context_compact(context: PhaseContext<'_>) -> Result<PhaseOutput> {
+    let PhaseContext {
+        runtime,
+        run_id,
+        turn_id,
+        state,
+        scratch,
+        cancellation,
+        ..
+    } = context;
+    let mut output = PhaseOutput::from_scratch(scratch);
+    let Some(compaction) = runtime.context_compaction() else {
+        return Ok(output);
+    };
+    cancellation.throw_if_cancelled()?;
+    let decision = plan_compaction(
+        &compaction.config,
+        compaction.estimator.as_ref(),
+        &state.messages,
+    )?;
+    let CompactionDecision::Compact(plan) = decision else {
+        return Ok(output);
+    };
+
+    let retained_message_ids = plan.retained_message_ids().to_vec();
+    let dropped_message_ids = plan.dropped_message_ids().to_vec();
+    let crate::CompactionPlan {
+        previous_summary,
+        messages_to_summarize,
+        turn_prefix_messages,
+        retained_messages,
+        tokens_before,
+        is_split_turn,
+        ..
+    } = plan;
+    let request = crate::CompactionSummaryRequest {
+        run_id: run_id.to_string(),
+        turn_id,
+        previous_summary,
+        messages_to_summarize,
+        turn_prefix_messages,
+        token_budget: compaction.config.reserve_tokens,
+        metadata: compaction.config.metadata.clone(),
+    };
+    let summary_result = compaction
+        .summarizer
+        .summarize(request, cancellation.clone())
+        .await?;
+    if summary_result.summary.trim().is_empty() {
+        return Err(crate::AgentCoreError::Phase(
+            "compaction summarizer returned an empty summary".into(),
+        ));
+    }
+    let mut summary_metadata = compaction.config.metadata.clone();
+    summary_metadata.extend(summary_result.metadata);
+    summary_metadata.insert(
+        COMPACTION_METADATA_MODE_KEY.into(),
+        serde_json::json!(compaction.config.mode),
+    );
+    summary_metadata.insert(
+        COMPACTION_METADATA_TOKENS_BEFORE_KEY.into(),
+        serde_json::json!(tokens_before),
+    );
+    summary_metadata.insert(
+        COMPACTION_METADATA_IS_SPLIT_TURN_KEY.into(),
+        serde_json::json!(is_split_turn),
+    );
+    let summary_message =
+        compaction_summary_message(run_id, turn_id, summary_result.summary, summary_metadata);
+    let compacted_messages = compacted_messages(summary_message.clone(), &retained_messages);
+    let tokens_after = compaction
+        .estimator
+        .estimate_messages_tokens(&compacted_messages);
+
+    match compaction.config.mode {
+        ContextCompactionMode::PersistentState => {
+            output.effects.push(AgentEffect::CompactMessages {
+                compaction: MessageCompaction {
+                    summary_message,
+                    retained_message_ids,
+                    dropped_message_ids,
+                    tokens_before,
+                    tokens_after,
+                    metadata: compaction.config.metadata.clone(),
+                },
+            });
+        }
+        ContextCompactionMode::RequestOnly => {
+            output.scratch.request_messages_override = Some(compacted_messages);
+        }
+    }
+    Ok(output)
+}
+
 async fn model_request_prepare(context: PhaseContext<'_>) -> Result<PhaseOutput> {
     let PhaseContext {
         runtime,
@@ -176,10 +282,15 @@ async fn model_request_prepare(context: PhaseContext<'_>) -> Result<PhaseOutput>
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    let request_messages = output
+        .scratch
+        .request_messages_override
+        .take()
+        .unwrap_or_else(|| state.messages.clone());
     let request = ModelRequest {
         run_id: run_id.to_string(),
         turn_id,
-        messages: state.messages.clone(),
+        messages: request_messages,
         context: context_map,
         tools: runtime
             .tool_specs()
@@ -217,20 +328,6 @@ async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
         .model_request
         .clone()
         .ok_or_else(|| crate::AgentCoreError::Phase("model request was not prepared".into()))?;
-    let emitted_events = Arc::new(Mutex::new(Vec::new()));
-    let outer_sink = model_stream_sink;
-    let emitted_events_for_sink = Arc::clone(&emitted_events);
-    let sink: ModelStreamSink = Arc::new(move |event| {
-        let emitted_events = Arc::clone(&emitted_events_for_sink);
-        let outer_sink = outer_sink.clone();
-        Box::pin(async move {
-            emitted_events.lock().await.push(event.clone());
-            if let Some(outer_sink) = outer_sink {
-                outer_sink(event).await?;
-            }
-            Ok(())
-        })
-    });
     let hook_runner = PhaseHookRunner::new(
         runtime.phase_hooks(),
         run_id,
@@ -239,16 +336,17 @@ async fn model_stream(context: PhaseContext<'_>) -> Result<PhaseOutput> {
         &cancellation,
     );
     let request_for_hooks = hook_runner.has_hooks().then(|| request.clone());
-    let returned_events = provider
-        .stream_model(request, sink, cancellation.clone())
-        .await?;
-    let emitted_events = emitted_events.lock().await.clone();
-    let events = if emitted_events.is_empty() {
-        output.stream_events = returned_events.clone();
-        returned_events
-    } else {
-        emitted_events
-    };
+    let stream = collect_model_stream(
+        provider.as_ref(),
+        request,
+        model_stream_sink,
+        cancellation.clone(),
+    )
+    .await?;
+    let events = stream.events;
+    if !stream.emitted_events {
+        output.stream_events = events.clone();
+    }
     output.scratch.model_events = match request_for_hooks {
         Some(request) => hook_runner.after_model_request(&request, events).await?,
         None => events,

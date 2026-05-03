@@ -1,8 +1,9 @@
 use crate::{
     AgentCoreError, AgentEvent, AgentEventSink, AgentInput, AgentMessage, AgentRuntime,
-    AgentRuntimeBuilder, AgentState, CancellationToken, ContextProvider, EventSinkFuture,
-    ModelProvider, PhaseHook, QueueMode, Result, RuntimeQueues, StdioExtensionConfig, ToolCallHook,
-    ToolExecutionMode, ToolProvider, apply_event,
+    AgentRuntimeBuilder, AgentState, CancellationToken, CompactionSummarizer,
+    ContextCompactionConfig, ContextProvider, EventSinkFuture, ModelProvider, PhaseHook, QueueMode,
+    Result, RuntimeQueues, StdioExtensionConfig, TokenEstimator, ToolCallHook, ToolExecutionMode,
+    ToolProvider, apply_event,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -337,6 +338,52 @@ impl AgentBuilder {
 
     pub fn with_context_provider(mut self, provider: Arc<dyn ContextProvider>) -> Self {
         self.runtime_builder = self.runtime_builder.with_context_provider(provider);
+        self
+    }
+
+    pub fn with_context_compaction(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compaction(config, summarizer);
+        self
+    }
+
+    pub fn with_context_compaction_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compaction_estimator(config, summarizer, estimator);
+        self
+    }
+
+    pub fn with_context_compaction_summarizer_id(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer_id: impl Into<String>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compaction_summarizer_id(config, summarizer_id);
+        self
+    }
+
+    pub fn with_context_compaction_summarizer_id_and_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer_id: impl Into<String>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compaction_summarizer_id_and_estimator(config, summarizer_id, estimator);
         self
     }
 

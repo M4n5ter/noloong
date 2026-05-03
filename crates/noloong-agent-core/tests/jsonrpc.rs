@@ -1,8 +1,9 @@
 use noloong_agent_core::{
     AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AgentEventKind, AgentRuntime,
-    AgentRuntimeBuilder, BoxFuture, CancellationToken, ContentBlock, ContextPatch, EventStore,
-    InMemoryEventStore, MediaEncoding, MediaKind, MediaSource, ModelStreamEvent, PhaseHook, Result,
-    RunStatus, StdioExtension, StdioExtensionConfig, reduce_events,
+    AgentRuntimeBuilder, AgentState, BoxFuture, CancellationToken, ContentBlock,
+    ContextCompactionConfig, ContextPatch, EventStore, InMemoryEventStore, MediaEncoding,
+    MediaKind, MediaSource, MessageRole, ModelStreamEvent, PhaseHook, Result, RunStatus,
+    StdioExtension, StdioExtensionConfig, reduce_events,
 };
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -11,6 +12,85 @@ use tokio::{sync::mpsc, time::timeout};
 pub mod support;
 
 use support::assert_assistant_text_contains;
+
+#[tokio::test]
+async fn stdio_compaction_summarizer_compacts_persistent_state() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_context_compaction_summarizer_id(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10),
+            "fixture-compaction",
+        )
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--compaction-summarizer-mode=summary".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let report = runtime
+        .continue_from_state(long_compaction_state(), None, CancellationToken::new())
+        .await?;
+
+    assert!(report.state.messages.iter().any(|message| {
+        matches!(message.role, MessageRole::System)
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains("fixture compaction summary")
+                )
+            })
+    }));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::EffectCommitted {
+                effect: noloong_agent_core::AgentEffect::CompactMessages { .. }
+            }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_stdio_compaction_summarizer_response_fails_phase() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_context_compaction_summarizer_id(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10),
+            "fixture-compaction",
+        )
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--compaction-summarizer-mode=malformed".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let result = runtime
+        .continue_from_state(long_compaction_state(), None, CancellationToken::new())
+        .await;
+
+    let error = result.expect_err("malformed compaction response should fail");
+    assert!(
+        error.to_string().contains("json"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn stdio_extension_runs_provider_tool_and_context() -> Result<()> {
@@ -416,6 +496,22 @@ fn fixture_path(name: &str) -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join(name)
+}
+
+fn long_compaction_state() -> AgentState {
+    AgentState {
+        messages: vec![
+            noloong_agent_core::AgentMessage::user("u1", "old ".repeat(80)),
+            noloong_agent_core::AgentMessage::assistant(
+                "a1",
+                vec![ContentBlock::Text {
+                    text: "old answer ".repeat(80),
+                }],
+            ),
+            noloong_agent_core::AgentMessage::user("u2", "recent"),
+        ],
+        ..AgentState::default()
+    }
 }
 
 async fn runtime_with_phase_hook_mode(mode: &str) -> Result<AgentRuntime> {

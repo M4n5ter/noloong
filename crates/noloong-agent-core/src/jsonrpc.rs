@@ -2,7 +2,8 @@ use crate::{
     AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AfterModelRequestHookContext,
     AfterModelRequestHookResult, AgentCoreError, AgentEffect, AgentMessage,
     BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
-    BeforeModelRequestHookContext, BeforeModelRequestHookResult, ContextProvider, ContextRequest,
+    BeforeModelRequestHookContext, BeforeModelRequestHookResult, CompactionSummarizer,
+    CompactionSummaryRequest, CompactionSummaryResult, ContextProvider, ContextRequest,
     ExtensionCapability, ExtensionManifest, ModelProvider, ModelRequest, ModelStreamEvent,
     PhaseContext, PhaseHook, PhaseNode, PhaseOutput, Result, ToolOutput, ToolProvider, ToolRequest,
     ToolSpec,
@@ -479,6 +480,40 @@ impl ContextProvider for StdioContextProvider {
     }
 }
 
+pub struct StdioCompactionSummarizer {
+    extension: Arc<StdioExtension>,
+    id: String,
+}
+
+impl StdioCompactionSummarizer {
+    pub fn new(extension: Arc<StdioExtension>, id: String) -> Self {
+        Self { extension, id }
+    }
+}
+
+impl CompactionSummarizer for StdioCompactionSummarizer {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn summarize<'a>(
+        &'a self,
+        request: CompactionSummaryRequest,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, CompactionSummaryResult> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let params = serde_json::to_value(CompactionSummarizeRequest {
+                summarizer_id: &self.id,
+                request: &request,
+            })?;
+            self.extension
+                .request("compaction/summarize", params, Some(cancellation))
+                .await
+        })
+    }
+}
+
 pub struct StdioPhaseNode {
     extension: Arc<StdioExtension>,
     id: String,
@@ -707,6 +742,14 @@ struct BeforeAssistantCommitHookPayload<'a> {
 #[serde(rename_all = "camelCase")]
 struct AfterAssistantCommitHookPayload<'a> {
     assistant_message: &'a AgentMessage,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactionSummarizeRequest<'a> {
+    summarizer_id: &'a str,
+    #[serde(flatten)]
+    request: &'a CompactionSummaryRequest,
 }
 
 async fn read_stdout(

@@ -1,6 +1,10 @@
-use crate::{AgentCoreError, ModelStreamEvent, ModelStreamSink, Result};
+use crate::{
+    AgentCoreError, CancellationToken, EventSinkFuture, ModelProvider, ModelRequest,
+    ModelStreamEvent, ModelStreamSink, Result,
+};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use std::{collections::BTreeMap, env};
+use std::{collections::BTreeMap, env, sync::Arc};
+use tokio::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReplayScopeMatch {
@@ -17,6 +21,46 @@ pub(crate) async fn emit_model_stream_event(
     stream(event.clone()).await?;
     events.push(event);
     Ok(())
+}
+
+pub(crate) struct CollectedModelStream {
+    pub events: Vec<ModelStreamEvent>,
+    pub emitted_events: bool,
+}
+
+pub(crate) async fn collect_model_stream(
+    provider: &dyn ModelProvider,
+    request: ModelRequest,
+    outer_sink: Option<ModelStreamSink>,
+    cancellation: CancellationToken,
+) -> Result<CollectedModelStream> {
+    let emitted_events = Arc::new(Mutex::new(Vec::new()));
+    let emitted_events_for_sink = Arc::clone(&emitted_events);
+    let sink: ModelStreamSink = Arc::new(move |event| {
+        let emitted_events = Arc::clone(&emitted_events_for_sink);
+        let outer_sink = outer_sink.clone();
+        Box::pin(async move {
+            emitted_events.lock().await.push(event.clone());
+            if let Some(outer_sink) = outer_sink {
+                outer_sink(event).await?;
+            }
+            Ok(())
+        }) as EventSinkFuture
+    });
+
+    let returned_events = provider.stream_model(request, sink, cancellation).await?;
+    let mut emitted_events = emitted_events.lock().await;
+    if emitted_events.is_empty() {
+        Ok(CollectedModelStream {
+            events: returned_events,
+            emitted_events: false,
+        })
+    } else {
+        Ok(CollectedModelStream {
+            events: std::mem::take(&mut *emitted_events),
+            emitted_events: true,
+        })
+    }
 }
 
 pub(crate) fn headers_from_map(headers: &BTreeMap<String, String>) -> Result<HeaderMap> {
