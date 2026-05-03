@@ -1,12 +1,13 @@
 use noloong_agent_core::{
-    AfterToolCallContext, AfterToolCallResult, AgentCoreError, AgentEffect, AgentEventKind,
-    AgentMessage, AgentRuntime, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
-    CancellationToken, ContentBlock, ContextPatch, ContextProvider, ContextRequest, EventStore,
-    InMemoryEventStore, MediaBlock, MediaDelta, MediaEncoding, MediaKind, MediaSource,
+    AfterToolCallContext, AfterToolCallResult, AgentCoreError, AgentEffect, AgentEvent,
+    AgentEventKind, AgentMessage, AgentRuntime, BeforeToolCallContext, BeforeToolCallResult,
+    BoxFuture, CancellationToken, ContentBlock, ContextPatch, ContextProvider, ContextRequest,
+    EventStore, InMemoryEventStore, MediaBlock, MediaDelta, MediaEncoding, MediaKind, MediaSource,
     ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, PHASE_CONTEXT_PREPARE,
     PhaseContext, PhaseNode, PhaseOutput, Result, RunStatus, StopReason, ThinkingBlock,
     ThinkingDelta, ThinkingKind, ToolCall, ToolCallHook, ToolExecutionMode, ToolOutput,
-    ToolProvider, ToolRequest, ToolSpec, ToolUpdate, reduce_events,
+    ToolPermissionDecision, ToolPermissionOutcome, ToolPermissionRequirement, ToolProvider,
+    ToolRequest, ToolSpec, ToolUpdate, reduce_events,
 };
 use serde_json::json;
 use std::sync::{
@@ -124,6 +125,56 @@ fn media_type_serde_round_trips_provider_neutral_payloads() -> Result<()> {
         event
     );
 
+    Ok(())
+}
+
+#[test]
+fn permission_events_serde_round_trip() -> Result<()> {
+    let requirement = ToolPermissionRequirement {
+        capability: "test.lookup".into(),
+        description: Some("Allows lookup calls".into()),
+        metadata: json!({ "scope": "test" }),
+    };
+    let requested = AgentEvent {
+        sequence: 1,
+        run_id: "run-1".into(),
+        turn_id: Some(1),
+        phase: Some("tool.execute".into()),
+        kind: AgentEventKind::ToolPermissionRequested {
+            tool_call: ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: json!({ "query": "rust" }),
+            },
+            permissions: vec![requirement],
+        },
+    };
+    let decided = AgentEvent {
+        sequence: 2,
+        run_id: "run-1".into(),
+        turn_id: Some(1),
+        phase: Some("tool.execute".into()),
+        kind: AgentEventKind::ToolPermissionDecided {
+            tool_call_id: "call-1".into(),
+            tool_name: "lookup".into(),
+            hook_id: Some("policy-hook".into()),
+            decision: ToolPermissionDecision {
+                outcome: ToolPermissionOutcome::Allow,
+                reason: Some("policy matched".into()),
+                approver: Some("test".into()),
+                metadata: json!({ "policy": "unit" }),
+            },
+        },
+    };
+
+    assert_eq!(
+        serde_json::from_value::<AgentEvent>(serde_json::to_value(&requested)?)?,
+        requested
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentEvent>(serde_json::to_value(&decided)?)?,
+        decided
+    );
     Ok(())
 }
 
@@ -523,6 +574,123 @@ async fn tool_hooks_can_block_and_rewrite_results() -> Result<()> {
 }
 
 #[tokio::test]
+async fn tool_permission_denial_is_audited_and_skips_provider() -> Result<()> {
+    let slow_calls = Arc::new(AtomicU64::new(0));
+    let fast_calls = Arc::new(AtomicU64::new(0));
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(TwoToolModel))
+        .with_tool(Arc::new(PermissionedCountingTool::new(
+            "slow",
+            Arc::clone(&slow_calls),
+        )))
+        .with_tool(Arc::new(PermissionedCountingTool::new(
+            "fast",
+            Arc::clone(&fast_calls),
+        )))
+        .with_tool_hook(Arc::new(TestToolHook))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("tools").await?;
+
+    assert_eq!(slow_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fast_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reduce_events(&report.events)?, report.state);
+    assert!(matches!(report.state.status, RunStatus::Completed));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionRequested { tool_call, permissions }
+                if tool_call.name == "slow"
+                    && permissions.iter().any(|permission| permission.capability == "test.slow")
+        )
+    }));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                tool_call_id,
+                hook_id,
+                decision,
+                ..
+            } if tool_call_id == "slow-call"
+                && hook_id.as_deref() == Some("test-tool-hook")
+                && decision.outcome == ToolPermissionOutcome::Deny
+                && decision.metadata.get("source").and_then(serde_json::Value::as_str) == Some("test")
+        )
+    }));
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult {
+                    tool_name,
+                    content,
+                    is_error,
+                    ..
+                } if tool_name == "slow"
+                    && *is_error
+                    && matches!(
+                        content.first(),
+                        Some(ContentBlock::Text { text }) if text == "blocked by test hook"
+                    )
+            )
+        })
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_permission_allow_decision_is_audited_and_executes_provider() -> Result<()> {
+    let fast_calls = Arc::new(AtomicU64::new(0));
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(FastToolModel))
+        .with_tool(Arc::new(PermissionedCountingTool::new(
+            "fast",
+            Arc::clone(&fast_calls),
+        )))
+        .with_tool_hook(Arc::new(AllowToolHook))
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime.run("tools").await?;
+
+    assert_eq!(fast_calls.load(Ordering::SeqCst), 1);
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                tool_call_id,
+                hook_id,
+                decision,
+                ..
+            } if tool_call_id == "fast-call"
+                && hook_id.as_deref() == Some("allow-tool-hook")
+                && decision.outcome == ToolPermissionOutcome::Allow
+        )
+    }));
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult {
+                    tool_name,
+                    content,
+                    is_error,
+                    ..
+                } if tool_name == "fast"
+                    && !*is_error
+                    && matches!(
+                        content.first(),
+                        Some(ContentBlock::Text { text }) if text == "fast"
+                    )
+            )
+        })
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_output_media_preserved() -> Result<()> {
     let runtime = AgentRuntime::builder()
         .with_model_provider(Arc::new(MediaToolModel))
@@ -693,6 +861,7 @@ impl ToolProvider for NativeTool {
                 "required": ["text"]
             }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 
@@ -905,6 +1074,7 @@ impl ToolProvider for MediaTool {
             description: "Return media content".into(),
             input_schema: json!({ "type": "object" }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 
@@ -1003,10 +1173,58 @@ impl ModelProvider for TwoToolModel {
     }
 }
 
+struct FastToolModel;
+
+impl ModelProvider for FastToolModel {
+    fn id(&self) -> &str {
+        "fast-tool-model"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        stream: ModelStreamSink,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            let events = vec![
+                ModelStreamEvent::Started {
+                    stream_id: "fast-tool".into(),
+                },
+                ModelStreamEvent::ToolCall {
+                    tool_call: ToolCall {
+                        id: "fast-call".into(),
+                        name: "fast".into(),
+                        arguments: json!({}),
+                    },
+                },
+                ModelStreamEvent::Finished {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ];
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
 struct DelayedTool {
     name: &'static str,
     delay: Duration,
     execution_mode: Option<ToolExecutionMode>,
+}
+
+struct PermissionedCountingTool {
+    name: &'static str,
+    calls: Arc<AtomicU64>,
+}
+
+impl PermissionedCountingTool {
+    fn new(name: &'static str, calls: Arc<AtomicU64>) -> Self {
+        Self { name, calls }
+    }
 }
 
 struct FailingTool(&'static str);
@@ -1018,6 +1236,7 @@ impl ToolProvider for FailingTool {
             description: "Failing test tool".into(),
             input_schema: json!({ "type": "object" }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 
@@ -1059,6 +1278,7 @@ impl ToolProvider for DelayedTool {
             description: "Delayed test tool".into(),
             input_schema: json!({ "type": "object" }),
             execution_mode: self.execution_mode,
+            permissions: Vec::new(),
         }
     }
 
@@ -1083,9 +1303,47 @@ impl ToolProvider for DelayedTool {
     }
 }
 
+impl ToolProvider for PermissionedCountingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.into(),
+            description: "Permissioned counting test tool".into(),
+            input_schema: json!({ "type": "object" }),
+            execution_mode: None,
+            permissions: vec![ToolPermissionRequirement {
+                capability: format!("test.{}", self.name),
+                description: Some("Required by permission tests".into()),
+                metadata: json!({ "tool": self.name }),
+            }],
+        }
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        _request: ToolRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ToolOutput> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text {
+                    text: self.name.into(),
+                }],
+                details: json!({}),
+                is_error: false,
+                updates: Vec::new(),
+            })
+        })
+    }
+}
+
 struct TestToolHook;
 
 impl ToolCallHook for TestToolHook {
+    fn id(&self) -> Option<&str> {
+        Some("test-tool-hook")
+    }
+
     fn before_tool_call<'a>(
         &'a self,
         context: BeforeToolCallContext,
@@ -1094,8 +1352,12 @@ impl ToolCallHook for TestToolHook {
         Box::pin(async move {
             Ok(
                 (context.tool_call.name == "slow").then_some(BeforeToolCallResult {
-                    block: true,
-                    reason: Some("blocked by test hook".into()),
+                    decision: ToolPermissionDecision {
+                        outcome: ToolPermissionOutcome::Deny,
+                        reason: Some("blocked by test hook".into()),
+                        approver: Some("test".into()),
+                        metadata: json!({ "source": "test" }),
+                    },
                 }),
             )
         })
@@ -1116,6 +1378,31 @@ impl ToolCallHook for TestToolHook {
                     is_error: Some(false),
                 }),
             )
+        })
+    }
+}
+
+struct AllowToolHook;
+
+impl ToolCallHook for AllowToolHook {
+    fn id(&self) -> Option<&str> {
+        Some("allow-tool-hook")
+    }
+
+    fn before_tool_call<'a>(
+        &'a self,
+        _context: BeforeToolCallContext,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeToolCallResult>> {
+        Box::pin(async {
+            Ok(Some(BeforeToolCallResult {
+                decision: ToolPermissionDecision {
+                    outcome: ToolPermissionOutcome::Allow,
+                    reason: Some("allowed by test hook".into()),
+                    approver: Some("test".into()),
+                    metadata: json!({ "source": "allow-test" }),
+                },
+            }))
         })
     }
 }

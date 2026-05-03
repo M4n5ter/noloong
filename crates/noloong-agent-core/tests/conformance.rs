@@ -661,6 +661,7 @@ impl ToolProvider for DelayedTool {
             description: "Conformance delayed tool".into(),
             input_schema: json!({ "type": "object" }),
             execution_mode: self.execution_mode,
+            permissions: Vec::new(),
         }
     }
 

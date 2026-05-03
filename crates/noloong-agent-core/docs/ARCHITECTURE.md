@@ -274,6 +274,8 @@ pub trait ToolProvider: Send + Sync {
 }
 ```
 
+`ToolSpec` 是 runtime 内部的 typed tool contract。除了 provider 需要的 name、description、input schema 和 execution mode，它还可以声明一组 `ToolPermissionRequirement`。这些 permission 是 core policy metadata，供 `ToolCallHook` 和审计事件使用；内置 HTTP model provider 在渲染 OpenAI/Anthropic/Responses hosted tool schema 时不会把它们透传给上游 API。
+
 `ContextProvider`：
 
 ```rust
@@ -292,6 +294,10 @@ pub trait ContextProvider: Send + Sync {
 
 ```rust
 pub trait ToolCallHook: Send + Sync {
+    fn id(&self) -> Option<&str> {
+        None
+    }
+
     fn before_tool_call<'a>(
         &'a self,
         context: BeforeToolCallContext,
@@ -308,8 +314,10 @@ pub trait ToolCallHook: Send + Sync {
 
 hook 当前专注于工具调用前后：
 
-- before hook 可以 block 工具调用，并返回可审计的 error tool output。
+- before hook 接收 `tool_call`、完整 `tool_spec` 和当前 state，并可以通过 `tool_spec.permissions` 读取 permission requirements 后返回 `ToolPermissionDecision`。
+- `Allow` 或 no-op 会继续执行工具；`Deny` 会跳过 tool provider，并生成可审计的 error tool output。
 - after hook 可以改写工具输出的 content、details、is_error。
+- `id()` 用于把 permission decision 归因到具体 hook；未提供 id 时审计记录保留匿名来源。
 
 `PhaseHook`：
 
@@ -567,6 +575,13 @@ provider 可以发：
 
 执行工具调用。
 
+每个 tool call 进入执行前，runtime 都会先记录 permission request，再依序运行 `ToolCallHook::before_tool_call`：
+
+- `ToolPermissionRequested` 记录 tool call 和 `ToolSpec.permissions`。
+- 每个返回 decision 的 hook 都会生成 `ToolPermissionDecided`，包含 hook id、decision outcome、reason、approver 和 metadata。
+- 任意 hook 返回 `Deny` 时，runtime 不调用对应 `ToolProvider`，而是把 denial reason 转成 `ToolOutput { is_error: true }` 进入正常 tool result message。
+- `Allow` decision 会被审计，但不会短路后续 hook；所有 hook 都允许或 no-op 后才执行 tool provider。
+
 默认执行模式是 parallel，但存在两个切换到 sequential 的条件：
 
 - runtime 配置为 `ToolExecutionMode::Sequential`。
@@ -577,6 +592,7 @@ parallel 模式下，工具完成事件按实际完成顺序记录，但最终 a
 工具执行错误的语义：
 
 - 普通工具错误会变成 `ToolOutput { is_error: true }`，作为消息进入上下文，供模型下一轮处理。
+- permission deny 也会变成 `ToolOutput { is_error: true }`，但 `details.permissionDecision` 保留完整 decision，便于审计和 UI 展示。
 - `AgentCoreError::Aborted` 会中止 run。
 - missing tool 是 runtime 错误。
 
@@ -640,6 +656,7 @@ spawn process
 - `ContextProvider { id }`
 - `PhaseNode { id }`
 - `PhaseHook { id }`
+- `ToolCallHook { id }`
 - `CompactionSummarizer { id }`
 
 对应 JSON-RPC 方法：
@@ -649,6 +666,7 @@ spawn process
 - `context/apply`
 - `phase/run`
 - `phase_hook/run`
+- `tool_hook/run`
 - `compaction/summarize`
 
 模型流事件通过 notification 发送：
@@ -662,12 +680,14 @@ stream/event
 JSON-RPC bridge 采用 core strict conformance policy：
 
 - `initialize`、`capabilities/list` 和所有 adapter response 都按 typed serde contract 解析；缺失或类型错误会让当前 connect/request/phase 失败。
-- capability id/name 不允许重复注册；重复的 model provider、tool、context provider、phase、phase hook 或 compaction summarizer 都会在 registration 阶段失败。
+- capability id/name 不允许重复注册；重复的 model provider、tool、context provider、phase、phase hook、tool call hook 或 compaction summarizer 都会在 registration 阶段失败。
 - JSON-RPC error response 映射为 `AgentCoreError::JsonRpc`；typed payload 解析错误保持 `AgentCoreError::Json`。
 - active `stream/event` 的 malformed event 会立即 fail 当前 model stream；未知 notification、未知 response id 和 unrelated stream id 不影响 active stream，pending request 会按 timeout/cancellation 收敛。
 - `tool/execute` 遵循 core 的 tool policy：扩展返回的 malformed `ToolOutput` 会作为 tool provider error 转成 auditable error tool result，而不是直接让 run fail；`Aborted` 仍会中止 run。
 
 `phase_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。返回值是统一 envelope：`modelRequest`、`modelEvents`、`assistantMessage` 都是可选字段；缺少对应字段表示 no-op，字段类型错误会让当前 phase 失败。
+
+`tool_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。before payload 包含 `toolCall`、`toolSpec` 和 `permissions`，response 可返回 `decision`；after payload 包含 `toolCall` 和 `output`，response 可返回改写后的 `content`、`details` 或 `isError`。malformed response 会让当前 `tool.execute` phase fail，合法 deny decision 会走正常 permission deny 语义。
 
 `compaction/summarize` 使用 `summarizerId` 加 typed summary request。request 包含 `runId`、`turnId`、`previousSummary`、`messagesToSummarize`、`turnPrefixMessages`、`tokenBudget` 和 `metadata`。response 至少要返回 `summary`，可选 `metadata` 会进入 `CompactionSummaryResult` 并最终写入 summary message / compaction effect metadata。缺失或类型错误会让 `context.compact` phase 失败。
 
@@ -768,6 +788,8 @@ message 映射规则：
   }
 }
 ```
+
+`ToolSpec.permissions` 不属于 Chat Completions wire format，不会出现在 `tools[].function` 中。
 
 ### Streaming
 
@@ -942,6 +964,7 @@ tool 映射规则：
 
 - runtime `ToolSpec` -> Responses function tool。
 - `function_tool_strict` 可配置，但不污染 core `ToolSpec`。
+- `ToolSpec.permissions` 不属于 Responses wire format，不会出现在 function tool payload 中。
 - `native_tools` 原样追加，用于 hosted tools pass-through。
 - stream 中的 function call 仍回到 core `ToolCall`，由现有 tool phases 执行。
 
@@ -1063,6 +1086,7 @@ message 映射规则：
 tool 映射规则：
 
 - `ToolSpec` -> Anthropic `tools` array，保留 `name`、`description`、`input_schema`。
+- `ToolSpec.permissions` 不属于 Anthropic Messages wire format，不会出现在 `tools` payload 中。
 - assistant `ContentBlock::ToolCall` -> `tool_use` block。
 - tool result message -> user role `tool_result` block。
 - tool result content 可包含 text/json/media；不支持的 media 会返回 provider error。
@@ -1219,6 +1243,6 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 4. 可复用的 extension conformance runner：把当前 crate 内部 JSON-RPC conformance suite 提炼成第三方扩展作者也能运行的测试工具。
 5. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 6. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
-7. tool permission model：把 before hook 扩展为可审计的 capability/approval 机制。
+7. interactive/human approval queue：在当前同步 `ToolPermissionDecision` 基础上，引入可暂停、可恢复、可超时的人工审批流程。
 
 这些方向应该继续遵守当前核心原则：状态变更通过 effect，外部行为通过 trait 或 JSON-RPC，provider-specific 细节留在调用方配置或 provider 实现内，不泄漏到 runtime。

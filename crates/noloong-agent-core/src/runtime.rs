@@ -459,7 +459,60 @@ impl AgentRuntime {
                 } else {
                     &output.completed_tool_outputs
                 };
-                for (tool_call, tool_output) in completed_tool_outputs {
+                let completed_tool_permission_audits =
+                    if output.completed_tool_permission_audits.is_empty() {
+                        &output.tool_permission_audits
+                    } else {
+                        &output.completed_tool_permission_audits
+                    };
+                if !completed_tool_permission_audits.is_empty()
+                    && completed_tool_permission_audits.len() != completed_tool_outputs.len()
+                {
+                    return Err(AgentCoreError::Phase(format!(
+                        "tool permission audit count {} does not match tool output count {}",
+                        completed_tool_permission_audits.len(),
+                        completed_tool_outputs.len()
+                    )));
+                }
+                for (index, (tool_call, tool_output)) in completed_tool_outputs.iter().enumerate() {
+                    if let Some(audit) = completed_tool_permission_audits.get(index) {
+                        if audit.tool_call.id != tool_call.id
+                            || audit.tool_call.name != tool_call.name
+                        {
+                            return Err(AgentCoreError::Phase(format!(
+                                "tool permission audit for {} does not match tool output {}",
+                                audit.tool_call.id, tool_call.id
+                            )));
+                        }
+                        self.record_event(
+                            state,
+                            run_id,
+                            Some(turn_id),
+                            Some(&phase_id),
+                            AgentEventKind::ToolPermissionRequested {
+                                tool_call: audit.tool_call.clone(),
+                                permissions: audit.permissions.clone(),
+                            },
+                            sink,
+                        )
+                        .await?;
+                        for record in &audit.decisions {
+                            self.record_event(
+                                state,
+                                run_id,
+                                Some(turn_id),
+                                Some(&phase_id),
+                                AgentEventKind::ToolPermissionDecided {
+                                    tool_call_id: audit.tool_call.id.clone(),
+                                    tool_name: audit.tool_call.name.clone(),
+                                    hook_id: record.hook_id.clone(),
+                                    decision: record.decision.clone(),
+                                },
+                                sink,
+                            )
+                            .await?;
+                        }
+                    }
                     self.record_event(
                         state,
                         run_id,
@@ -917,6 +970,13 @@ impl AgentRuntimeBuilder {
                             id,
                         )));
                 }
+                crate::ExtensionCapability::ToolCallHook { id } => {
+                    self.tool_hooks
+                        .push(Arc::new(crate::jsonrpc::StdioToolCallHook::new(
+                            extension.clone(),
+                            id,
+                        )));
+                }
                 crate::ExtensionCapability::CompactionSummarizer { id } => {
                     self.compaction_summarizers.insert(
                         id.clone(),
@@ -970,6 +1030,14 @@ impl AgentRuntimeBuilder {
                     "phase hook",
                     id,
                     self.phase_hooks
+                        .iter()
+                        .any(|hook| hook.id().is_some_and(|hook_id| hook_id == id.as_str())),
+                )?,
+                crate::ExtensionCapability::ToolCallHook { id } => ensure_unique_capability(
+                    &mut seen,
+                    "tool call hook",
+                    id,
+                    self.tool_hooks
                         .iter()
                         .any(|hook| hook.id().is_some_and(|hook_id| hook_id == id.as_str())),
                 )?,

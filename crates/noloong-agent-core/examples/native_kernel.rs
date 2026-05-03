@@ -63,6 +63,7 @@ impl ToolProvider for EchoTool {
             description: "Echo a string".into(),
             input_schema: json!({ "type": "object" }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 

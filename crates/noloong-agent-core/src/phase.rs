@@ -10,8 +10,9 @@ use crate::{
     BeforeModelRequestHookContext, BeforeModelRequestHookResult, BeforeToolCallContext,
     CompactionDecision, ContentBlock, ContextCompactionMode, ContextRequest, MediaBlock,
     MediaDelta, MediaSource, MessageCompaction, ModelRequest, ModelStreamEvent, PhaseHook, Result,
-    ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, TurnDecision, compacted_messages,
-    compaction_summary_message, plan_compaction,
+    ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, ToolPermissionAudit,
+    ToolPermissionDecision, ToolPermissionDecisionRecord, ToolPermissionOutcome, TurnDecision,
+    compacted_messages, compaction_summary_message, plan_compaction,
     provider_utils::collect_model_stream,
     providers::{BoxFuture, CancellationToken, ModelStreamSink},
 };
@@ -82,6 +83,10 @@ pub struct PhaseOutput {
     pub tool_outputs: Vec<(ToolCall, ToolOutput)>,
     #[serde(default)]
     pub completed_tool_outputs: Vec<(ToolCall, ToolOutput)>,
+    #[serde(default)]
+    pub tool_permission_audits: Vec<ToolPermissionAudit>,
+    #[serde(default)]
+    pub completed_tool_permission_audits: Vec<ToolPermissionAudit>,
 }
 
 impl PhaseOutput {
@@ -93,6 +98,8 @@ impl PhaseOutput {
             resolved_tool_calls: Vec::new(),
             tool_outputs: Vec::new(),
             completed_tool_outputs: Vec::new(),
+            tool_permission_audits: Vec::new(),
+            completed_tool_permission_audits: Vec::new(),
         }
     }
 }
@@ -681,7 +688,7 @@ async fn execute_tools_sequential(
     let mut source_order_outputs = Vec::new();
     let handles = context.runtime.tool_handles();
     for tool_call in tool_calls {
-        let tool_output = execute_one_tool_call(
+        let execution = execute_one_tool_call(
             handles.clone(),
             context.run_id.to_string(),
             context.turn_id,
@@ -692,8 +699,11 @@ async fn execute_tools_sequential(
         .await?;
         output
             .completed_tool_outputs
-            .push((tool_call.clone(), tool_output.clone()));
-        source_order_outputs.push((tool_call, tool_output));
+            .push((tool_call.clone(), execution.output.clone()));
+        output
+            .completed_tool_permission_audits
+            .push(execution.permission_audit.clone());
+        source_order_outputs.push((tool_call, execution.output));
     }
     Ok(source_order_outputs)
 }
@@ -729,11 +739,14 @@ async fn execute_tools_parallel(
 
     let mut source_order_outputs = vec![None; tool_calls.len()];
     while let Some((index, tool_call, result)) = receiver.recv().await {
-        let tool_output = result?;
+        let execution = result?;
         output
             .completed_tool_outputs
-            .push((tool_call.clone(), tool_output.clone()));
-        source_order_outputs[index] = Some((tool_call, tool_output));
+            .push((tool_call.clone(), execution.output.clone()));
+        output
+            .completed_tool_permission_audits
+            .push(execution.permission_audit.clone());
+        source_order_outputs[index] = Some((tool_call, execution.output));
     }
 
     source_order_outputs
@@ -751,8 +764,19 @@ async fn execute_one_tool_call(
     state: AgentState,
     tool_call: ToolCall,
     cancellation: CancellationToken,
-) -> Result<ToolOutput> {
+) -> Result<ToolExecutionOutcome> {
     cancellation.throw_if_cancelled()?;
+    let tool = handles
+        .tools
+        .get(&tool_call.name)
+        .cloned()
+        .ok_or_else(|| crate::AgentCoreError::MissingTool(tool_call.name.clone()))?;
+    let tool_spec = tool.spec();
+    let mut permission_audit = ToolPermissionAudit {
+        tool_call: tool_call.clone(),
+        permissions: tool_spec.permissions.clone(),
+        decisions: Vec::new(),
+    };
     for hook in &handles.hooks {
         let result = hook
             .before_tool_call(
@@ -760,27 +784,28 @@ async fn execute_one_tool_call(
                     run_id: run_id.clone(),
                     turn_id,
                     tool_call: tool_call.clone(),
+                    tool_spec: tool_spec.clone(),
                     state: state.clone(),
                 },
                 cancellation.clone(),
             )
             .await?;
-        if let Some(result) = result
-            && result.block
-        {
-            return Ok(error_tool_output(
-                result
-                    .reason
-                    .unwrap_or_else(|| "tool execution was blocked".into()),
-            ));
+        if let Some(result) = result {
+            permission_audit
+                .decisions
+                .push(ToolPermissionDecisionRecord {
+                    hook_id: hook.id().map(ToString::to_string),
+                    decision: result.decision.clone(),
+                });
+            if matches!(result.decision.outcome, ToolPermissionOutcome::Deny) {
+                return Ok(ToolExecutionOutcome {
+                    output: denied_tool_output(&result.decision),
+                    permission_audit,
+                });
+            }
         }
     }
 
-    let tool = handles
-        .tools
-        .get(&tool_call.name)
-        .cloned()
-        .ok_or_else(|| crate::AgentCoreError::MissingTool(tool_call.name.clone()))?;
     let request = crate::ToolRequest {
         run_id: run_id.clone(),
         turn_id,
@@ -821,7 +846,26 @@ async fn execute_one_tool_call(
         }
     }
 
-    Ok(output)
+    Ok(ToolExecutionOutcome {
+        output,
+        permission_audit,
+    })
+}
+
+struct ToolExecutionOutcome {
+    output: ToolOutput,
+    permission_audit: ToolPermissionAudit,
+}
+
+fn denied_tool_output(decision: &ToolPermissionDecision) -> ToolOutput {
+    let mut output = error_tool_output(
+        decision
+            .reason
+            .clone()
+            .unwrap_or_else(|| "tool execution was denied".into()),
+    );
+    output.details = json!({ "permissionDecision": decision });
+    output
 }
 
 fn error_tool_output(message: String) -> ToolOutput {

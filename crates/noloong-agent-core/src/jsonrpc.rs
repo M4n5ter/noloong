@@ -1,12 +1,12 @@
 use crate::{
     AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AfterModelRequestHookContext,
-    AfterModelRequestHookResult, AgentCoreError, AgentEffect, AgentMessage,
-    BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
-    BeforeModelRequestHookContext, BeforeModelRequestHookResult, CompactionSummarizer,
-    CompactionSummaryRequest, CompactionSummaryResult, ContextProvider, ContextRequest,
-    ExtensionCapability, ExtensionManifest, ModelProvider, ModelRequest, ModelStreamEvent,
-    PhaseContext, PhaseHook, PhaseNode, PhaseOutput, Result, ToolOutput, ToolProvider, ToolRequest,
-    ToolSpec,
+    AfterModelRequestHookResult, AfterToolCallContext, AfterToolCallResult, AgentCoreError,
+    AgentEffect, AgentMessage, BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
+    BeforeModelRequestHookContext, BeforeModelRequestHookResult, BeforeToolCallContext,
+    BeforeToolCallResult, CompactionSummarizer, CompactionSummaryRequest, CompactionSummaryResult,
+    ContentBlock, ContextProvider, ContextRequest, ExtensionCapability, ExtensionManifest,
+    ModelProvider, ModelRequest, ModelStreamEvent, PhaseContext, PhaseHook, PhaseNode, PhaseOutput,
+    Result, ToolCallHook, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
 use crate::{CancellationToken, ModelStreamSink};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -424,6 +424,108 @@ impl ToolProvider for StdioToolProvider {
     }
 }
 
+pub struct StdioToolCallHook {
+    extension: Arc<StdioExtension>,
+    id: String,
+}
+
+impl StdioToolCallHook {
+    pub fn new(extension: Arc<StdioExtension>, id: String) -> Self {
+        Self { extension, id }
+    }
+}
+
+impl ToolCallHook for StdioToolCallHook {
+    fn id(&self) -> Option<&str> {
+        Some(&self.id)
+    }
+
+    fn before_tool_call<'a>(
+        &'a self,
+        context: BeforeToolCallContext,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, Option<BeforeToolCallResult>> {
+        Box::pin(async move {
+            let output: BeforeToolHookOutput = self
+                .run_tool_hook(
+                    ToolHookPoint::BeforeToolCall,
+                    context.run_id,
+                    context.turn_id,
+                    &context.state,
+                    BeforeToolCallHookPayload {
+                        tool_call: &context.tool_call,
+                        tool_spec: &context.tool_spec,
+                        permissions: &context.tool_spec.permissions,
+                    },
+                    cancellation,
+                )
+                .await?;
+            Ok(output
+                .decision
+                .map(|decision| BeforeToolCallResult { decision }))
+        })
+    }
+
+    fn after_tool_call<'a>(
+        &'a self,
+        context: AfterToolCallContext,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, Option<AfterToolCallResult>> {
+        Box::pin(async move {
+            let output: AfterToolHookOutput = self
+                .run_tool_hook(
+                    ToolHookPoint::AfterToolCall,
+                    context.run_id,
+                    context.turn_id,
+                    &context.state,
+                    AfterToolCallHookPayload {
+                        tool_call: &context.tool_call,
+                        output: &context.output,
+                    },
+                    cancellation,
+                )
+                .await?;
+            if output.content.is_none() && output.details.is_none() && output.is_error.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(AfterToolCallResult {
+                content: output.content,
+                details: output.details,
+                is_error: output.is_error,
+            }))
+        })
+    }
+}
+
+impl StdioToolCallHook {
+    async fn run_tool_hook<P, O>(
+        &self,
+        hook_point: ToolHookPoint,
+        run_id: String,
+        turn_id: u64,
+        state: &crate::AgentState,
+        payload: P,
+        cancellation: CancellationToken,
+    ) -> Result<O>
+    where
+        P: Serialize,
+        O: DeserializeOwned,
+    {
+        cancellation.throw_if_cancelled()?;
+        let params = serde_json::to_value(HookRequest {
+            hook_id: &self.id,
+            hook_point: hook_point.as_str(),
+            run_id: &run_id,
+            turn_id,
+            state,
+            payload,
+        })?;
+        self.extension
+            .request("tool_hook/run", params, Some(cancellation))
+            .await
+    }
+}
+
 pub struct StdioContextProvider {
     extension: Arc<StdioExtension>,
     id: String,
@@ -661,7 +763,7 @@ impl StdioPhaseHook {
         P: Serialize,
     {
         cancellation.throw_if_cancelled()?;
-        let params = serde_json::to_value(PhaseHookRequest {
+        let params = serde_json::to_value(HookRequest {
             hook_id: &self.id,
             hook_point: hook_point.as_str(),
             run_id,
@@ -696,7 +798,7 @@ impl PhaseHookPoint {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PhaseHookRequest<'a, P> {
+struct HookRequest<'a, P> {
     hook_id: &'a str,
     hook_point: &'static str,
     run_id: &'a str,
@@ -704,6 +806,36 @@ struct PhaseHookRequest<'a, P> {
     state: &'a crate::AgentState,
     #[serde(flatten)]
     payload: P,
+}
+
+#[derive(Clone, Copy)]
+enum ToolHookPoint {
+    BeforeToolCall,
+    AfterToolCall,
+}
+
+impl ToolHookPoint {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeToolCall => "before_tool_call",
+            Self::AfterToolCall => "after_tool_call",
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BeforeToolCallHookPayload<'a> {
+    tool_call: &'a crate::ToolCall,
+    tool_spec: &'a ToolSpec,
+    permissions: &'a [crate::ToolPermissionRequirement],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AfterToolCallHookPayload<'a> {
+    tool_call: &'a crate::ToolCall,
+    output: &'a ToolOutput,
 }
 
 #[derive(Serialize)]
@@ -863,4 +995,22 @@ struct PhaseHookOutput {
     model_events: Option<Vec<ModelStreamEvent>>,
     #[serde(default)]
     assistant_message: Option<AgentMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BeforeToolHookOutput {
+    #[serde(default)]
+    decision: Option<crate::ToolPermissionDecision>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AfterToolHookOutput {
+    #[serde(default)]
+    content: Option<Vec<ContentBlock>>,
+    #[serde(default)]
+    details: Option<Value>,
+    #[serde(default)]
+    is_error: Option<bool>,
 }

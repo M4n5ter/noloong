@@ -3,7 +3,7 @@ use noloong_agent_core::{
     AgentRuntimeBuilder, BoxFuture, CancellationToken, ContentBlock, ContextCompactionConfig,
     ContextPatch, EventStore, InMemoryEventStore, MediaEncoding, MediaKind, MediaSource,
     MessageRole, ModelStreamEvent, PhaseHook, Result, RunStatus, StdioExtension,
-    StdioExtensionConfig, reduce_events,
+    StdioExtensionConfig, ToolPermissionOutcome, reduce_events,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -439,6 +439,117 @@ async fn stdio_model_stream_error_records_failed_replay_state() -> Result<()> {
                 event: ModelStreamEvent::Failed { .. },
                 ..
             }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_tool_call_hook_can_allow_and_audit_tool_execution() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--tool-hook-mode=allow".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(4).build()?;
+
+    let report = runtime.run("hello").await?;
+
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                hook_id,
+                decision,
+                ..
+            } if hook_id.as_deref() == Some("fixture-tool-hook")
+                && decision.outcome == ToolPermissionOutcome::Allow
+                && decision.approver.as_deref() == Some("stdio-fixture")
+        )
+    }));
+    assert_assistant_text_contains(&report, "done from fixture");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_tool_call_hook_can_deny_tool_execution() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--tool-hook-mode=deny".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(4).build()?;
+
+    let report = runtime.run("hello").await?;
+
+    assert!(matches!(report.state.status, RunStatus::Completed));
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult {
+                    tool_name,
+                    content,
+                    is_error,
+                    ..
+                } if tool_name == "fixture_echo"
+                    && *is_error
+                    && content.iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::Text { text }
+                                if text.contains("denied by fixture tool hook")
+                        )
+                    })
+            )
+        })
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_stdio_tool_call_hook_response_fails_active_phase() -> Result<()> {
+    let event_store = Arc::new(InMemoryEventStore::new());
+    let builder = AgentRuntime::builder().with_event_store(event_store.clone());
+    let fixture = fixture_path("stdio-extension.mjs");
+    let runtime = builder
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--tool-hook-mode=malformed".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?
+        .max_turns(2)
+        .build()?;
+
+    let error = runtime.run("hello").await.expect_err("run should fail");
+
+    assert!(
+        error.to_string().contains("json"),
+        "unexpected error: {error}"
+    );
+    let events = event_store.load("run-1").await?;
+    let state = reduce_events(&events)?;
+    assert!(matches!(state.status, RunStatus::Failed));
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::PhaseFailed { phase, .. } if phase == "tool.execute"
         )
     }));
     Ok(())

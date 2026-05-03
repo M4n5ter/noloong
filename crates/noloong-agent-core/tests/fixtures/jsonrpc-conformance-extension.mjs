@@ -18,6 +18,7 @@ const Mode = Object.freeze({
   duplicateModel: "duplicate-model",
   duplicatePhase: "duplicate-phase",
   duplicatePhaseHook: "duplicate-phase-hook",
+  duplicateToolCallHook: "duplicate-tool-call-hook",
   duplicateTool: "duplicate-tool",
   invalidStreamResult: "invalid-stream-result",
   lateResponseAfterCancel: "late-response-after-cancel",
@@ -28,6 +29,7 @@ const Mode = Object.freeze({
   malformedManifest: "malformed-manifest",
   malformedPhaseHookResult: "malformed-phase-hook-result",
   malformedPhaseResult: "malformed-phase-result",
+  malformedToolHookResult: "malformed-tool-hook-result",
   malformedToolResult: "malformed-tool-result",
   missingResult: "missing-result",
   modelJsonrpcError: "model-jsonrpc-error",
@@ -35,6 +37,8 @@ const Mode = Object.freeze({
   stdoutClose: "stdout-close",
   streamHangs: "stream-hangs",
   streamNoResponse: "stream-no-response",
+  toolHookDeny: "tool-hook-deny",
+  toolHookPayloads: "tool-hook-payloads",
   unknownCapability: "unknown-capability",
   unknownStreamNotification: "unknown-stream-notification",
   wrongResponseId: "wrong-response-id",
@@ -102,11 +106,19 @@ function allCapabilities() {
           properties: { text: { type: "string" } },
           required: ["text"],
         },
+        permissions: [
+          {
+            capability: "conformance.echo",
+            description: "Allows the conformance echo tool to run",
+            metadata: { fixture: "permission" },
+          },
+        ],
       },
     },
     { type: "context_provider", id: "conformance-context" },
     { type: "phase_node", id: "conformance.phase" },
     { type: "phase_hook", id: "conformance-hook" },
+    { type: "tool_call_hook", id: "conformance-tool-hook" },
     { type: "compaction_summarizer", id: "conformance-compaction" },
   ];
 }
@@ -173,6 +185,13 @@ function duplicateCapabilityCases() {
       ],
     ],
     [
+      Mode.duplicateToolCallHook,
+      [
+        { type: "tool_call_hook", id: "duplicate-tool-hook" },
+        { type: "tool_call_hook", id: "duplicate-tool-hook" },
+      ],
+    ],
+    [
       Mode.duplicateCompaction,
       [
         { type: "compaction_summarizer", id: "duplicate-compaction" },
@@ -183,13 +202,20 @@ function duplicateCapabilityCases() {
 }
 
 function assertModelStreamParams(id, params) {
+  const echoTool = (params.request?.tools ?? []).find((tool) => tool.name === "conformance_echo");
   return (
     assertOrError(id, params.providerId === "conformance-model", "model providerId mismatch") &&
     assertOrError(id, typeof params.streamId === "string", "model streamId missing") &&
     assertOrError(id, params.request?.runId === "run-1", "model request runId mismatch") &&
     assertOrError(id, Number.isInteger(params.request?.turnId), "model request turnId missing") &&
     assertOrError(id, Array.isArray(params.request?.messages), "model request messages missing") &&
-    assertOrError(id, Array.isArray(params.request?.tools), "model request tools missing")
+    assertOrError(id, Array.isArray(params.request?.tools), "model request tools missing") &&
+    (!echoTool ||
+      assertOrError(
+        id,
+        echoTool.permissions?.[0]?.capability === "conformance.echo",
+        "model request tool permissions missing",
+      ))
   );
 }
 
@@ -247,6 +273,36 @@ function assertPhaseHookParams(id, params) {
     return assertOrError(id, params.assistantMessage?.role === "assistant", "after_assistant_commit assistant missing");
   }
   return assertOrError(id, false, `unexpected hook point: ${params.hookPoint}`);
+}
+
+function assertToolHookParams(id, params) {
+  if (
+    !assertOrError(id, params.hookId === "conformance-tool-hook", "tool hookId mismatch") ||
+    !assertOrError(id, params.runId === "run-1", "tool hook runId mismatch") ||
+    !assertOrError(id, Number.isInteger(params.turnId), "tool hook turnId missing") ||
+    !assertOrError(id, params.state, "tool hook state missing") ||
+    !assertOrError(id, params.toolCall?.name === "conformance_echo", "tool hook toolCall mismatch")
+  ) {
+    return false;
+  }
+  if (params.hookPoint === "before_tool_call") {
+    return (
+      assertOrError(id, params.toolCall?.arguments?.text === "from model", "tool hook arguments mismatch") &&
+      assertOrError(id, params.toolSpec?.name === "conformance_echo", "tool hook toolSpec mismatch") &&
+      assertOrError(
+        id,
+        params.permissions?.[0]?.capability === "conformance.echo",
+        "tool hook permissions missing",
+      )
+    );
+  }
+  if (params.hookPoint === "after_tool_call") {
+    if (hasMode(Mode.toolHookPayloads)) {
+      return assertOrError(id, params.output?.content?.[0]?.text === "from model", "tool hook output missing");
+    }
+    return assertOrError(id, params.output, "tool hook output missing");
+  }
+  return assertOrError(id, false, `unexpected tool hook point: ${params.hookPoint}`);
 }
 
 function assertCompactionParams(id, params) {
@@ -419,6 +475,38 @@ for await (const line of rl) {
         },
       ],
     });
+    continue;
+  }
+
+  if (method === "tool_hook/run") {
+    if (!assertToolHookParams(id, params)) continue;
+    if (hasMode(Mode.malformedToolHookResult)) {
+      result(id, { decision: "not an object" });
+      continue;
+    }
+    if (params.hookPoint === "before_tool_call" && hasMode(Mode.toolHookDeny)) {
+      result(id, {
+        decision: {
+          outcome: "deny",
+          reason: "denied by conformance tool hook",
+          approver: "jsonrpc-fixture",
+          metadata: { fixture: "tool-hook-deny" },
+        },
+      });
+      continue;
+    }
+    if (params.hookPoint === "before_tool_call" && hasMode(Mode.toolHookPayloads)) {
+      result(id, {
+        decision: {
+          outcome: "allow",
+          reason: "allowed by conformance tool hook",
+          approver: "jsonrpc-fixture",
+          metadata: { fixture: "tool-hook-allow" },
+        },
+      });
+      continue;
+    }
+    result(id, {});
     continue;
   }
 

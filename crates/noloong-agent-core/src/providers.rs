@@ -47,6 +47,10 @@ pub trait ContextProvider: Send + Sync {
 }
 
 pub trait ToolCallHook: Send + Sync {
+    fn id(&self) -> Option<&str> {
+        None
+    }
+
     fn before_tool_call<'a>(
         &'a self,
         _context: BeforeToolCallContext,

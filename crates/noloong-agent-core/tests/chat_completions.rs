@@ -2,7 +2,8 @@ use noloong_agent_core::{
     AgentMessage, AgentRuntime, CancellationToken, ChatAudioFormat, ChatCompletionsProvider,
     ChatCompletionsProviderConfig, ChatImageDetail, ChatOutputModality, ContentBlock, MediaBlock,
     MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
-    ModelStreamEvent, Result, StopReason, ThinkingBlock, ToolCall, ToolExecutionMode, ToolSpec,
+    ModelStreamEvent, Result, StopReason, ThinkingBlock, ToolCall, ToolExecutionMode,
+    ToolPermissionRequirement, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -55,6 +56,7 @@ async fn payload_maps_messages_tools_and_replay_descriptor() -> Result<()> {
     assert_eq!(body["messages"][3]["role"], "tool");
     assert_eq!(body["messages"][3]["tool_call_id"], "call-1");
     assert_eq!(body["tools"][0]["function"]["name"], "lookup");
+    assert!(body["tools"][0]["function"].get("permissions").is_none());
     Ok(())
 }
 
@@ -1015,6 +1017,11 @@ fn request_with_history() -> ModelRequest {
                 "required": ["query"]
             }),
             execution_mode: Some(ToolExecutionMode::Parallel),
+            permissions: vec![ToolPermissionRequirement {
+                capability: "test.lookup".into(),
+                description: Some("Allows lookup test calls.".into()),
+                metadata: json!({ "scope": "provider-payload-boundary" }),
+            }],
         }],
         metadata: Default::default(),
     }

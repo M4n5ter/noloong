@@ -58,6 +58,16 @@ pub enum AgentEventKind {
     ToolCallResolved {
         tool_call: ToolCall,
     },
+    ToolPermissionRequested {
+        tool_call: ToolCall,
+        permissions: Vec<ToolPermissionRequirement>,
+    },
+    ToolPermissionDecided {
+        tool_call_id: ToolCallId,
+        tool_name: String,
+        hook_id: Option<String>,
+        decision: ToolPermissionDecision,
+    },
     ToolExecutionStarted {
         tool_call_id: ToolCallId,
         tool_name: String,
@@ -750,6 +760,55 @@ pub struct ToolSpec {
     pub input_schema: Value,
     #[serde(default)]
     pub execution_mode: Option<ToolExecutionMode>,
+    #[serde(default)]
+    pub permissions: Vec<ToolPermissionRequirement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionRequirement {
+    pub capability: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPermissionOutcome {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionDecision {
+    pub outcome: ToolPermissionOutcome,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub approver: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionDecisionRecord {
+    #[serde(default)]
+    pub hook_id: Option<String>,
+    pub decision: ToolPermissionDecision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionAudit {
+    pub tool_call: ToolCall,
+    #[serde(default)]
+    pub permissions: Vec<ToolPermissionRequirement>,
+    #[serde(default)]
+    pub decisions: Vec<ToolPermissionDecisionRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -794,16 +853,14 @@ pub struct BeforeToolCallContext {
     pub run_id: String,
     pub turn_id: u64,
     pub tool_call: ToolCall,
+    pub tool_spec: ToolSpec,
     pub state: AgentState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BeforeToolCallResult {
-    #[serde(default)]
-    pub block: bool,
-    #[serde(default)]
-    pub reason: Option<String>,
+    pub decision: ToolPermissionDecision,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -865,6 +922,7 @@ pub enum ExtensionCapability {
     ContextProvider { id: String },
     PhaseNode { id: String },
     PhaseHook { id: String },
+    ToolCallHook { id: String },
     CompactionSummarizer { id: String },
 }
 

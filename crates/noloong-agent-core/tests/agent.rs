@@ -289,6 +289,7 @@ impl ToolProvider for EchoTool {
             description: "Echo test tool".into(),
             input_schema: json!({ "type": "object" }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 

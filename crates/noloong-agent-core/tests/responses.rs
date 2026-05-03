@@ -3,7 +3,7 @@ use noloong_agent_core::{
     MediaKind, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, ResponsesApiProvider,
     ResponsesApiProviderConfig, ResponsesReasoningConfig, ResponsesReasoningEffort,
     ResponsesReasoningSummary, Result, RunReport, StopReason, ThinkingBlock, ThinkingKind,
-    ToolCall, ToolSpec,
+    ToolCall, ToolPermissionRequirement, ToolSpec,
 };
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex};
@@ -243,6 +243,7 @@ async fn payload_maps_function_tools_and_tool_results() -> Result<()> {
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["name"], "lookup");
     assert_eq!(body["tools"][0]["strict"], false);
+    assert!(body["tools"][0].get("permissions").is_none());
     assert_eq!(body["input"][1]["type"], "function_call");
     assert_eq!(body["input"][1]["call_id"], "call-1");
     assert_eq!(body["input"][2]["type"], "function_call_output");
@@ -877,6 +878,11 @@ fn lookup_tool() -> ToolSpec {
             "required": ["query"]
         }),
         execution_mode: None,
+        permissions: vec![ToolPermissionRequirement {
+            capability: "test.lookup".into(),
+            description: Some("Allows lookup test calls.".into()),
+            metadata: json!({ "scope": "provider-payload-boundary" }),
+        }],
     }
 }
 

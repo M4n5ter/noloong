@@ -2,7 +2,8 @@ use noloong_agent_core::{
     AgentMessage, AgentRuntime, AnthropicAuthScheme, AnthropicMessagesProvider,
     AnthropicMessagesProviderConfig, CancellationToken, ContentBlock, MediaBlock, MediaKind,
     MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, Result, StopReason, ThinkingBlock,
-    ToolCall, ToolExecutionMode, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    ToolCall, ToolExecutionMode, ToolOutput, ToolPermissionRequirement, ToolProvider, ToolRequest,
+    ToolSpec,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -118,6 +119,7 @@ async fn payload_maps_text_system_tools_and_extra_body() -> Result<()> {
         "tool_result"
     );
     assert_eq!(body.json["tools"][0]["name"], "lookup");
+    assert!(body.json["tools"][0].get("permissions").is_none());
     Ok(())
 }
 
@@ -885,6 +887,11 @@ fn request_with_history() -> ModelRequest {
                 "required": ["query"]
             }),
             execution_mode: Some(ToolExecutionMode::Parallel),
+            permissions: vec![ToolPermissionRequirement {
+                capability: "test.lookup".into(),
+                description: Some("Allows lookup test calls.".into()),
+                metadata: json!({ "scope": "provider-payload-boundary" }),
+            }],
         }],
         metadata: Default::default(),
     }
@@ -947,6 +954,7 @@ impl ToolProvider for EchoTool {
                 "required": ["query"]
             }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 

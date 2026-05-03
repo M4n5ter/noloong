@@ -358,6 +358,7 @@ impl ToolProvider for LiveEchoTool {
                 "additionalProperties": false
             }),
             execution_mode: None,
+            permissions: Vec::new(),
         }
     }
 

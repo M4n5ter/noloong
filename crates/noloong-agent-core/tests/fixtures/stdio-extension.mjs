@@ -18,6 +18,10 @@ const phaseHookMode =
   process.argv
     .find((arg) => arg.startsWith("--phase-hook-mode="))
     ?.slice("--phase-hook-mode=".length) ?? null;
+const toolHookMode =
+  process.argv
+    .find((arg) => arg.startsWith("--tool-hook-mode="))
+    ?.slice("--tool-hook-mode=".length) ?? null;
 const compactionSummarizerMode =
   process.argv
     .find((arg) => arg.startsWith("--compaction-summarizer-mode="))
@@ -69,6 +73,13 @@ for await (const line of rl) {
             properties: { text: { type: "string" } },
             required: ["text"],
           },
+          permissions: [
+            {
+              capability: "fixture.echo",
+              description: "Allows fixture echo execution",
+              metadata: { fixture: "permission" },
+            },
+          ],
         },
       },
       { type: "context_provider", id: "fixture-context" },
@@ -76,6 +87,9 @@ for await (const line of rl) {
     ];
     if (phaseHookMode) {
       capabilities.push({ type: "phase_hook", id: "fixture-phase-hook" });
+    }
+    if (toolHookMode) {
+      capabilities.push({ type: "tool_call_hook", id: "fixture-tool-hook" });
     }
     if (compactionSummarizerMode) {
       capabilities.push({
@@ -213,6 +227,37 @@ for await (const line of rl) {
       const assistantMessage = params.assistantMessage;
       assistantMessage.content = [{ type: "text", text: "hooked assistant" }];
       result(id, { assistantMessage });
+      continue;
+    }
+    result(id, {});
+    continue;
+  }
+
+  if (method === "tool_hook/run") {
+    if (toolHookMode === "malformed") {
+      result(id, { decision: "not an object" });
+      continue;
+    }
+    if (params.hookPoint === "before_tool_call" && toolHookMode === "deny") {
+      result(id, {
+        decision: {
+          outcome: "deny",
+          reason: "denied by fixture tool hook",
+          approver: "stdio-fixture",
+          metadata: { fixtureHook: "deny" },
+        },
+      });
+      continue;
+    }
+    if (params.hookPoint === "before_tool_call" && toolHookMode === "allow") {
+      result(id, {
+        decision: {
+          outcome: "allow",
+          reason: "allowed by fixture tool hook",
+          approver: "stdio-fixture",
+          metadata: { fixtureHook: "allow" },
+        },
+      });
       continue;
     }
     result(id, {});

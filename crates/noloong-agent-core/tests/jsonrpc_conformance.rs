@@ -2,7 +2,7 @@ use noloong_agent_core::{
     AgentCoreError, AgentEventKind, AgentInput, AgentRuntime, AgentRuntimeBuilder,
     CancellationToken, ContentBlock, ContextCompactionConfig, EventSinkFuture, EventStore,
     InMemoryEventStore, MessageRole, ModelStreamEvent, Result, RunReport, RunStatus,
-    StdioExtension, StdioExtensionConfig, reduce_events,
+    StdioExtension, StdioExtensionConfig, ToolPermissionOutcome, reduce_events,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -22,6 +22,7 @@ const MODE_DUPLICATE_CONTEXT: &str = "duplicate-context";
 const MODE_DUPLICATE_MODEL: &str = "duplicate-model";
 const MODE_DUPLICATE_PHASE: &str = "duplicate-phase";
 const MODE_DUPLICATE_PHASE_HOOK: &str = "duplicate-phase-hook";
+const MODE_DUPLICATE_TOOL_CALL_HOOK: &str = "duplicate-tool-call-hook";
 const MODE_DUPLICATE_TOOL: &str = "duplicate-tool";
 const MODE_INVALID_STREAM_RESULT: &str = "invalid-stream-result";
 const MODE_LATE_RESPONSE_AFTER_CANCEL: &str = "late-response-after-cancel";
@@ -32,6 +33,7 @@ const MODE_MALFORMED_CONTEXT_RESULT: &str = "malformed-context-result";
 const MODE_MALFORMED_MANIFEST: &str = "malformed-manifest";
 const MODE_MALFORMED_PHASE_HOOK_RESULT: &str = "malformed-phase-hook-result";
 const MODE_MALFORMED_PHASE_RESULT: &str = "malformed-phase-result";
+const MODE_MALFORMED_TOOL_HOOK_RESULT: &str = "malformed-tool-hook-result";
 const MODE_MALFORMED_TOOL_RESULT: &str = "malformed-tool-result";
 const MODE_MISSING_RESULT: &str = "missing-result";
 const MODE_MODEL_JSONRPC_ERROR: &str = "model-jsonrpc-error";
@@ -39,6 +41,8 @@ const MODE_RESPONSE_BUFFERED_EVENTS: &str = "response-buffered-events";
 const MODE_STDOUT_CLOSE: &str = "stdout-close";
 const MODE_STREAM_HANGS: &str = "stream-hangs";
 const MODE_STREAM_NO_RESPONSE: &str = "stream-no-response";
+const MODE_TOOL_HOOK_DENY: &str = "tool-hook-deny";
+const MODE_TOOL_HOOK_PAYLOADS: &str = "tool-hook-payloads";
 const MODE_UNKNOWN_CAPABILITY: &str = "unknown-capability";
 const MODE_UNKNOWN_STREAM_NOTIFICATION: &str = "unknown-stream-notification";
 const MODE_WRONG_RESPONSE_ID: &str = "wrong-response-id";
@@ -49,7 +53,7 @@ async fn lifecycle_smoke_connects_lists_capabilities_and_shutdowns() -> Result<(
 
     assert_eq!(extension.manifest().name, "jsonrpc-conformance-fixture");
     assert_eq!(extension.manifest().version, "0.1.0");
-    assert_eq!(extension.capabilities().await?.len(), 6);
+    assert_eq!(extension.capabilities().await?.len(), 7);
     extension.shutdown().await?;
     Ok(())
 }
@@ -95,6 +99,7 @@ async fn capabilities_duplicate_ids_fail_registration() {
         MODE_DUPLICATE_CONTEXT,
         MODE_DUPLICATE_PHASE,
         MODE_DUPLICATE_PHASE_HOOK,
+        MODE_DUPLICATE_TOOL_CALL_HOOK,
         MODE_DUPLICATE_COMPACTION,
     ] {
         let error = builder_error(&[mode]).await;
@@ -174,7 +179,12 @@ async fn request_response_cancellation_removes_pending_request() -> Result<()> {
 
 #[tokio::test]
 async fn adapter_payloads_cover_model_tool_context_phase_and_hooks() -> Result<()> {
-    let runtime = runtime(&[MODE_ALL_CAPABILITIES, MODE_ADAPTER_PAYLOADS]).await?;
+    let runtime = runtime(&[
+        MODE_ALL_CAPABILITIES,
+        MODE_ADAPTER_PAYLOADS,
+        MODE_TOOL_HOOK_PAYLOADS,
+    ])
+    .await?;
 
     let report = runtime.run("adapter").await?;
 
@@ -194,6 +204,14 @@ async fn adapter_payloads_cover_model_tool_context_phase_and_hooks() -> Result<(
                 if update.content.iter().any(|block| {
                     matches!(block, ContentBlock::Text { text } if text == "tool update")
                 })
+        )
+    }));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided { decision, .. }
+                if decision.outcome == ToolPermissionOutcome::Allow
+                    && decision.approver.as_deref() == Some("jsonrpc-fixture")
         )
     }));
     Ok(())
@@ -235,9 +253,64 @@ async fn malformed_model_tool_context_phase_and_hook_results_fail_active_phase()
             "model.request.prepare",
             "json",
         ),
+        (MODE_MALFORMED_TOOL_HOOK_RESULT, "tool.execute", "json"),
     ] {
-        assert_failed_phase(&[MODE_ALL_CAPABILITIES, mode], phase, snippet).await?;
+        let modes = if mode == MODE_MALFORMED_TOOL_HOOK_RESULT {
+            vec![MODE_ALL_CAPABILITIES, MODE_ADAPTER_PAYLOADS, mode]
+        } else {
+            vec![MODE_ALL_CAPABILITIES, mode]
+        };
+        assert_failed_phase(&modes, phase, snippet).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn jsonrpc_tool_hook_denies_tool_call_with_audit() -> Result<()> {
+    let report = runtime(&[
+        MODE_ALL_CAPABILITIES,
+        MODE_ADAPTER_PAYLOADS,
+        MODE_TOOL_HOOK_DENY,
+    ])
+    .await?
+    .run("hello")
+    .await?;
+
+    assert!(matches!(report.state.status, RunStatus::Completed));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                tool_call_id,
+                decision,
+                ..
+            } if tool_call_id == "conformance-call-1"
+                && decision.outcome == ToolPermissionOutcome::Deny
+                && decision.metadata.get("fixture").and_then(serde_json::Value::as_str)
+                    == Some("tool-hook-deny")
+        )
+    }));
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult {
+                    tool_name,
+                    content,
+                    is_error,
+                    ..
+                } if tool_name == "conformance_echo"
+                    && *is_error
+                    && content.iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::Text { text }
+                                if text.contains("denied by conformance tool hook")
+                        )
+                    })
+            )
+        })
+    }));
     Ok(())
 }
 
