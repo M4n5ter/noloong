@@ -2,8 +2,8 @@ use noloong_agent_core::{
     AgentMessage, AgentRuntime, CancellationToken, ChatAudioFormat, ChatCompletionsProvider,
     ChatCompletionsProviderConfig, ChatImageDetail, ChatOutputModality, ContentBlock, MediaBlock,
     MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
-    ModelStreamEvent, Result, StopReason, ThinkingBlock, ToolCall, ToolExecutionMode,
-    ToolPermissionRequirement, ToolSpec,
+    ModelStreamEvent, Result, SseReconnectConfig, StopReason, ThinkingBlock, ToolCall,
+    ToolExecutionMode, ToolPermissionRequirement, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,15 @@ use tokio::time::{Duration, sleep};
 
 pub mod support;
 
-use support::{HangingServer, MockServer};
+use support::{HangingServer, MockResponse, MockServer, fast_one_retry_reconnect};
+
+#[test]
+fn reconnect_config_builder_sets_stream_reconnect() {
+    let config = ChatCompletionsProviderConfig::new("test-chat", "test-model")
+        .stream_reconnect(SseReconnectConfig::disabled());
+
+    assert_eq!(config.stream_reconnect, SseReconnectConfig::disabled());
+}
 
 #[tokio::test]
 async fn payload_maps_messages_tools_and_replay_descriptor() -> Result<()> {
@@ -590,7 +598,8 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
     let provider = ChatCompletionsProvider::new(
         ChatCompletionsProviderConfig::new("test-chat", "test-model")
             .base_url(server.url())
-            .without_api_key(),
+            .without_api_key()
+            .stream_reconnect(SseReconnectConfig::disabled()),
     )?;
 
     let error = provider
@@ -605,6 +614,261 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
     let error = error.to_string();
     assert!(error.contains("500"));
     assert!(error.contains("boom"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_retries_pre_data_disconnect() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(200, "text/event-stream", ""),
+        MockResponse::new(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let events = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    assert!(matches!(
+        events.last(),
+        Some(ModelStreamEvent::Finished {
+            stop_reason: StopReason::Stop
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_retries_comment_only_disconnect() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(200, "text/event-stream", ": ignored\n\n"),
+        MockResponse::new(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_retries_retryable_status_before_data() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::new(500, "application/json", "{\"error\":\"temporary\"}"),
+        MockResponse::new(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stream_timeout_retries_pre_data_idle() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::hang_after_headers(200, "text/event-stream"),
+        MockResponse::new(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key()
+            .stream_idle_timeout(Duration::from_millis(20))
+            .stream_reconnect(fast_one_retry_reconnect()),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stream_timeout_does_not_retry_after_data_frame() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::hang_after_body(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        ),
+        MockResponse::new(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key()
+            .stream_idle_timeout(Duration::from_millis(20))
+            .stream_reconnect(fast_one_retry_reconnect()),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(server.request_count(), 1);
+    assert!(error.to_string().contains("stream timed out"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_does_not_retry_after_data_frame() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        ),
+        MockResponse::new(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(server.request_count(), 1);
+    assert!(error.to_string().contains("ended before terminal event"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_disabled_fails_pre_data_disconnect_without_retry() -> Result<()> {
+    let server = MockServer::spawn_many(vec![MockResponse::close_delimited(
+        200,
+        "text/event-stream",
+        "",
+    )])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key()
+            .stream_reconnect(SseReconnectConfig::disabled()),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(server.request_count(), 1);
+    assert!(error.to_string().contains("after 0 reconnect attempt"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_exhaustion_reports_attempt_count() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(200, "text/event-stream", ""),
+        MockResponse::close_delimited(200, "text/event-stream", ""),
+        MockResponse::close_delimited(200, "text/event-stream", ""),
+    ])
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(server.request_count(), 3);
+    let error = error.to_string();
+    assert!(error.contains("chat completions stream failed"));
+    assert!(error.contains("after 2 reconnect attempt"));
     Ok(())
 }
 

@@ -2,7 +2,7 @@ use crate::provider_utils::{
     ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
     resolve_api_key,
 };
-use crate::sse::SseDecoder;
+use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
 use crate::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaDelta,
@@ -36,6 +36,7 @@ pub struct ChatCompletionsProviderConfig {
     pub temperature: Option<f64>,
     pub request_timeout: Duration,
     pub stream_idle_timeout: Duration,
+    pub stream_reconnect: SseReconnectConfig,
     pub include_usage: bool,
     pub image_detail: ChatImageDetail,
     pub allow_provider_video_file_media: bool,
@@ -146,6 +147,7 @@ impl Debug for ChatCompletionsProviderConfig {
             .field("temperature", &self.temperature)
             .field("request_timeout", &self.request_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
+            .field("stream_reconnect", &self.stream_reconnect)
             .field("include_usage", &self.include_usage)
             .field("image_detail", &self.image_detail)
             .field(
@@ -172,6 +174,7 @@ impl ChatCompletionsProviderConfig {
             temperature: None,
             request_timeout: Duration::from_secs(60),
             stream_idle_timeout: Duration::from_secs(300),
+            stream_reconnect: SseReconnectConfig::default(),
             include_usage: true,
             image_detail: ChatImageDetail::default(),
             allow_provider_video_file_media: false,
@@ -228,6 +231,11 @@ impl ChatCompletionsProviderConfig {
 
     pub fn stream_idle_timeout(mut self, stream_idle_timeout: Duration) -> Self {
         self.stream_idle_timeout = stream_idle_timeout;
+        self
+    }
+
+    pub fn stream_reconnect(mut self, stream_reconnect: SseReconnectConfig) -> Self {
+        self.stream_reconnect = stream_reconnect;
         self
     }
 
@@ -321,76 +329,50 @@ impl ModelProvider for ChatCompletionsProvider {
             cancellation.throw_if_cancelled()?;
             let payload = build_chat_payload(&self.config, &request)?;
             let stream_id = format!("chat-completions-{}-{}", request.run_id, request.turn_id);
-            let mut request_builder = self
-                .client
-                .post(self.endpoint())
-                .headers(headers_from_map(&self.config.headers)?)
-                .json(&payload);
-            if let Some(api_key) = self.api_key()? {
-                request_builder = request_builder.bearer_auth(api_key);
-            }
-
-            let request_timeout = tokio::time::sleep(self.config.request_timeout);
-            tokio::pin!(request_timeout);
-            let response = tokio::select! {
-                response = request_builder.send() => response?,
-                _ = cancellation.cancelled() => return Err(AgentCoreError::Aborted),
-                _ = &mut request_timeout => {
-                    return Err(AgentCoreError::Provider("chat completions request timed out".into()));
-                }
-            };
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(AgentCoreError::Provider(format!(
-                    "chat completions request failed with status {status}: {}",
-                    body.chars().take(2048).collect::<String>()
-                )));
-            }
+            let headers = headers_from_map(&self.config.headers)?;
+            let api_key = self.api_key()?;
 
             let mut events = Vec::new();
-            emit_model_stream_event(
+            let mut state = ChatStreamState::new(&self.config);
+            let mut started = false;
+            run_sse_model_stream(
+                SseStreamOptions {
+                    provider_label: "chat completions",
+                    request_timeout: self.config.request_timeout,
+                    stream_idle_timeout: self.config.stream_idle_timeout,
+                    reconnect: &self.config.stream_reconnect,
+                    cancellation: &cancellation,
+                },
                 &stream,
                 &mut events,
-                ModelStreamEvent::Started { stream_id },
-            )
-            .await?;
-
-            let mut decoder = SseDecoder::default();
-            let mut state = ChatStreamState::new(&self.config);
-            let mut response = response;
-            loop {
-                let chunk = tokio::select! {
-                    chunk = response.chunk() => chunk?,
-                    _ = cancellation.cancelled() => return Err(AgentCoreError::Aborted),
-                    _ = tokio::time::sleep(self.config.stream_idle_timeout) => {
-                        return Err(AgentCoreError::Provider("chat completions stream timed out".into()));
+                || {
+                    let mut request_builder = self
+                        .client
+                        .post(self.endpoint())
+                        .headers(headers.clone())
+                        .json(&payload);
+                    if let Some(api_key) = &api_key {
+                        request_builder = request_builder.bearer_auth(api_key);
                     }
-                };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-                for data in decoder.push(&chunk) {
+                    Ok(request_builder)
+                },
+                |data| {
+                    let mut events = Vec::new();
+                    if !started {
+                        started = true;
+                        events.push(ModelStreamEvent::Started {
+                            stream_id: stream_id.clone(),
+                        });
+                    }
                     if data == "[DONE]" {
                         state.done = true;
-                        break;
+                        return Ok(SseFrameResult::new(events, true));
                     }
-                    for event in state.apply_chunk(&data)? {
-                        emit_model_stream_event(&stream, &mut events, event).await?;
-                    }
-                }
-                if state.done {
-                    break;
-                }
-            }
-
-            for data in decoder.finish() {
-                if data != "[DONE]" {
-                    for event in state.apply_chunk(&data)? {
-                        emit_model_stream_event(&stream, &mut events, event).await?;
-                    }
-                }
-            }
+                    events.extend(state.apply_chunk(data)?);
+                    Ok(SseFrameResult::new(events, state.done))
+                },
+            )
+            .await?;
             for event in state.finish_events() {
                 emit_model_stream_event(&stream, &mut events, event).await?;
             }
@@ -1402,36 +1384,6 @@ fn map_finish_reason(finish_reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sse_decoder_handles_multiline_data_and_done() {
-        let mut decoder = SseDecoder::default();
-
-        let frames = decoder.push(": ignored\n\ndata: one\ndata: two\n\ndata: [DONE]\n\n");
-
-        assert_eq!(frames, ["one\ntwo", "[DONE]"]);
-    }
-
-    #[test]
-    fn sse_decoder_normalizes_split_crlf_without_extra_frame_boundary() {
-        let mut decoder = SseDecoder::default();
-
-        assert!(decoder.push("data: one\r").is_empty());
-        assert!(decoder.push("\ndata: two\r").is_empty());
-        assert_eq!(decoder.push("\n\r\n"), ["one\ntwo"]);
-    }
-
-    #[test]
-    fn sse_decoder_preserves_utf8_split_across_chunks() {
-        let mut decoder = SseDecoder::default();
-
-        assert!(
-            decoder
-                .push([b'd', b'a', b't', b'a', b':', b' ', 0xE4])
-                .is_empty()
-        );
-        assert_eq!(decoder.push([0xBD, 0xA0, b'\n', b'\n']), ["你"]);
-    }
 
     #[test]
     fn reasoning_details_merge_prefix_text_by_index() {

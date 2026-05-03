@@ -1,7 +1,7 @@
 use noloong_agent_core::{
     AgentEventKind, AgentMessage, AgentState, BoxFuture, CancellationToken, ContentBlock,
-    MessageRole, ModelStreamEvent, Result, RunReport, ThinkingBlock, ToolOutput, ToolProvider,
-    ToolRequest, ToolSpec,
+    MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig, ThinkingBlock,
+    ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
@@ -28,6 +28,14 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join(name)
+}
+
+pub fn fast_one_retry_reconnect() -> SseReconnectConfig {
+    SseReconnectConfig {
+        max_reconnects: 1,
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(1),
+    }
 }
 
 pub fn compaction_trigger_state() -> AgentState {
@@ -155,6 +163,8 @@ pub struct MockResponse {
     pub status: u16,
     pub content_type: &'static str,
     pub body: &'static str,
+    pub close_delimited: bool,
+    pub hang_after_response: bool,
 }
 
 impl MockResponse {
@@ -163,6 +173,38 @@ impl MockResponse {
             status,
             content_type,
             body,
+            close_delimited: false,
+            hang_after_response: false,
+        }
+    }
+
+    pub fn close_delimited(status: u16, content_type: &'static str, body: &'static str) -> Self {
+        Self {
+            status,
+            content_type,
+            body,
+            close_delimited: true,
+            hang_after_response: false,
+        }
+    }
+
+    pub fn hang_after_headers(status: u16, content_type: &'static str) -> Self {
+        Self {
+            status,
+            content_type,
+            body: "",
+            close_delimited: true,
+            hang_after_response: true,
+        }
+    }
+
+    pub fn hang_after_body(status: u16, content_type: &'static str, body: &'static str) -> Self {
+        Self {
+            status,
+            content_type,
+            body,
+            close_delimited: true,
+            hang_after_response: true,
         }
     }
 }
@@ -212,16 +254,30 @@ impl MockServer {
                     .expect("request lock poisoned")
                     .push(request);
                 let body = response.body;
-                let response = format!(
-                    "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    response.status,
-                    response.content_type,
-                    body.len()
-                );
+                let hang_after_response = response.hang_after_response;
+                let response_text = if response.close_delimited {
+                    format!(
+                        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nConnection: close\r\n\r\n{body}",
+                        response.status, response.content_type
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        response.status,
+                        response.content_type,
+                        body.len()
+                    )
+                };
                 socket
-                    .write_all(response.as_bytes())
+                    .write_all(response_text.as_bytes())
                     .await
                     .expect("mock server write failed");
+                if hang_after_response {
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(5)).await;
+                        drop(socket);
+                    });
+                }
             }
         });
         Ok(Self { address, requests })
@@ -261,6 +317,10 @@ impl MockServer {
             .cloned()
             .map(parse_request)
             .collect()
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.requests.lock().expect("request lock poisoned").len()
     }
 }
 

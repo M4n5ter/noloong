@@ -2,7 +2,7 @@ use crate::provider_utils::{
     ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
     resolve_api_key,
 };
-use crate::sse::SseDecoder;
+use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
 use crate::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaEncoding,
@@ -40,6 +40,7 @@ pub struct AnthropicMessagesProviderConfig {
     pub temperature: Option<f64>,
     pub request_timeout: Duration,
     pub stream_idle_timeout: Duration,
+    pub stream_reconnect: SseReconnectConfig,
     pub anthropic_version: Option<String>,
     pub beta_headers: Vec<String>,
     pub thinking: Option<AnthropicThinkingConfig>,
@@ -73,6 +74,7 @@ impl Debug for AnthropicMessagesProviderConfig {
             .field("temperature", &self.temperature)
             .field("request_timeout", &self.request_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
+            .field("stream_reconnect", &self.stream_reconnect)
             .field("anthropic_version", &self.anthropic_version)
             .field("beta_headers", &self.beta_headers)
             .field("thinking", &self.thinking)
@@ -96,6 +98,7 @@ impl AnthropicMessagesProviderConfig {
             temperature: None,
             request_timeout: Duration::from_secs(60),
             stream_idle_timeout: Duration::from_secs(300),
+            stream_reconnect: SseReconnectConfig::default(),
             anthropic_version: Some(DEFAULT_ANTHROPIC_VERSION.into()),
             beta_headers: Vec::new(),
             thinking: None,
@@ -174,6 +177,11 @@ impl AnthropicMessagesProviderConfig {
         self
     }
 
+    pub fn stream_reconnect(mut self, stream_reconnect: SseReconnectConfig) -> Self {
+        self.stream_reconnect = stream_reconnect;
+        self
+    }
+
     pub fn enable_thinking(mut self, budget_tokens: u64) -> Self {
         self.thinking = Some(AnthropicThinkingConfig { budget_tokens });
         self
@@ -225,66 +233,44 @@ impl ModelProvider for AnthropicMessagesProvider {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
             let payload = build_anthropic_payload(&self.config, &request)?;
-            let mut request_builder = self
-                .client
-                .post(self.endpoint())
-                .headers(headers_from_config(&self.config)?)
-                .json(&payload);
-            if let Some(api_key) = self.api_key()? {
-                request_builder = match self.config.auth_scheme {
-                    AnthropicAuthScheme::XApiKey => request_builder.header("x-api-key", api_key),
-                    AnthropicAuthScheme::Bearer => request_builder.bearer_auth(api_key),
-                };
-            }
-
-            let request_timeout = tokio::time::sleep(self.config.request_timeout);
-            tokio::pin!(request_timeout);
-            let response = tokio::select! {
-                response = request_builder.send() => response?,
-                _ = cancellation.cancelled() => return Err(AgentCoreError::Aborted),
-                _ = &mut request_timeout => {
-                    return Err(AgentCoreError::Provider("anthropic messages request timed out".into()));
-                }
-            };
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(AgentCoreError::Provider(format!(
-                    "anthropic messages request failed with status {status}: {}",
-                    body.chars().take(2048).collect::<String>()
-                )));
-            }
+            let headers = headers_from_config(&self.config)?;
+            let api_key = self.api_key()?;
+            let auth_scheme = self.config.auth_scheme;
 
             let mut events = Vec::new();
-            let mut decoder = SseDecoder::default();
             let mut state = AnthropicStreamState::new(&self.config, &request);
-            let mut response = response;
-            loop {
-                let chunk = tokio::select! {
-                    chunk = response.chunk() => chunk?,
-                    _ = cancellation.cancelled() => return Err(AgentCoreError::Aborted),
-                    _ = tokio::time::sleep(self.config.stream_idle_timeout) => {
-                        return Err(AgentCoreError::Provider("anthropic messages stream timed out".into()));
+            run_sse_model_stream(
+                SseStreamOptions {
+                    provider_label: "anthropic messages",
+                    request_timeout: self.config.request_timeout,
+                    stream_idle_timeout: self.config.stream_idle_timeout,
+                    reconnect: &self.config.stream_reconnect,
+                    cancellation: &cancellation,
+                },
+                &stream,
+                &mut events,
+                || {
+                    let mut request_builder = self
+                        .client
+                        .post(self.endpoint())
+                        .headers(headers.clone())
+                        .json(&payload);
+                    if let Some(api_key) = &api_key {
+                        request_builder = match auth_scheme {
+                            AnthropicAuthScheme::XApiKey => {
+                                request_builder.header("x-api-key", api_key)
+                            }
+                            AnthropicAuthScheme::Bearer => request_builder.bearer_auth(api_key),
+                        };
                     }
-                };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-                for data in decoder.push(&chunk) {
-                    for event in state.apply_chunk(&data)? {
-                        emit_model_stream_event(&stream, &mut events, event).await?;
-                    }
-                }
-                if state.done {
-                    break;
-                }
-            }
-
-            for data in decoder.finish() {
-                for event in state.apply_chunk(&data)? {
-                    emit_model_stream_event(&stream, &mut events, event).await?;
-                }
-            }
+                    Ok(request_builder)
+                },
+                |data| {
+                    let events = state.apply_chunk(data)?;
+                    Ok(SseFrameResult::new(events, state.done))
+                },
+            )
+            .await?;
             for event in state.finish_events() {
                 emit_model_stream_event(&stream, &mut events, event).await?;
             }

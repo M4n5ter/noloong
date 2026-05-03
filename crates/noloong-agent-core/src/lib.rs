@@ -55,5 +55,6 @@ pub use responses::{
 pub use runtime::{
     AgentEventSink, AgentInput, AgentRuntime, AgentRuntimeBuilder, RunReport, RuntimeQueues,
 };
+pub use sse::SseReconnectConfig;
 pub use store::{EventStore, InMemoryEventStore};
 pub use types::*;

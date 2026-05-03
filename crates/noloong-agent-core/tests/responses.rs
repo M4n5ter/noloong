@@ -2,8 +2,8 @@ use noloong_agent_core::{
     AgentEventKind, AgentMessage, AgentRuntime, CancellationToken, ContentBlock, MediaBlock,
     MediaKind, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, ResponsesApiProvider,
     ResponsesApiProviderConfig, ResponsesReasoningConfig, ResponsesReasoningEffort,
-    ResponsesReasoningSummary, Result, RunReport, StopReason, ThinkingBlock, ThinkingKind,
-    ToolCall, ToolPermissionRequirement, ToolSpec,
+    ResponsesReasoningSummary, Result, RunReport, SseReconnectConfig, StopReason, ThinkingBlock,
+    ThinkingKind, ToolCall, ToolPermissionRequirement, ToolSpec,
 };
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,15 @@ use tokio::time::Duration;
 
 pub mod support;
 
-use support::{HangingServer, LiveEchoTool, MockResponse, MockServer};
+use support::{HangingServer, LiveEchoTool, MockResponse, MockServer, fast_one_retry_reconnect};
+
+#[test]
+fn reconnect_config_builder_sets_stream_reconnect() {
+    let config = ResponsesApiProviderConfig::new("test-responses", "test-model")
+        .stream_reconnect(SseReconnectConfig::disabled());
+
+    assert_eq!(config.stream_reconnect, SseReconnectConfig::disabled());
+}
 
 const EMPTY_COMPLETED_STREAM: &str = concat!(
     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-test\"}}\n\n",
@@ -673,7 +681,8 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
     let provider = ResponsesApiProvider::new(
         ResponsesApiProviderConfig::new("test-responses", "test-model")
             .base_url(server.url())
-            .without_api_key(),
+            .without_api_key()
+            .stream_reconnect(SseReconnectConfig::disabled()),
     )?;
 
     let error = provider
@@ -687,6 +696,89 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
 
     assert!(error.to_string().contains("429"));
     assert!(error.to_string().contains("rate limited"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_retries_pre_data_disconnect() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(200, "text/event-stream", ""),
+        MockResponse::new(200, "text/event-stream", EMPTY_COMPLETED_STREAM),
+    ])
+    .await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stream_timeout_retries_pre_data_idle() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::hang_after_headers(200, "text/event-stream"),
+        MockResponse::new(200, "text/event-stream", EMPTY_COMPLETED_STREAM),
+    ])
+    .await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .without_api_key()
+            .stream_idle_timeout(Duration::from_millis(20))
+            .stream_reconnect(fast_one_retry_reconnect()),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_does_not_retry_after_data_frame() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(
+            200,
+            "text/event-stream",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-broken\"}}\n\n",
+        ),
+        MockResponse::new(200, "text/event-stream", EMPTY_COMPLETED_STREAM),
+    ])
+    .await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(server.request_count(), 1);
+    assert!(error.to_string().contains("ended before terminal event"));
     Ok(())
 }
 

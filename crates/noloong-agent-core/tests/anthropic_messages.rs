@@ -1,9 +1,9 @@
 use noloong_agent_core::{
     AgentMessage, AgentRuntime, AnthropicAuthScheme, AnthropicMessagesProvider,
     AnthropicMessagesProviderConfig, CancellationToken, ContentBlock, MediaBlock, MediaKind,
-    MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, Result, StopReason, ThinkingBlock,
-    ToolCall, ToolExecutionMode, ToolOutput, ToolPermissionRequirement, ToolProvider, ToolRequest,
-    ToolSpec,
+    MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, Result, SseReconnectConfig,
+    StopReason, ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, ToolPermissionRequirement,
+    ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -11,7 +11,15 @@ use tokio::time::{Duration, sleep};
 
 pub mod support;
 
-use support::{CapturedRequest, HangingServer, MockResponse, MockServer};
+use support::{CapturedRequest, HangingServer, MockResponse, MockServer, fast_one_retry_reconnect};
+
+#[test]
+fn reconnect_config_builder_sets_stream_reconnect() {
+    let config = AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+        .stream_reconnect(SseReconnectConfig::disabled());
+
+    assert_eq!(config.stream_reconnect, SseReconnectConfig::disabled());
+}
 
 #[tokio::test]
 async fn config_sends_official_headers_and_defaults() -> Result<()> {
@@ -74,7 +82,8 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
     let provider = AnthropicMessagesProvider::new(
         AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
             .base_url(server.url())
-            .without_api_key(),
+            .without_api_key()
+            .stream_reconnect(SseReconnectConfig::disabled()),
     )?;
 
     let error = provider
@@ -89,6 +98,89 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
     let error = error.to_string();
     assert!(error.contains("429"));
     assert!(error.contains("rate"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_retries_pre_data_disconnect() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(200, "text/event-stream", ""),
+        MockResponse::new(200, "text/event-stream", text_response("ok")),
+    ])
+    .await?;
+    let provider = AnthropicMessagesProvider::new(
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stream_timeout_retries_pre_data_idle() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::hang_after_headers(200, "text/event-stream"),
+        MockResponse::new(200, "text/event-stream", text_response("ok")),
+    ])
+    .await?;
+    let provider = AnthropicMessagesProvider::new(
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .base_url(server.url())
+            .without_api_key()
+            .stream_idle_timeout(Duration::from_millis(20))
+            .stream_reconnect(fast_one_retry_reconnect()),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_does_not_retry_after_data_frame() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::close_delimited(
+            200,
+            "text/event-stream",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\"}}\n\n",
+        ),
+        MockResponse::new(200, "text/event-stream", text_response("ok")),
+    ])
+    .await?;
+    let provider = AnthropicMessagesProvider::new(
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(server.request_count(), 1);
+    assert!(error.to_string().contains("ended before terminal event"));
     Ok(())
 }
 

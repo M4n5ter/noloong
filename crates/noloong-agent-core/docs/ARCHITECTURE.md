@@ -39,6 +39,7 @@
 - `src/chat_completions.rs`：内置 OpenAI-compatible Chat Completions provider。
 - `src/responses.rs`：内置 OpenAI Responses API provider。
 - `src/anthropic_messages.rs`：内置 Anthropic Messages provider。
+- `src/sse.rs`：内置 HTTP provider 共享的 SSE framing、timeout 和保守重连逻辑。
 - `src/compaction.rs`：context compaction 配置、planner、token estimator 和 summarizer 实现。
 
 高层关系可以概括为：
@@ -697,6 +698,49 @@ JSON-RPC bridge 采用 core strict conformance policy：
 
 内部 conformance suite 位于 `tests/jsonrpc_conformance.rs`，并使用 dedicated fixture `tests/fixtures/jsonrpc-conformance-extension.mjs` 覆盖 lifecycle、capability、request/response、adapter payload、malformed result 和 stream notification 行为。它是 crate 内部质量门，不是对第三方扩展作者暴露的 public runner。
 
+## Built-in HTTP SSE Client
+
+三个内置 HTTP model provider 共享 crate-private SSE stream runner。provider 自己负责：
+
+- 构造 `reqwest::RequestBuilder`。
+- 把 provider-specific SSE `data:` payload 解析成 `ModelStreamEvent`。
+- 定义哪些 provider event 算 terminal event。
+
+共享 runner 只负责 transport 层：
+
+- request timeout。
+- stream idle timeout。
+- cancellation。
+- HTTP status error rendering。
+- SSE frame 解码。
+- conservative reconnect。
+
+SSE decoder 使用 `BytesMut` 作为 rolling buffer，并用 `memchr` 搜索行结束和 frame boundary。这里 `bytes::Buf` 只用于高效推进 buffer cursor，不是主要性能收益来源；真正减少开销的是避免为每个 SSE frame 生成 `Vec<String>`，并通过 callback 直接把 `&str` data payload 交给 provider parser。单行 `data:` payload 不分配 owned `String`；multiline `data:` 使用复用 scratch buffer 按 SSE 语义用 `\n` 拼接。
+
+SSE decoder 支持：
+
+- multiline `data:`
+- comment / unknown field ignore
+- LF / CRLF
+- split CRLF across chunks
+- final unfinished frame flush
+- invalid UTF-8 fail-fast
+
+自动重连是保守的：
+
+- 在任何 `data:` frame 交付给 provider parser 之前，request send error、retryable HTTP status、EOF、stream idle timeout 可以按 `SseReconnectConfig` 重试。
+- 一旦已经交付过任何 `data:` frame，就不再自动重试；后续 EOF、chunk error 或 idle timeout 都返回 provider error。
+- cancellation 永远返回 `AgentCoreError::Aborted`，不触发 retry。
+- 只有看到 provider terminal event 后，EOF 才算正常完成。
+
+各 provider 的 terminal event 定义不同：
+
+- Chat Completions：`[DONE]`。
+- Responses API：`response.completed`、`response.done`、`response.failed`、`response.incomplete`、`[DONE]`。
+- Anthropic Messages：`message_stop`、`[DONE]`、stream `error`。
+
+这个设计故意不实现 `Last-Event-ID` 或 mid-stream resume。对 LLM stream 来说，在已经输出 token、thinking、media 或 tool call 后重新 POST，可能造成重复输出、重复工具调用或生成分叉。v1 宁可 fail-fast，让上层通过事件日志和错误信息决定是否重新开始一个新 turn。
+
 ## Built-in Chat Completions Provider
 
 内置 `ChatCompletionsProvider` 是一个普通 `ModelProvider` 实现。它没有特殊 runtime 权限，也不改变 agent loop。
@@ -793,20 +837,13 @@ message 映射规则：
 
 ### Streaming
 
-provider 发出 HTTP request 后，按 SSE frame 解析 response：
+provider 发出 HTTP request 后，通过共享 SSE runner 解析 response：
 
 ```text
 data: {"choices":[{"delta":{"content":"hello"}}]}
 
 data: [DONE]
 ```
-
-SSE decoder 支持：
-
-- multiline `data:`
-- CRLF
-- split CRLF across chunks
-- final unfinished frame flush
 
 每个 JSON chunk 进入 `ChatStreamState`：
 
@@ -983,7 +1020,7 @@ audio、video、custom media kind、system media 和 assistant media replay 在 
 
 ### Responses Streaming
 
-Responses SSE event model 不同于 Chat Completions。provider 复用 crate-private SSE framing decoder，但 parser 独立处理：
+Responses SSE event model 不同于 Chat Completions。provider 复用共享 SSE runner，但 parser 独立处理：
 
 - `response.created` -> `Started`。
 - `response.output_text.delta` -> `TextDelta`。
@@ -1105,7 +1142,7 @@ Anthropic provider v1 不支持 audio/video/custom media kind，也不支持 sys
 
 ### Anthropic Streaming
 
-Anthropic Messages 使用与 Chat Completions 不同的 SSE event model。provider 复用 crate-private SSE framing decoder，但 event parser 独立处理：
+Anthropic Messages 使用与 Chat Completions 不同的 SSE event model。provider 复用共享 SSE runner，但 event parser 独立处理：
 
 - `message_start` -> `Started`。
 - `content_block_delta.text_delta` -> `TextDelta`。
@@ -1155,6 +1192,14 @@ built-in HTTP provider 有两层 timeout：
 
 - `request_timeout`：等待初始 HTTP response。
 - `stream_idle_timeout`：stream chunk 空闲超时。
+
+内置 HTTP provider 还支持 `SseReconnectConfig`：
+
+- `max_reconnects`：最多允许几次 pre-data reconnect。
+- `initial_backoff`：第一次 reconnect 前等待时间。
+- `max_backoff`：指数退避上限。
+
+默认值是少量、有限的保守重试；调用方可以用 `SseReconnectConfig::disabled()` 恢复 fail-fast 行为。
 
 stdio extension 也有：
 
@@ -1244,5 +1289,6 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 5. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 6. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
 7. interactive/human approval queue：在当前同步 `ToolPermissionDecision` 基础上，引入可暂停、可恢复、可超时的人工审批流程。
+8. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
 
 这些方向应该继续遵守当前核心原则：状态变更通过 effect，外部行为通过 trait 或 JSON-RPC，provider-specific 细节留在调用方配置或 provider 实现内，不泄漏到 runtime。
