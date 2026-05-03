@@ -5,6 +5,7 @@ mod anthropic_messages;
 mod chat_completions;
 mod compaction;
 mod error;
+mod extension_conformance;
 mod jsonrpc;
 mod phase;
 mod provider_utils;
@@ -34,6 +35,13 @@ pub use compaction::{
     compaction_summary_message, plan_compaction, serialize_messages_for_summary,
 };
 pub use error::{AgentCoreError, Result};
+pub use extension_conformance::{
+    CONFORMANCE_COMPACTION_SUMMARIZER_ID, CONFORMANCE_CONTEXT_PROVIDER_ID,
+    CONFORMANCE_MODEL_PROVIDER_ID, CONFORMANCE_PHASE_HOOK_ID, CONFORMANCE_PHASE_NODE_ID,
+    CONFORMANCE_TOOL_CALL_HOOK_ID, CONFORMANCE_TOOL_NAME, ExtensionConformanceCaseReport,
+    ExtensionConformanceCaseStatus, ExtensionConformanceConfig, ExtensionConformanceProfile,
+    ExtensionConformanceReport, run_extension_conformance,
+};
 pub use jsonrpc::{StdioExtension, StdioExtensionConfig};
 pub use phase::{
     PHASE_ASSISTANT_COMMIT, PHASE_CONTEXT_COMPACT, PHASE_CONTEXT_PREPARE, PHASE_INPUT_INGEST,

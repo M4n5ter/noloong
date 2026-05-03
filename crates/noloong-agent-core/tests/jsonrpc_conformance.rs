@@ -1,8 +1,9 @@
 use noloong_agent_core::{
     AgentCoreError, AgentEventKind, AgentInput, AgentRuntime, AgentRuntimeBuilder,
     CancellationToken, ContentBlock, ContextCompactionConfig, EventSinkFuture, EventStore,
-    InMemoryEventStore, MessageRole, ModelStreamEvent, Result, RunReport, RunStatus,
-    StdioExtension, StdioExtensionConfig, ToolPermissionOutcome, reduce_events,
+    ExtensionConformanceCaseStatus, ExtensionConformanceConfig, ExtensionConformanceProfile,
+    InMemoryEventStore, ModelStreamEvent, Result, RunReport, RunStatus, StdioExtension,
+    ToolPermissionOutcome, reduce_events, run_extension_conformance,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -12,7 +13,10 @@ use tokio::{
 
 pub mod support;
 
-use support::{assert_assistant_text_contains, compaction_trigger_state, fixture_path};
+use support::{
+    assert_assistant_text_contains, compaction_trigger_state, jsonrpc_conformance_config as config,
+    jsonrpc_conformance_config_with_timeouts as config_with_timeouts,
+};
 
 const MODE_ALL_CAPABILITIES: &str = "all-capabilities";
 const MODE_ADAPTER_PAYLOADS: &str = "adapter-payloads";
@@ -48,17 +52,6 @@ const MODE_UNKNOWN_STREAM_NOTIFICATION: &str = "unknown-stream-notification";
 const MODE_WRONG_RESPONSE_ID: &str = "wrong-response-id";
 
 #[tokio::test]
-async fn lifecycle_smoke_connects_lists_capabilities_and_shutdowns() -> Result<()> {
-    let extension = extension(&[MODE_ALL_CAPABILITIES]).await?;
-
-    assert_eq!(extension.manifest().name, "jsonrpc-conformance-fixture");
-    assert_eq!(extension.manifest().version, "0.1.0");
-    assert_eq!(extension.capabilities().await?.len(), 7);
-    extension.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn lifecycle_malformed_manifest_fails_connect() {
     let error = connect_error(&[MODE_MALFORMED_MANIFEST]).await;
 
@@ -66,20 +59,30 @@ async fn lifecycle_malformed_manifest_fails_connect() {
 }
 
 #[tokio::test]
-async fn capabilities_register_all_extension_types() -> Result<()> {
-    let runtime = runtime(&[MODE_ALL_CAPABILITIES]).await?;
+async fn public_runner_strict_fixture_passes() -> Result<()> {
+    let report = run_extension_conformance(
+        ExtensionConformanceConfig::new(config(&[
+            MODE_ALL_CAPABILITIES,
+            MODE_ADAPTER_PAYLOADS,
+            MODE_TOOL_HOOK_PAYLOADS,
+        ]))
+        .profile(ExtensionConformanceProfile::Strict),
+    )
+    .await?;
 
-    let report = runtime.run("hello").await?;
-
-    assert_assistant_text_contains(&report, "model ok");
-    assert_eq!(
-        report.state.context.get("conformance_context"),
-        Some(&serde_json::json!(true))
+    assert!(
+        report.is_success(),
+        "strict conformance report failed: {report:?}"
     );
-    assert_eq!(
-        report.state.context.get("conformance_phase"),
-        Some(&serde_json::json!(true))
-    );
+    assert_eq!(report.failed(), 0);
+    assert_eq!(report.skipped(), 0);
+    assert!(report.cases.iter().any(|case| {
+        case.name == "adapter_payloads" && case.status == ExtensionConformanceCaseStatus::Passed
+    }));
+    assert!(report.cases.iter().any(|case| {
+        case.name == "compaction_summarizer"
+            && case.status == ExtensionConformanceCaseStatus::Passed
+    }));
     Ok(())
 }
 
@@ -174,72 +177,6 @@ async fn request_response_cancellation_removes_pending_request() -> Result<()> {
         .expect_err("run should abort after cancellation");
     assert!(matches!(error, AgentCoreError::Aborted));
     sleep(Duration::from_millis(200)).await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn adapter_payloads_cover_model_tool_context_phase_and_hooks() -> Result<()> {
-    let runtime = runtime(&[
-        MODE_ALL_CAPABILITIES,
-        MODE_ADAPTER_PAYLOADS,
-        MODE_TOOL_HOOK_PAYLOADS,
-    ])
-    .await?;
-
-    let report = runtime.run("adapter").await?;
-
-    assert_assistant_text_contains(&report, "adapter complete");
-    assert_eq!(
-        report.state.context.get("conformance_context"),
-        Some(&serde_json::json!(true))
-    );
-    assert_eq!(
-        report.state.context.get("conformance_phase"),
-        Some(&serde_json::json!(true))
-    );
-    assert!(report.events.iter().any(|event| {
-        matches!(
-            &event.kind,
-            AgentEventKind::ToolExecutionUpdate { update, .. }
-                if update.content.iter().any(|block| {
-                    matches!(block, ContentBlock::Text { text } if text == "tool update")
-                })
-        )
-    }));
-    assert!(report.events.iter().any(|event| {
-        matches!(
-            &event.kind,
-            AgentEventKind::ToolPermissionDecided { decision, .. }
-                if decision.outcome == ToolPermissionOutcome::Allow
-                    && decision.approver.as_deref() == Some("jsonrpc-fixture")
-        )
-    }));
-    Ok(())
-}
-
-#[tokio::test]
-async fn adapter_payloads_cover_compaction_summarizer() -> Result<()> {
-    let builder = builder(&[MODE_ALL_CAPABILITIES]).await?;
-    let runtime = builder
-        .with_context_compaction_summarizer_id(
-            ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
-                .keep_recent_tokens(10),
-            "conformance-compaction",
-        )
-        .max_turns(1)
-        .build()?;
-
-    let report = runtime
-        .continue_from_state(compaction_trigger_state(), None, CancellationToken::new())
-        .await?;
-
-    assert!(report.state.messages.iter().any(|message| {
-        matches!(message.role, MessageRole::System)
-            && message.content.iter().any(|block| {
-                matches!(block, ContentBlock::Text { text } if text.contains("conformance compaction summary"))
-            })
-    }));
     Ok(())
 }
 
@@ -469,35 +406,6 @@ async fn stream_timeout_is_independent_from_request_timeout() -> Result<()> {
 
     assert_contains(&error.to_string(), "model stream timed out");
     Ok(())
-}
-
-fn config(modes: &[&str]) -> StdioExtensionConfig {
-    config_with_timeouts(modes, Duration::from_secs(2), Duration::from_secs(2))
-}
-
-fn config_with_timeouts(
-    modes: &[&str],
-    request_timeout: Duration,
-    stream_timeout: Duration,
-) -> StdioExtensionConfig {
-    let mut config = StdioExtensionConfig::new("node")
-        .arg(fixture_path("jsonrpc-conformance-extension.mjs").to_string_lossy())
-        .request_timeout(request_timeout)
-        .stream_timeout(stream_timeout);
-    let mode = modes
-        .iter()
-        .copied()
-        .filter(|mode| !mode.is_empty())
-        .collect::<Vec<_>>()
-        .join(",");
-    if !mode.is_empty() {
-        config = config.arg(format!("--mode={mode}"));
-    }
-    config
-}
-
-async fn extension(modes: &[&str]) -> Result<StdioExtension> {
-    StdioExtension::connect(config(modes)).await
 }
 
 async fn builder(modes: &[&str]) -> Result<AgentRuntimeBuilder> {

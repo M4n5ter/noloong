@@ -33,6 +33,7 @@ const Mode = Object.freeze({
   malformedToolResult: "malformed-tool-result",
   missingResult: "missing-result",
   modelJsonrpcError: "model-jsonrpc-error",
+  partialConformance: "partial-conformance",
   responseBufferedEvents: "response-buffered-events",
   stdoutClose: "stdout-close",
   streamHangs: "stream-hangs",
@@ -132,6 +133,9 @@ function capabilitiesForMode() {
     if (hasMode(mode)) {
       return capabilities;
     }
+  }
+  if (hasMode(Mode.partialConformance)) {
+    return [allCapabilities()[0], allCapabilities()[1]];
   }
   if (hasMode(Mode.allCapabilities)) {
     return allCapabilities();

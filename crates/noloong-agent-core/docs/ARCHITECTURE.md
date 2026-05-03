@@ -696,7 +696,34 @@ JSON-RPC bridge 采用 core strict conformance policy：
 
 这个设计的边界是：外部语言扩展不需要链接 Rust ABI，只需要实现 newline-delimited JSON-RPC 2.0。JS/TS 可以用 npm 生态，Python 可以用自己的 HTTP/model SDK，Rust core 只关心 typed JSON contract。
 
-内部 conformance suite 位于 `tests/jsonrpc_conformance.rs`，并使用 dedicated fixture `tests/fixtures/jsonrpc-conformance-extension.mjs` 覆盖 lifecycle、capability、request/response、adapter payload、malformed result 和 stream notification 行为。它是 crate 内部质量门，不是对第三方扩展作者暴露的 public runner。
+extension conformance runner 把正向协议契约暴露给第三方扩展作者和 SDK/template CI。Rust 调用方可以使用 `run_extension_conformance(ExtensionConformanceConfig)`，命令行用户可以直接运行 `noloong-extension-conformance`。
+
+Runner profile：
+
+- `Generic`：只校验 `initialize`、`capabilities/list`、typed capability decode、runtime registration 和 `shutdown`。适合任意现有扩展的基础健康检查。
+- `Hybrid`：默认 profile。先运行 generic checks；如果扩展没有声明完整标准 conformance capability，则跳过 full behavior cases；如果只声明了部分标准 capability，则失败并报告缺失项。
+- `Strict`：要求完整标准 conformance capability，并运行 model/tool/context/phase/hook/compaction 的 full behavior cases。适合 extension SDK、template 和 CI gate。
+
+标准 full conformance capability ids：
+
+- `conformance-model`
+- `conformance_echo`
+- `conformance-context`
+- `conformance.phase`
+- `conformance-hook`
+- `conformance-tool-hook`
+- `conformance-compaction`
+
+CLI 示例：
+
+```text
+noloong-extension-conformance --profile hybrid -- node ./extension.mjs
+noloong-extension-conformance --profile strict --json -- node ./conformance-extension.mjs
+```
+
+CLI text mode 输出 total / passed / failed / skipped 和每个 case 的结果；`--json` 输出 `ExtensionConformanceReport`，适合 CI 或第三方测试框架消费。进程退出码只在所有非 skipped case 通过时为 0。
+
+内部 suite 仍位于 `tests/jsonrpc_conformance.rs`，并使用 dedicated fixture `tests/fixtures/jsonrpc-conformance-extension.mjs` 覆盖 malformed result、duplicate capability、wrong response id、stdout close、cancellation 和 stream timeout 等 bridge robustness 场景。这些 fixture-only negative modes 不属于第三方 runner 的必跑 contract。
 
 ## Built-in HTTP SSE Client
 
@@ -1285,10 +1312,9 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 1. 持久化 event store：SQLite/PostgreSQL/object store。
 2. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
 3. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
-4. 可复用的 extension conformance runner：把当前 crate 内部 JSON-RPC conformance suite 提炼成第三方扩展作者也能运行的测试工具。
-5. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
-6. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
-7. interactive/human approval queue：在当前同步 `ToolPermissionDecision` 基础上，引入可暂停、可恢复、可超时的人工审批流程。
-8. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
+4. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
+5. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
+6. interactive/human approval queue：在当前同步 `ToolPermissionDecision` 基础上，引入可暂停、可恢复、可超时的人工审批流程。
+7. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
 
 这些方向应该继续遵守当前核心原则：状态变更通过 effect，外部行为通过 trait 或 JSON-RPC，provider-specific 细节留在调用方配置或 provider 实现内，不泄漏到 runtime。

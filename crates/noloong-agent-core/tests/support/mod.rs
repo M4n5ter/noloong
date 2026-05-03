@@ -1,7 +1,7 @@
 use noloong_agent_core::{
     AgentEventKind, AgentMessage, AgentState, BoxFuture, CancellationToken, ContentBlock,
-    MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig, ThinkingBlock,
-    ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig, StdioExtensionConfig,
+    ThinkingBlock, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
@@ -36,6 +36,31 @@ pub fn fast_one_retry_reconnect() -> SseReconnectConfig {
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(1),
     }
+}
+
+pub fn jsonrpc_conformance_config(modes: &[&str]) -> StdioExtensionConfig {
+    jsonrpc_conformance_config_with_timeouts(modes, Duration::from_secs(2), Duration::from_secs(2))
+}
+
+pub fn jsonrpc_conformance_config_with_timeouts(
+    modes: &[&str],
+    request_timeout: Duration,
+    stream_timeout: Duration,
+) -> StdioExtensionConfig {
+    let mut config = StdioExtensionConfig::new("node")
+        .arg(fixture_path("jsonrpc-conformance-extension.mjs").to_string_lossy())
+        .request_timeout(request_timeout)
+        .stream_timeout(stream_timeout);
+    let mode = modes
+        .iter()
+        .copied()
+        .filter(|mode| !mode.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    if !mode.is_empty() {
+        config = config.arg(format!("--mode={mode}"));
+    }
+    config
 }
 
 pub fn compaction_trigger_state() -> AgentState {
