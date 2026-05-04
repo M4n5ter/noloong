@@ -1,45 +1,55 @@
-# Implementation Plan: Split Bloated Core Files And Deny Dead Code
+# Implementation Plan: Toasty-backed SQLite EventStore
 
 ## Overview
 
-本轮做行为保持型重构，第一阶段只处理 agent core 最膨胀、最容易继续堆积复杂度的文件：`runtime.rs`、`phase.rs`、`types.rs`、`jsonrpc.rs` 和 `tests/core.rs`。目标是拆出清晰模块边界，同时在 Cargo lint 层面禁止 `dead_code`，并移除当前唯一的 `#[allow(dead_code)]`。
+本轮实现一个内置的 SQLite 持久化 `EventStore`，用于替代仅内存的 `InMemoryEventStore`，并为后续 PostgreSQL backend 留出顺滑迁移路径。v1 明确采用 SQL-first，而不是 OpenDAL-first：OpenDAL 更适合作为未来 object archive/object backend 的统一访问层，不承担强一致 append event log 的主存储语义。
 
-已确认的当前状态：
+当前仓库状态：
 
-- `crates/noloong-agent-core/src/runtime.rs` 约 1737 行，是当前最大 core 文件。
-- `crates/noloong-agent-core/src/phase.rs` 约 1251 行，混合了标准 phase、hook runner、assistant commit、tool execution 和 approval resume。
-- `crates/noloong-agent-core/src/types.rs` 约 1052 行，混合 event/state/message/media/thinking/tool/extension wire types。
-- `crates/noloong-agent-core/src/jsonrpc.rs` 约 1023 行，混合 stdio process、adapter implementations、wire DTO 和 hook payload。
-- `crates/noloong-agent-core/tests/core.rs` 约 1667 行，适合按行为域拆分。
-- 当前唯一 dead-code allow 是 `crates/noloong-agent-core/src/runtime.rs` 中的 `_standard_phase_ids`。
+- `EventStore` 只有 `append(event)` 和 `load(run_id)` 两个方法。
+- `InMemoryEventStore` 当前用 `BTreeMap<RunId, Vec<AgentEvent>>` 保存事件。
+- runtime 依赖事件可按 `sequence` replay，并且 paused approval resume 会从 store load event log 后继续追加事件。
+- `AgentEvent` 已完整 `Serialize` / `Deserialize`，适合先以 JSON payload 持久化。
+
+Toasty 参考资料：
+
+- GitHub: <https://github.com/tokio-rs/toasty/tree/main>
+- docs.rs: <https://docs.rs/toasty>
+- Toasty guide: <https://tokio-rs.github.io/toasty/nightly/guide/>
+- Database setup guide: <https://tokio-rs.github.io/toasty/nightly/guide/database-setup.html>
+- Tokio release blog: <https://tokio.rs/blog/2026-04-03-toasty-released>
+- Local exploration option: `git clone https://github.com/tokio-rs/toasty.git /tmp/toasty`
+- Crates.io check already observed: `toasty = "0.5.0"`, `toasty-driver-sqlite = "0.5.0"`, `toasty-driver-postgresql = "0.5.0"`.
 
 ## Architecture Decisions
 
-- 先做 **Core first** 拆分：本轮不拆 `chat_completions.rs`、`responses.rs`、`anthropic_messages.rs`，除非 core module 重排造成必要 import 调整。
-- 拆分是行为保持型重构：不改变 public API、JSON-RPC wire contract、event schema、provider payload 或 serde tag/name。
-- `mod.rs` 只保留 public facade、共享类型和 re-export；具体实现进入子模块。
-- 子模块默认保持 private，只把跨模块必须使用的项提升到 `pub(super)` 或 `pub(crate)`。
-- 添加 workspace 级 lint：`dead_code = "deny"`；不允许用新的 `#[allow(dead_code)]` 绕过。
-- 拆分后单个 core implementation 文件目标不超过约 900 行；如果超出，继续按职责拆一层。
+- v1 只实现 SQLite event store；PostgreSQL 是后续 task，不在本轮实现。
+- 使用 Toasty，依赖 `toasty` 和 `toasty-driver-sqlite`，通过 feature gate 控制。
+- 新 feature 命名为 `sqlite-store`；默认 build 不拉入 SQLite/Toasty。
+- `SqliteEventStore` 是内置 backend，不改变 `EventStore` trait 签名。
+- SQLite 持久化完整 `AgentEvent` JSON，同时拆出少量索引列：`run_id`、`sequence`、`turn_id`、`phase`、`kind_type`、`created_at_ms`。
+- 强 append 一致性以 Toasty composite primary key `(run_id, sequence)` 实现；重复 append 必须失败，不能 upsert 或静默覆盖。
+- `load(run_id)` 必须按 `sequence ASC` 返回事件，空 run 继续返回空 vec。
+- 不把 OpenDAL 引入本轮依赖；未来如果做 object store，需要单独设计 manifest/lock/compaction 协议。
 
 ## Task List
 
-### Phase 1: Lint Foundation
+### Phase 1: Foundation
 
-#### Task 1: Add Cargo dead-code deny
+#### Task 1: Add Toasty dependency plan and feature gates
 
-**Description:** 在 workspace Cargo 配置里启用 dead-code deny，并让 root package 与 `noloong-agent-core` 继承 workspace lint。删除或替换 `_standard_phase_ids`，确保没有任何 `#[allow(dead_code)]`。
+**Description:** 在 workspace dependency 层加入 Toasty SQLite 所需依赖，并通过 `sqlite-store` feature 隔离持久化 backend，保证默认 core 仍保持轻量。
 
 **Acceptance criteria:**
 
-- [ ] Root `Cargo.toml` 包含 workspace lint 配置，`dead_code` 为 deny。
-- [ ] `crates/noloong-agent-core/Cargo.toml` 继承 workspace lint。
-- [ ] 仓库内没有 `#[allow(dead_code)]` 或 `allow(dead_code)`。
+- [ ] `Cargo.toml` workspace dependencies 包含 Toasty 相关依赖，版本使用 `0.5` 系列。
+- [ ] `crates/noloong-agent-core/Cargo.toml` 新增 `sqlite-store` feature。
+- [ ] 默认 `cargo check -p noloong-agent-core` 不启用 Toasty/SQLite backend。
 
 **Verification:**
 
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `rg '#\[allow\([^\]]*dead_code|allow\(dead_code\)' Cargo.toml crates/noloong-agent-core`
+- [ ] `cargo check -p noloong-agent-core`
+- [ ] `cargo check -p noloong-agent-core --features sqlite-store`
 
 **Dependencies:** None
 
@@ -47,262 +57,208 @@
 
 - `Cargo.toml`
 - `crates/noloong-agent-core/Cargo.toml`
-- `crates/noloong-agent-core/src/runtime.rs`
 
 **Estimated scope:** Small
 
-### Checkpoint: Lint Foundation
+#### Task 2: Split store module and add store error variant
 
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo fmt --check`
-
-### Phase 2: Runtime Split
-
-#### Task 2: Split runtime approval and run-flow internals
-
-**Description:** 把 `runtime.rs` 转成 `runtime/mod.rs` facade，把 tool approval resume/timeout helpers 和 run loop/event commit internals 拆出，保持 `AgentRuntime` public methods 不变。
+**Description:** 将当前 `store.rs` 拆成 facade + memory backend，为 SQLite backend 提供明确模块边界，并添加持久化错误类型入口。
 
 **Acceptance criteria:**
 
-- [ ] `AgentRuntime`, `AgentRuntimeBuilder`, `AgentInput`, `RunReport`, `RuntimeQueues`, `AgentEventSink` 仍从 `noloong_agent_core` 原路径导出。
-- [ ] Tool approval pause/resume/timeout/abort 行为不变。
-- [ ] Runtime event sequencing、event sink、replay state 语义不变。
+- [ ] `EventStore` 和 `InMemoryEventStore` 仍从 `noloong_agent_core` 原 public path 导出。
+- [ ] `AgentCoreError::Store(String)` 可表达 SQLite/Toasty/schema/constraint 错误。
+- [ ] `InMemoryEventStore` 行为不变。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test agent`
-- [ ] `cargo test -p noloong-agent-core --test core tool_approval`
-- [ ] `cargo test -p noloong-agent-core --test conformance`
+- [ ] `cargo test -p noloong-agent-core --test runtime_core`
+- [ ] `cargo test -p noloong-agent-core --test conformance runtime_success_replay_matches_report_state`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/runtime.rs`
-- `crates/noloong-agent-core/src/runtime/mod.rs`
-- `crates/noloong-agent-core/src/runtime/approval.rs`
-- `crates/noloong-agent-core/src/runtime/run_loop.rs`
-- `crates/noloong-agent-core/src/runtime/builder.rs`
+- `crates/noloong-agent-core/src/store.rs`
+- `crates/noloong-agent-core/src/store/mod.rs`
+- `crates/noloong-agent-core/src/store/memory.rs`
+- `crates/noloong-agent-core/src/error.rs`
 
-**Estimated scope:** Medium
+**Estimated scope:** Small
 
-#### Task 3: Keep runtime builder registration isolated
+### Checkpoint: Foundation
 
-**Description:** 将 builder、extension capability validation、default phase construction 和 context compaction resolution 从 runtime facade 中拆出，避免 runtime facade 继续承担注册细节。
+- [ ] `cargo fmt --check`
+- [ ] `cargo check -p noloong-agent-core`
+- [ ] `cargo check -p noloong-agent-core --features sqlite-store`
+
+### Phase 2: SQLite EventStore
+
+#### Task 3: Define Toasty event model and schema initialization
+
+**Description:** 新增 SQLite event row model，并实现 `SqliteEventStoreConfig` 和 `SqliteEventStore::connect`。连接时按配置初始化 schema，默认支持 `sqlite::memory:` 和 `sqlite://path/to/db.sqlite`。
 
 **Acceptance criteria:**
 
-- [ ] Builder API 链式调用完全保持原签名。
-- [ ] Stdio extension capability duplicate validation 行为不变。
-- [ ] Context compaction registration 和 default phase insertion 行为不变。
+- [ ] `SqliteEventStoreConfig` 至少包含 `database_url` 和 `migrate_on_connect`。
+- [ ] `SqliteEventStore::connect(config)` 返回可 clone/share 的 store 实例。
+- [ ] Schema 使用 `(run_id, sequence)` composite primary key，提供唯一性和按 run replay 的稳定顺序。
+- [ ] 若 `migrate_on_connect = false` 且 schema 不存在，connect 或首次访问必须返回清晰 `AgentCoreError::Store`。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test extension_conformance`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc_conformance public_runner_strict_fixture_passes`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store connect_in_memory_sqlite_store`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store connect_file_sqlite_store`
 
 **Dependencies:** Task 2
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/runtime/builder.rs`
-- `crates/noloong-agent-core/src/runtime/mod.rs`
-- `crates/noloong-agent-core/src/runtime/compaction.rs`
+- `crates/noloong-agent-core/src/store/sqlite.rs`
+- `crates/noloong-agent-core/src/store/mod.rs`
+- `crates/noloong-agent-core/tests/sqlite_store.rs`
 
 **Estimated scope:** Medium
 
-### Checkpoint: Runtime Split
+#### Task 4: Implement append/load contract
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo test -p noloong-agent-core --test agent`
-- [ ] `cargo test -p noloong-agent-core --test conformance`
-
-### Phase 3: Phase Split
-
-#### Task 4: Split phase facade and standard phases
-
-**Description:** 把 `phase.rs` 转成 `phase/mod.rs` facade，保留 phase constants、`PhaseContext`、`PhaseScratch`、`PhaseOutput`、`PhaseNode`、`StandardPhase` 的公开位置；把 context/model/assistant/turn standard phase implementation 拆到子模块。
+**Description:** 实现 `EventStore` for `SqliteEventStore`，把完整 `AgentEvent` JSON 持久化，同时用索引列保证 replay 顺序和错误可诊断性。
 
 **Acceptance criteria:**
 
-- [ ] `lib.rs` 的 phase re-export 不需要对外改变。
-- [ ] Standard phase IDs、phase order 和 insertion behavior 不变。
-- [ ] Context compaction、model request prepare、model stream、assistant commit 行为不变。
+- [ ] `append` 单事件写入，不 upsert。
+- [ ] Duplicate `(run_id, sequence)` 返回 `AgentCoreError::Store`。
+- [ ] `load(run_id)` 按 `sequence ASC` 返回完整事件。
+- [ ] 反序列化失败时返回包含 run id 和 sequence 的 store error。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test phase_hooks`
-- [ ] `cargo test -p noloong-agent-core --test compaction`
-- [ ] `cargo test -p noloong-agent-core --test core phase`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store append_and_load_orders_by_sequence`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store duplicate_sequence_is_rejected`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test core event_log_replays_to_report_state`
 
-**Dependencies:** Task 1
+**Dependencies:** Task 3
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/phase.rs`
-- `crates/noloong-agent-core/src/phase/mod.rs`
-- `crates/noloong-agent-core/src/phase/standard.rs`
-- `crates/noloong-agent-core/src/phase/hooks.rs`
-- `crates/noloong-agent-core/src/phase/assistant.rs`
+- `crates/noloong-agent-core/src/store/sqlite.rs`
+- `crates/noloong-agent-core/tests/sqlite_store.rs`
 
 **Estimated scope:** Medium
 
-#### Task 5: Split tool execution and approval continuation
+### Checkpoint: SQLite EventStore
 
-**Description:** 将 `tool.execute`、parallel/sequential prepared execution、approval preflight、approval continuation resume、tool output helpers 拆入独立子模块，保留现有 source-order commit 和 approval pause semantics。
+- [ ] `cargo fmt --check`
+- [ ] `cargo clippy -p noloong-agent-core --all-targets --features sqlite-store -- -D warnings`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+
+### Phase 3: Runtime Persistence Scenarios
+
+#### Task 5: Test durable replay across store instances
+
+**Description:** 验证 SQLite store 不是只在同一个 handle 内可用：同一个 DB 文件由第二个 store 实例重新连接后，仍能 load 并 replay 原 run。
 
 **Acceptance criteria:**
 
-- [ ] Parallel tool execution completion order 和 commit source order 测试仍通过。
-- [ ] Tool approval preflight 并发测试仍通过。
-- [ ] Approval resume 后 audit、tool output、run status replay 不变。
+- [ ] Runtime A 使用 file SQLite store 完成一个普通 run。
+- [ ] Runtime B 重新连接同一 DB 文件后 load 同一 run。
+- [ ] `reduce_events(events)` 与 Runtime A 的 report state 一致。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test core tool`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc stdio_tool_call_hook_can_pause_for_approval_and_resume`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store durable_replay_survives_store_reconnect`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/phase/tool.rs`
-- `crates/noloong-agent-core/src/phase/mod.rs`
-- `crates/noloong-agent-core/src/runtime/approval.rs`
+- `crates/noloong-agent-core/tests/sqlite_store.rs`
 
-**Estimated scope:** Medium
+**Estimated scope:** Small
 
-### Checkpoint: Phase Split
+#### Task 6: Test approval resume crash recovery with SQLite
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo test -p noloong-agent-core --test core`
-- [ ] `cargo test -p noloong-agent-core --test phase_hooks`
-- [ ] `cargo test -p noloong-agent-core --test compaction`
-
-### Phase 4: Types And JSON-RPC Split
-
-#### Task 6: Split public type modules without changing re-exports
-
-**Description:** 把 `types.rs` 拆成 `types/mod.rs` facade，以及 event/state、message/media/thinking、tool/approval、model/hook、extension capability 子模块。所有 public type 名称和 serde 行为保持不变。
+**Description:** 用 SQLite store 覆盖当前最关键的持久化恢复路径：tool approval pause 后，换一个 runtime 实例 resume 并完成。
 
 **Acceptance criteria:**
 
-- [ ] `pub use types::*` 仍导出同一组 public items。
-- [ ] Existing serde round-trip tests 不需要改期望值。
-- [ ] Event replay 和 extension docs contract 不受影响。
+- [ ] Runtime A 跑到 `RunStatus::Paused`，pending approval 写入 SQLite。
+- [ ] Runtime B 使用同一 SQLite DB 调用 `resume_tool_approvals`。
+- [ ] replay state 包含 approval resolved/expired、run resumed、tool output 和 run completed。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test core permission_events_serde_round_trip`
-- [ ] `cargo test -p noloong-agent-core --test extension_docs_contract`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc_conformance`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store approval_resume_survives_runtime_restart`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test tool_flow tool_approval_pauses_and_crash_recovers_on_resume`
 
-**Dependencies:** Tasks 2, 4
+**Dependencies:** Task 5
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/types.rs`
-- `crates/noloong-agent-core/src/types/mod.rs`
-- `crates/noloong-agent-core/src/types/events.rs`
-- `crates/noloong-agent-core/src/types/messages.rs`
-- `crates/noloong-agent-core/src/types/tools.rs`
+- `crates/noloong-agent-core/tests/sqlite_store.rs`
 
 **Estimated scope:** Medium
 
-#### Task 7: Split JSON-RPC bridge internals
+### Checkpoint: Runtime Persistence
 
-**Description:** 把 `jsonrpc.rs` 拆成 stdio process/connection、adapter implementations、hook payloads、wire DTOs 四类模块。`StdioExtension` 和 `StdioExtensionConfig` 公开 API 保持不变。
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test conformance`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test tool_flow`
+
+### Phase 4: Documentation and Final Verification
+
+#### Task 7: Update architecture docs and roadmap
+
+**Description:** 更新架构文档，记录 SQL-first 决策、SQLite backend 的一致性 contract，以及 OpenDAL 的非 v1 定位。
 
 **Acceptance criteria:**
 
-- [ ] JSON-RPC request/response/error handling 行为不变。
-- [ ] Model stream notification buffering、timeout 和 cancellation 行为不变。
-- [ ] Tool hook approval wire output 仍通过 strict conformance。
+- [ ] `ARCHITECTURE.md` 描述 `SqliteEventStore` 和强 append contract。
+- [ ] “后续演进方向” 将 PostgreSQL 标记为下一步 SQL backend。
+- [ ] 文档明确 OpenDAL 未来可用于 object archive/object backend，但不作为 v1 primary event store。
+- [ ] Toasty 参考链接出现在文档或计划中，便于实现者查 API。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc_conformance`
-- [ ] `cargo test -p noloong-agent-core --test extension_language_examples`
+- [ ] `cargo test -p noloong-agent-core --test extension_docs_contract`
+- [ ] Manual check: docs mention SQL-first and Toasty references.
 
 **Dependencies:** Task 6
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/jsonrpc.rs`
-- `crates/noloong-agent-core/src/jsonrpc/mod.rs`
-- `crates/noloong-agent-core/src/jsonrpc/process.rs`
-- `crates/noloong-agent-core/src/jsonrpc/adapters.rs`
-- `crates/noloong-agent-core/src/jsonrpc/wire.rs`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `plans/CURRENT_PLAN.md`
 
-**Estimated scope:** Medium
-
-### Checkpoint: Types And JSON-RPC
-
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc_conformance`
-
-### Phase 5: Test Suite Split
-
-#### Task 8: Split core tests by behavior
-
-**Description:** 将 `tests/core.rs` 中的 mixed tests 拆成行为域测试文件，并将共享 fixtures/helpers 放入 `tests/support`。尽量保留原测试函数名，便于历史失败定位。
-
-**Acceptance criteria:**
-
-- [ ] `tests/core.rs` 不再承担所有 core behavior tests。
-- [ ] Shared helpers 不复制粘贴到多个测试文件。
-- [ ] 测试覆盖不减少，原有关键测试名称保留或迁移后可 grep。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent-core --test core`
-- [ ] `cargo nextest run -p noloong-agent-core`
-
-**Dependencies:** Tasks 2, 4, 6
-
-**Files likely touched:**
-
-- `crates/noloong-agent-core/tests/core.rs`
-- `crates/noloong-agent-core/tests/runtime_core.rs`
-- `crates/noloong-agent-core/tests/tool_flow.rs`
-- `crates/noloong-agent-core/tests/media_flow.rs`
-- `crates/noloong-agent-core/tests/support/mod.rs`
-
-**Estimated scope:** Medium
+**Estimated scope:** Small
 
 ### Final Checkpoint
 
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - [ ] `cargo nextest run --workspace`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc`
-- [ ] `cargo test -p noloong-agent-core --test jsonrpc_conformance`
-- [ ] `cargo test -p noloong-agent-core --test phase_hooks`
-- [ ] `cargo test -p noloong-agent-core --test extension_language_examples`
-- [ ] `rg '#\[allow\([^\]]*dead_code|allow\(dead_code\)' Cargo.toml crates/noloong-agent-core`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test conformance`
 - [ ] `git diff --check`
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Public re-export drift | High | Keep facade modules and `lib.rs` exports stable; verify with full test suite |
-| Serde wire shape drift | High | Do not rename fields/tags; run JSON-RPC and docs contract tests after type split |
-| Event replay behavior drift | High | Keep reducer/event tests green after every runtime/phase checkpoint |
-| Circular module dependencies | Medium | Put shared structs in facade or small internal modules; prefer `pub(super)` over broad `pub(crate)` |
-| Test split loses coverage | Medium | Move tests first with same names; avoid rewriting test logic during split |
-| `dead_code = deny` exposes unused helpers in examples/tests | Medium | Delete unused code or make it used; do not add allow attributes |
+| Toasty 0.x API churn | Medium | Keep SQLite backend isolated behind `sqlite-store`; use official guide/docs links before implementation |
+| Toasty schema API may not expose the exact migration primitive needed | Medium | First implementation task must inspect Toasty examples/source; if needed, keep schema init in a small SQL-specific helper behind the same backend |
+| Duplicate sequence handling differs across drivers | High | Treat duplicate append as required behavior; add explicit test now so PostgreSQL must match later |
+| Runtime event counter is process-local | Medium | Keep current runtime behavior for v1; SQLite enforces duplicate `(run_id, sequence)` instead of silently accepting conflicts |
+| JSON payload grows with large tool/media events | Medium | Accept for v1; object archive/media store is a later design, not part of SQLite event store |
+| Tests may need temporary DB files | Low | Use temp directories and unique DB paths; avoid checked-in artifacts |
 
 ## Parallelization Opportunities
 
-- Runtime split and phase split can be worked in separate branches only after Task 1, but they both touch imports and should be merged carefully.
-- Type split should wait until runtime and phase module boundaries settle, because many modules import public core types.
-- Test split can start after the production module split stabilizes; otherwise helper import churn will dominate.
+- Task 1 and Toasty source/docs exploration can happen together.
+- Task 5 and Task 6 tests should wait until Task 4 append/load is green.
+- Documentation can be drafted after Task 3, but final wording should wait until SQLite behavior tests are stable.
 
 ## Open Questions
 
-- None. Scope is locked to Core first for this pass; provider adapter file splitting is a later plan.
+- None. Direction is locked to Toasty-backed SQLite v1 with strong append consistency.

@@ -10,10 +10,13 @@ edition = "2024"
 noloong-agent-core = { path = "crates/noloong-agent-core" }
 bytes = "1.11"
 memchr = "2.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rusqlite = "0.39"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1.52", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+toasty = { version = "0.5", default-features = false, features = ["sqlite"] }
+toasty-driver-sqlite = "0.5"
 
 [workspace.lints.rust]
 dead_code = "deny"

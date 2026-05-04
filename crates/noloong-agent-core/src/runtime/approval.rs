@@ -2,6 +2,7 @@ use super::{
     AgentEventSink, AgentRuntime, PhaseRecordResult, RunFlow, RunReport, RunTurnContext,
     RunTurnCursor, RuntimeQueues,
 };
+use crate::clock;
 use crate::phase::resume_tool_approval_continuation;
 use crate::reducer::reduce_events;
 use crate::{
@@ -11,11 +12,7 @@ use crate::{
     ToolPermissionOutcome,
 };
 use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug)]
 struct ResolvedToolApproval {
@@ -371,8 +368,5 @@ fn timeout_tool_approval_resolution(
 }
 
 fn current_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
+    clock::current_unix_ms().unwrap_or_default()
 }

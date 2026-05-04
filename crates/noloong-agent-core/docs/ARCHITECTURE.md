@@ -33,7 +33,7 @@
 - `src/phase.rs`：标准 phase graph 和默认 phase 实现。
 - `src/runtime.rs`：`AgentRuntime`、builder、turn loop、事件记录、phase 执行。
 - `src/reducer.rs`：event replay 和 effect validation。
-- `src/store.rs`：`EventStore` trait 和 `InMemoryEventStore`。
+- `src/store/`：`EventStore` trait、`InMemoryEventStore`，以及 feature-gated 的持久化 backend。
 - `src/agent.rs`：有状态 `Agent` UX layer。
 - `src/jsonrpc.rs`：stdio JSON-RPC extension bridge。
 - `src/chat_completions.rs`：内置 OpenAI-compatible Chat Completions provider。
@@ -122,7 +122,31 @@ PhaseOutput.effects
 
 reducer 会校验 retained/dropped id 覆盖当前 messages，且 summary message id 是新的 system message。提交后，`AgentState.messages` 变为 `[summary_message] + retained_messages`。这让 compaction 后的 state 仍然可以从 event log 精确 replay，而不是在内存中偷偷裁剪历史。
 
-当前默认 store 是 `InMemoryEventStore`，但 `EventStore` trait 只有 `append` 和 `load`，后续替换为 SQLite、PostgreSQL、object store 或 append-only log 都比较直接。
+当前默认 store 是 `InMemoryEventStore`。启用 `sqlite-store` feature 后，crate 还导出内置 `SqliteEventStore` 和 `SqliteEventStoreConfig`。`EventStore` trait 仍然只有 `append(event)` 和 `load(run_id)` 两个方法，因此 runtime、approval resume 和 reducer 不需要知道底层是内存还是持久化 SQL。
+
+SQLite backend 采用 SQL-first 设计，v1 不引入 OpenDAL 作为 primary event log。原因是 agent event store 的核心语义是强一致 append 和按 run replay，而不是 blob/object 的最终一致读写。当前 SQLite row 持久化完整 `AgentEvent` JSON，同时拆出以下列用于审计和查询：
+
+- `run_id`
+- `sequence`
+- `turn_id`
+- `phase`
+- `kind_type`
+- `created_at_ms`
+
+`SqliteEventStore` 使用 Toasty 0.5 和 `toasty-driver-sqlite` 管理模型 schema。`(run_id, sequence)` 是 Toasty composite primary key，因此重复 append 同一个 run 的同一 sequence 会失败，而不是 upsert 或覆盖已有事件。`load(run_id)` 始终按 `sequence ASC` 返回完整事件，再由 `reduce_events(events)` 恢复 `AgentState`。
+
+`SqliteEventStoreConfig` 包含：
+
+- `database_url`：支持 `sqlite::memory:`、`sqlite://memory`、`sqlite:<path>`、`sqlite://<path>` 和直接文件路径。
+- `migrate_on_connect`：默认 `true`，空库连接时初始化 schema；重连已初始化文件库时会检测 table 并跳过重复建表。设为 `false` 时只适合连接已初始化的文件库，schema 缺失会在 connect 阶段返回 `AgentCoreError::Store`。
+
+Toasty 参考入口：
+
+- GitHub: <https://github.com/tokio-rs/toasty/tree/main>
+- docs.rs: <https://docs.rs/toasty>
+- Guide: <https://tokio-rs.github.io/toasty/nightly/guide/>
+
+OpenDAL 后续仍有价值，但更适合作为 object archive/object backend 的访问层，例如把大体积 event archive、transcript snapshot、media blob 或冷数据放到 S3/GCS/FS。若未来需要 OpenDAL-backed event store，必须额外设计 manifest、locking、append CAS、compaction 和 replay index，而不是把 object store 直接等同于强一致 SQL log。
 
 ## AgentState 和消息模型
 
@@ -1333,7 +1357,7 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 
 比较自然的后续扩展方向：
 
-1. 持久化 event store：SQLite/PostgreSQL/object store。
+1. PostgreSQL event store：复用当前 SQL-first contract，把 SQLite 的 Toasty schema、append uniqueness、replay ordering 推广到 PostgreSQL backend。
 2. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
 3. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
 4. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。

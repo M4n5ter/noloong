@@ -1,13 +1,7 @@
-use crate::{AgentEvent, Result, RunId};
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+use super::{EventStore, StoreFuture};
+use crate::{AgentEvent, RunId};
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
-
-pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
-
-pub trait EventStore: Send + Sync {
-    fn append<'a>(&'a self, event: AgentEvent) -> StoreFuture<'a, ()>;
-    fn load<'a>(&'a self, run_id: &'a str) -> StoreFuture<'a, Vec<AgentEvent>>;
-}
 
 #[derive(Clone, Default)]
 pub struct InMemoryEventStore {

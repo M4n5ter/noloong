@@ -3,6 +3,7 @@
 mod agent;
 mod anthropic_messages;
 mod chat_completions;
+mod clock;
 mod compaction;
 mod error;
 mod extension_conformance;
@@ -65,4 +66,6 @@ pub use runtime::{
 };
 pub use sse::SseReconnectConfig;
 pub use store::{EventStore, InMemoryEventStore};
+#[cfg(feature = "sqlite-store")]
+pub use store::{SqliteEventStore, SqliteEventStoreConfig};
 pub use types::*;
