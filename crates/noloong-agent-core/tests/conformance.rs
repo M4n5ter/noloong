@@ -2,10 +2,8 @@ use noloong_agent_core::{
     Agent, AgentCoreError, AgentEventKind, AgentInput, AgentMessage, AgentRuntime, BoxFuture,
     CancellationToken, ContentBlock, EventStore, InMemoryEventStore, MessageRole, ModelProvider,
     ModelRequest, ModelStreamEvent, ModelStreamSink, QueueMode, Result, RunStatus,
-    StdioExtensionConfig, StopReason, ToolCall, ToolExecutionMode, ToolOutput, ToolProvider,
-    ToolRequest, ToolSpec, reduce_events,
+    StdioExtensionConfig, StopReason, ToolExecutionMode, reduce_events,
 };
-use serde_json::json;
 use std::{
     sync::{
         Arc,
@@ -20,7 +18,10 @@ use tokio::{
 
 pub mod support;
 
-use support::fixture_path;
+use support::{
+    core::{DelayedTool, FailingModel, TwoToolModel, two_tool_events},
+    fixture_path,
+};
 
 #[tokio::test]
 async fn runtime_success_replay_matches_report_state() -> Result<()> {
@@ -230,13 +231,8 @@ async fn steering_waits_until_tool_batch_completes() -> Result<()> {
         .with_tool(Arc::new(DelayedTool::new(
             "slow",
             Duration::from_millis(50),
-            None,
         )))
-        .with_tool(Arc::new(DelayedTool::new(
-            "fast",
-            Duration::from_millis(0),
-            None,
-        )))
+        .with_tool(Arc::new(DelayedTool::new("fast", Duration::from_millis(0))))
         .build()?;
     let steering_agent = agent.clone();
     let steered = Arc::new(AtomicBool::new(false));
@@ -398,16 +394,12 @@ async fn committed_tool_names(
 ) -> Result<Vec<String>> {
     let runtime = AgentRuntime::builder()
         .with_model_provider(Arc::new(TwoToolModel))
-        .with_tool(Arc::new(DelayedTool::new(
+        .with_tool(Arc::new(DelayedTool::new_with_mode(
             "slow",
             Duration::from_millis(25),
             slow_tool_mode,
         )))
-        .with_tool(Arc::new(DelayedTool::new(
-            "fast",
-            Duration::from_millis(0),
-            None,
-        )))
+        .with_tool(Arc::new(DelayedTool::new("fast", Duration::from_millis(0))))
         .with_tool_execution_mode(mode)
         .max_turns(1)
         .build()?;
@@ -447,31 +439,6 @@ impl ModelProvider for TextModel {
                     stop_reason: StopReason::Stop,
                 },
             ];
-            for event in &events {
-                stream(event.clone()).await?;
-            }
-            Ok(events)
-        })
-    }
-}
-
-struct FailingModel;
-
-impl ModelProvider for FailingModel {
-    fn id(&self) -> &str {
-        "failing"
-    }
-
-    fn stream_model<'a>(
-        &'a self,
-        _request: ModelRequest,
-        stream: ModelStreamSink,
-        _cancellation: CancellationToken,
-    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
-        Box::pin(async move {
-            let events = vec![ModelStreamEvent::Failed {
-                error: "model failed".into(),
-            }];
             for event in &events {
                 stream(event.clone()).await?;
             }
@@ -556,7 +523,7 @@ impl ModelProvider for ToolBatchModel {
         Box::pin(async move {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let events = if call == 0 {
-                two_tool_events()
+                two_tool_events("two-tool-stream")
             } else {
                 let tool_result_count = request
                     .messages
@@ -586,102 +553,6 @@ impl ModelProvider for ToolBatchModel {
                 stream(event.clone()).await?;
             }
             Ok(events)
-        })
-    }
-}
-
-struct TwoToolModel;
-
-impl ModelProvider for TwoToolModel {
-    fn id(&self) -> &str {
-        "two-tool"
-    }
-
-    fn stream_model<'a>(
-        &'a self,
-        _request: ModelRequest,
-        stream: ModelStreamSink,
-        _cancellation: CancellationToken,
-    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
-        Box::pin(async move {
-            let events = two_tool_events();
-            for event in &events {
-                stream(event.clone()).await?;
-            }
-            Ok(events)
-        })
-    }
-}
-
-fn two_tool_events() -> Vec<ModelStreamEvent> {
-    vec![
-        ModelStreamEvent::Started {
-            stream_id: "two-tool-stream".into(),
-        },
-        ModelStreamEvent::ToolCall {
-            tool_call: ToolCall {
-                id: "slow-call".into(),
-                name: "slow".into(),
-                arguments: json!({}),
-            },
-        },
-        ModelStreamEvent::ToolCall {
-            tool_call: ToolCall {
-                id: "fast-call".into(),
-                name: "fast".into(),
-                arguments: json!({}),
-            },
-        },
-        ModelStreamEvent::Finished {
-            stop_reason: StopReason::ToolUse,
-        },
-    ]
-}
-
-struct DelayedTool {
-    name: &'static str,
-    delay: Duration,
-    execution_mode: Option<ToolExecutionMode>,
-}
-
-impl DelayedTool {
-    fn new(name: &'static str, delay: Duration, execution_mode: Option<ToolExecutionMode>) -> Self {
-        Self {
-            name,
-            delay,
-            execution_mode,
-        }
-    }
-}
-
-impl ToolProvider for DelayedTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: self.name.into(),
-            description: "Conformance delayed tool".into(),
-            input_schema: json!({ "type": "object" }),
-            execution_mode: self.execution_mode,
-            permissions: Vec::new(),
-        }
-    }
-
-    fn execute_tool<'a>(
-        &'a self,
-        _request: ToolRequest,
-        cancellation: CancellationToken,
-    ) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            cancellation.throw_if_cancelled()?;
-            sleep(self.delay).await;
-            cancellation.throw_if_cancelled()?;
-            Ok(ToolOutput {
-                content: vec![ContentBlock::Text {
-                    text: self.name.into(),
-                }],
-                details: json!({}),
-                is_error: false,
-                updates: Vec::new(),
-            })
         })
     }
 }

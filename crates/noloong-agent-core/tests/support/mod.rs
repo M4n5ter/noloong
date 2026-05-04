@@ -1,3 +1,4 @@
+pub mod core;
 use noloong_agent_core::{
     AgentEventKind, AgentMessage, AgentState, BoxFuture, CancellationToken, ContentBlock,
     MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig, StdioExtensionConfig,
