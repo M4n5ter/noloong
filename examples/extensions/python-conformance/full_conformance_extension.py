@@ -118,6 +118,14 @@ def run_phase_hook(params: JsonDict, _context: ExtensionContext) -> JsonDict:
 def run_tool_hook(params: JsonDict, _context: ExtensionContext) -> JsonDict:
     require_hook(params, TOOL_HOOK_ID)
     if params.get("hookPoint") == "before_tool_call":
+        if state_has_user_text(params, "approval"):
+            return {
+                "approval": {
+                    "prompt": "Approve Python conformance tool?",
+                    "reason": "Python conformance approval case",
+                    "metadata": {"example": "python"},
+                }
+            }
         return {
             "decision": {
                 "outcome": "allow",
@@ -148,6 +156,24 @@ def finish_event(stop_reason: str) -> JsonDict:
 
 def has_tool_result(messages: Any) -> bool:
     return isinstance(messages, list) and any(record(message).get("role") == "tool_result" for message in messages)
+
+
+def state_has_user_text(params: JsonDict, expected: str) -> bool:
+    state = record(params.get("state"))
+    messages = state.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message_value in messages:
+        message = record(message_value)
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            record(block).get("type") == "text" and record(block).get("text") == expected
+            for block in content
+        ):
+            return True
+    return False
 
 
 def require_hook(params: JsonDict, expected_id: str) -> None:

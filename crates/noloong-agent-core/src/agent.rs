@@ -2,8 +2,8 @@ use crate::{
     AgentCoreError, AgentEvent, AgentEventSink, AgentInput, AgentMessage, AgentRuntime,
     AgentRuntimeBuilder, AgentState, CancellationToken, CompactionSummarizer,
     ContextCompactionConfig, ContextProvider, EventSinkFuture, ModelProvider, PhaseHook, QueueMode,
-    Result, RuntimeQueues, StdioExtensionConfig, TokenEstimator, ToolCallHook, ToolExecutionMode,
-    ToolProvider, apply_event,
+    Result, RunReport, RuntimeQueues, StdioExtensionConfig, TokenEstimator, ToolApprovalResolution,
+    ToolCallHook, ToolExecutionMode, ToolProvider, apply_event,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -108,6 +108,32 @@ impl Agent {
         self.start_run(None).await
     }
 
+    pub async fn resume_tool_approval(&self, resolution: ToolApprovalResolution) -> Result<()> {
+        self.resume_tool_approvals(vec![resolution]).await
+    }
+
+    pub async fn resume_tool_approvals(
+        &self,
+        resolutions: Vec<ToolApprovalResolution>,
+    ) -> Result<()> {
+        let run_id = {
+            let state = self.inner.state.lock().await;
+            if !matches!(state.status, crate::RunStatus::Paused) {
+                return Err(AgentCoreError::Phase("agent is not paused".into()));
+            }
+            state
+                .run_id
+                .clone()
+                .ok_or_else(|| AgentCoreError::Phase("paused agent has no run id".into()))?
+        };
+        self.resume_tool_approvals_for_run(run_id, resolutions)
+            .await
+    }
+
+    pub async fn resume_due_tool_approval_timeouts(&self) -> Result<()> {
+        self.resume_tool_approvals(Vec::new()).await
+    }
+
     pub async fn reset(&self) {
         let mut state = self.inner.state.lock().await;
         *state = AgentState::default();
@@ -116,6 +142,12 @@ impl Agent {
 
     pub async fn state(&self) -> AgentState {
         self.inner.state.lock().await.clone()
+    }
+
+    pub async fn pending_tool_approvals(
+        &self,
+    ) -> BTreeMap<crate::ToolApprovalId, crate::ToolApprovalRequest> {
+        self.inner.state.lock().await.pending_tool_approvals.clone()
     }
 
     pub fn subscribe<F, Fut>(&self, listener: F) -> u64
@@ -143,6 +175,21 @@ impl Agent {
     pub async fn abort(&self) {
         if let Some(cancellation) = self.inner.active_run.lock().await.as_ref() {
             cancellation.cancel();
+            return;
+        }
+        let paused_run_id = {
+            let state = self.inner.state.lock().await;
+            matches!(state.status, crate::RunStatus::Paused)
+                .then(|| state.run_id.clone())
+                .flatten()
+        };
+        if let Some(run_id) = paused_run_id {
+            let _ = self
+                .inner
+                .runtime
+                .abort_paused_run(run_id, Some(self.event_sink()))
+                .await;
+            self.inner.idle.notify_waiters();
         }
     }
 
@@ -209,6 +256,68 @@ impl Agent {
     }
 
     async fn start_run(&self, input: Option<AgentInput>) -> Result<()> {
+        self.run_exclusive(
+            |runtime, initial_state, sink, cancellation, queues| async move {
+                match input {
+                    Some(input) => {
+                        runtime
+                            .run_from_state_with_queues(
+                                input,
+                                initial_state,
+                                Some(sink),
+                                cancellation,
+                                queues,
+                            )
+                            .await
+                    }
+                    None => {
+                        runtime
+                            .continue_from_state_with_queues(
+                                initial_state,
+                                Some(sink),
+                                cancellation,
+                                queues,
+                            )
+                            .await
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    async fn resume_tool_approvals_for_run(
+        &self,
+        run_id: String,
+        resolutions: Vec<ToolApprovalResolution>,
+    ) -> Result<()> {
+        self.run_exclusive(
+            |runtime, _initial_state, sink, cancellation, queues| async move {
+                runtime
+                    .resume_tool_approvals_with_queues(
+                        run_id,
+                        resolutions,
+                        Some(sink),
+                        cancellation,
+                        queues,
+                    )
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn run_exclusive<F, Fut>(&self, operation: F) -> Result<()>
+    where
+        F: FnOnce(
+            Arc<AgentRuntime>,
+            AgentState,
+            AgentEventSink,
+            CancellationToken,
+            Arc<AgentInner>,
+        ) -> Fut,
+        Fut: Future<Output = Result<RunReport>>,
+    {
         let cancellation = CancellationToken::new();
         {
             let mut active_run = self.inner.active_run.lock().await;
@@ -220,31 +329,14 @@ impl Agent {
 
         let initial_state = self.inner.state.lock().await.clone();
         let sink = self.event_sink();
-        let result = match input {
-            Some(input) => {
-                self.inner
-                    .runtime
-                    .run_from_state_with_queues(
-                        input,
-                        initial_state,
-                        Some(sink),
-                        cancellation,
-                        self.inner.clone(),
-                    )
-                    .await
-            }
-            None => {
-                self.inner
-                    .runtime
-                    .continue_from_state_with_queues(
-                        initial_state,
-                        Some(sink),
-                        cancellation,
-                        self.inner.clone(),
-                    )
-                    .await
-            }
-        };
+        let result = operation(
+            Arc::clone(&self.inner.runtime),
+            initial_state,
+            sink,
+            cancellation,
+            Arc::clone(&self.inner),
+        )
+        .await;
 
         if let Ok(report) = &result {
             let mut state = self.inner.state.lock().await;

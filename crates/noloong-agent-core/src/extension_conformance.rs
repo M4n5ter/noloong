@@ -1,7 +1,8 @@
 use crate::{
     AgentCoreError, AgentEventKind, AgentMessage, AgentRuntime, AgentState, CancellationToken,
     ContentBlock, ContextCompactionConfig, ExtensionCapability, MessageRole, ModelStreamEvent,
-    Result, RunReport, StdioExtension, StdioExtensionConfig, ToolPermissionOutcome,
+    Result, RunReport, StdioExtension, StdioExtensionConfig, ToolApprovalResolution,
+    ToolPermissionDecision, ToolPermissionOutcome,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
 use std::{collections::BTreeSet, time::Instant};
@@ -18,9 +19,14 @@ const CASE_LIFECYCLE: &str = "lifecycle";
 const CASE_RUNTIME_REGISTRATION: &str = "runtime_registration";
 const CASE_STANDARD_CAPABILITIES: &str = "standard_capabilities";
 const CASE_ADAPTER_PAYLOADS: &str = "adapter_payloads";
+const CASE_TOOL_APPROVAL: &str = "tool_approval";
 const CASE_COMPACTION_SUMMARIZER: &str = "compaction_summarizer";
 
-const FULL_CASES: &[&str] = &[CASE_ADAPTER_PAYLOADS, CASE_COMPACTION_SUMMARIZER];
+const FULL_CASES: &[&str] = &[
+    CASE_ADAPTER_PAYLOADS,
+    CASE_TOOL_APPROVAL,
+    CASE_COMPACTION_SUMMARIZER,
+];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -273,16 +279,27 @@ pub async fn run_extension_conformance(
             compaction_summarizer_case(&config.stdio),
         )
         .await;
+        if should_stop(&report, config.fail_fast) {
+            return Ok(report);
+        }
+        run_case(
+            &mut report,
+            CASE_TOOL_APPROVAL,
+            tool_approval_case(&config.stdio),
+        )
+        .await;
     } else {
-        let (adapter_payloads, compaction_summarizer) = tokio::join!(
+        let (adapter_payloads, compaction_summarizer, tool_approval) = tokio::join!(
             evaluate_case(CASE_ADAPTER_PAYLOADS, adapter_payloads_case(&config.stdio)),
             evaluate_case(
                 CASE_COMPACTION_SUMMARIZER,
                 compaction_summarizer_case(&config.stdio)
-            )
+            ),
+            evaluate_case(CASE_TOOL_APPROVAL, tool_approval_case(&config.stdio))
         );
         report.push(adapter_payloads.0);
         report.push(compaction_summarizer.0);
+        report.push(tool_approval.0);
     }
 
     Ok(report)
@@ -435,6 +452,70 @@ async fn adapter_payloads_case(stdio: &StdioExtensionConfig) -> Result<()> {
             )
         }),
         "model provider did not emit text deltas",
+    )
+}
+
+async fn tool_approval_case(stdio: &StdioExtensionConfig) -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_stdio_extension(stdio.clone())
+        .await?
+        .max_turns(2)
+        .build()?;
+    let paused = runtime.run("approval").await?;
+    ensure(
+        matches!(paused.state.status, crate::RunStatus::Paused),
+        "tool approval run did not pause",
+    )?;
+    ensure(
+        paused.state.pending_tool_approvals.len() == 1,
+        "tool approval run did not expose exactly one pending approval",
+    )?;
+    let approval_id = paused
+        .state
+        .pending_tool_approvals
+        .keys()
+        .next()
+        .cloned()
+        .ok_or_else(|| AgentCoreError::JsonRpc("tool approval id missing".into()))?;
+    ensure(
+        paused.events.iter().any(|event| {
+            matches!(&event.kind, AgentEventKind::ToolApprovalRequested { approval }
+                if approval.hook_id.as_deref() == Some(CONFORMANCE_TOOL_CALL_HOOK_ID))
+        }),
+        "tool approval request event missing",
+    )?;
+
+    let report = runtime
+        .resume_tool_approvals(
+            &paused.run_id,
+            vec![ToolApprovalResolution {
+                approval_id,
+                decision: ToolPermissionDecision {
+                    outcome: ToolPermissionOutcome::Allow,
+                    reason: Some("approved by conformance runner".into()),
+                    approver: Some("conformance-runner".into()),
+                    metadata: serde_json::json!({}),
+                },
+            }],
+            None,
+            CancellationToken::new(),
+        )
+        .await?;
+    ensure_assistant_text_contains(&report, "adapter complete")?;
+    ensure(
+        report.events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                AgentEventKind::ToolPermissionDecided {
+                    hook_id,
+                    decision,
+                    ..
+                } if hook_id.as_deref() == Some(CONFORMANCE_TOOL_CALL_HOOK_ID)
+                    && decision.outcome == ToolPermissionOutcome::Allow
+                    && decision.approver.as_deref() == Some("conformance-runner")
+            )
+        }),
+        "tool approval decision was not replayed into permission audit",
     )
 }
 

@@ -3,7 +3,8 @@ use noloong_agent_core::{
     AgentRuntimeBuilder, BoxFuture, CancellationToken, ContentBlock, ContextCompactionConfig,
     ContextPatch, EventStore, InMemoryEventStore, MediaEncoding, MediaKind, MediaSource,
     MessageRole, ModelStreamEvent, PhaseHook, Result, RunStatus, StdioExtension,
-    StdioExtensionConfig, ToolPermissionOutcome, reduce_events,
+    StdioExtensionConfig, ToolApprovalResolution, ToolPermissionDecision, ToolPermissionOutcome,
+    reduce_events,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -474,6 +475,74 @@ async fn stdio_tool_call_hook_can_allow_and_audit_tool_execution() -> Result<()>
         )
     }));
     assert_assistant_text_contains(&report, "done from fixture");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_tool_call_hook_can_pause_for_approval_and_resume() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let event_store = Arc::new(InMemoryEventStore::new());
+    let builder = AgentRuntime::builder()
+        .with_event_store(event_store)
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--tool-hook-mode=approval".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(4).build()?;
+
+    let paused = runtime.run("hello").await?;
+
+    assert!(matches!(paused.state.status, RunStatus::Paused));
+    assert_eq!(paused.state.pending_tool_approvals.len(), 1);
+    let approval_id = paused
+        .state
+        .pending_tool_approvals
+        .keys()
+        .next()
+        .expect("approval should be pending")
+        .clone();
+    assert!(paused.events.iter().any(|event| {
+        matches!(&event.kind, AgentEventKind::ToolApprovalRequested { approval }
+            if approval.request.prompt.as_deref() == Some("Approve fixture tool?")
+                && approval.hook_id.as_deref() == Some("fixture-tool-hook"))
+    }));
+
+    let resumed = runtime
+        .resume_tool_approvals(
+            &paused.run_id,
+            vec![ToolApprovalResolution {
+                approval_id,
+                decision: ToolPermissionDecision {
+                    outcome: ToolPermissionOutcome::Allow,
+                    reason: Some("approved by jsonrpc test".into()),
+                    approver: Some("jsonrpc-test".into()),
+                    metadata: json!({}),
+                },
+            }],
+            None,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert!(matches!(resumed.state.status, RunStatus::Completed));
+    assert_assistant_text_contains(&resumed, "done from fixture");
+    assert!(resumed.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                hook_id,
+                decision,
+                ..
+            } if hook_id.as_deref() == Some("fixture-tool-hook")
+                && decision.outcome == ToolPermissionOutcome::Allow
+                && decision.approver.as_deref() == Some("jsonrpc-test")
+        )
+    }));
     Ok(())
 }
 

@@ -1,7 +1,9 @@
 use noloong_agent_core::{
-    Agent, AgentCoreError, AgentEventKind, AgentMessage, BoxFuture, CancellationToken,
-    ContentBlock, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, QueueMode,
-    Result, RunStatus, StopReason, ToolCall, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    Agent, AgentCoreError, AgentEventKind, AgentMessage, BeforeToolCallContext,
+    BeforeToolCallResult, BoxFuture, CancellationToken, ContentBlock, ModelProvider, ModelRequest,
+    ModelStreamEvent, ModelStreamSink, QueueMode, Result, RunStatus, StopReason,
+    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolCallHook, ToolOutput,
+    ToolPermissionDecision, ToolPermissionOutcome, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::json;
 use std::sync::{
@@ -53,6 +55,60 @@ async fn agent_abort_cancels_active_run() -> Result<()> {
 
     assert!(matches!(error, AgentCoreError::Aborted));
     assert!(matches!(agent.state().await.status, RunStatus::Aborted));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_approval_api_lists_pending_and_resumes_paused_run() -> Result<()> {
+    let agent = Agent::builder()
+        .with_model_provider(Arc::new(ApprovalModel::default()))
+        .with_tool(Arc::new(EchoTool))
+        .with_tool_hook(Arc::new(ApprovalHook))
+        .build()?;
+
+    agent.prompt("approval").await?;
+
+    let pending = agent.pending_tool_approvals().await;
+    assert_eq!(pending.len(), 1);
+    assert!(matches!(agent.state().await.status, RunStatus::Paused));
+    let approval_id = pending.keys().next().expect("approval id exists").clone();
+    agent
+        .resume_tool_approval(ToolApprovalResolution {
+            approval_id,
+            decision: ToolPermissionDecision {
+                outcome: ToolPermissionOutcome::Allow,
+                reason: Some("approved by agent test".into()),
+                approver: Some("agent-test".into()),
+                metadata: json!({}),
+            },
+        })
+        .await?;
+
+    let state = agent.state().await;
+    assert!(matches!(state.status, RunStatus::Completed));
+    assert!(state.pending_tool_approvals.is_empty());
+    assert!(state.messages.iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text } if text == "approval complete"),
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_abort_clears_paused_approval_run() -> Result<()> {
+    let agent = Agent::builder()
+        .with_model_provider(Arc::new(ApprovalModel::default()))
+        .with_tool(Arc::new(EchoTool))
+        .with_tool_hook(Arc::new(ApprovalHook))
+        .build()?;
+
+    agent.prompt("approval").await?;
+    agent.abort().await;
+
+    let state = agent.state().await;
+    assert!(matches!(state.status, RunStatus::Aborted));
+    assert!(state.pending_tool_approvals.is_empty());
     Ok(())
 }
 
@@ -214,6 +270,87 @@ impl ModelProvider for BlockingModel {
         Box::pin(async move {
             cancellation.cancelled().await;
             Err(AgentCoreError::Aborted)
+        })
+    }
+}
+
+#[derive(Default)]
+struct ApprovalModel {
+    calls: AtomicU64,
+}
+
+impl ModelProvider for ApprovalModel {
+    fn id(&self) -> &str {
+        "approval"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        stream: ModelStreamSink,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = if call == 0 {
+                vec![
+                    ModelStreamEvent::Started {
+                        stream_id: "approval-1".into(),
+                    },
+                    ModelStreamEvent::ToolCall {
+                        tool_call: ToolCall {
+                            id: "approval-call-1".into(),
+                            name: "echo".into(),
+                            arguments: json!({ "text": "approved tool result" }),
+                        },
+                    },
+                    ModelStreamEvent::Finished {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ModelStreamEvent::Started {
+                        stream_id: "approval-2".into(),
+                    },
+                    ModelStreamEvent::TextDelta {
+                        text: "approval complete".into(),
+                    },
+                    ModelStreamEvent::Finished {
+                        stop_reason: StopReason::Stop,
+                    },
+                ]
+            };
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+struct ApprovalHook;
+
+impl ToolCallHook for ApprovalHook {
+    fn id(&self) -> Option<&str> {
+        Some("approval-hook")
+    }
+
+    fn before_tool_call<'a>(
+        &'a self,
+        _context: BeforeToolCallContext,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeToolCallResult>> {
+        Box::pin(async {
+            Ok(Some(BeforeToolCallResult::approval(
+                ToolApprovalRequestSpec {
+                    prompt: Some("Approve echo?".into()),
+                    reason: Some("agent test approval".into()),
+                    expires_at_ms: None,
+                    metadata: json!({}),
+                },
+            )))
         })
     }
 }

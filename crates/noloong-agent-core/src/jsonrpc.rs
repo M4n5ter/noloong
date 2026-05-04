@@ -460,9 +460,14 @@ impl ToolCallHook for StdioToolCallHook {
                     cancellation,
                 )
                 .await?;
-            Ok(output
-                .decision
-                .map(|decision| BeforeToolCallResult { decision }))
+            match (output.decision, output.approval) {
+                (Some(_), Some(_)) => Err(crate::AgentCoreError::JsonRpc(
+                    "before_tool_call returned both decision and approval".into(),
+                )),
+                (None, None) => Ok(None),
+                (Some(decision), None) => Ok(Some(BeforeToolCallResult::decision(decision))),
+                (None, Some(approval)) => Ok(Some(BeforeToolCallResult::approval(approval))),
+            }
         })
     }
 
@@ -1002,6 +1007,8 @@ struct PhaseHookOutput {
 struct BeforeToolHookOutput {
     #[serde(default)]
     decision: Option<crate::ToolPermissionDecision>,
+    #[serde(default)]
+    approval: Option<crate::ToolApprovalRequestSpec>,
 }
 
 #[derive(Debug, Deserialize)]

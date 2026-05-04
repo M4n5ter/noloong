@@ -1,6 +1,6 @@
 use crate::{
     AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentState, ContextPatch,
-    MessageCompaction, MessageRole, Result, RunStatus, compacted_messages,
+    MessageCompaction, MessageRole, Result, RunPauseReason, RunStatus, compacted_messages,
 };
 use std::collections::BTreeSet;
 
@@ -22,15 +22,30 @@ pub fn apply_event(state: &mut AgentState, event: &AgentEvent) -> Result<()> {
         AgentEventKind::RunCompleted => {
             state.status = RunStatus::Completed;
             state.active_phase = None;
+            state.pending_tool_approvals.clear();
         }
         AgentEventKind::RunAborted => {
             state.status = RunStatus::Aborted;
             state.active_phase = None;
+            state.pending_tool_approvals.clear();
         }
         AgentEventKind::RunFailed { error } => {
             state.status = RunStatus::Failed;
             state.last_error = Some(error.clone());
             state.active_phase = None;
+            state.pending_tool_approvals.clear();
+        }
+        AgentEventKind::RunPaused { reason } => {
+            state.status = RunStatus::Paused;
+            match reason.as_ref() {
+                RunPauseReason::ToolApproval { continuation } => {
+                    state.active_phase = Some(continuation.phase.clone());
+                }
+            }
+        }
+        AgentEventKind::RunResumed { .. } => {
+            state.status = RunStatus::Running;
+            state.last_error = None;
         }
         AgentEventKind::TurnCompleted { .. } => {
             state.completed_turns += 1;
@@ -50,6 +65,15 @@ pub fn apply_event(state: &mut AgentState, event: &AgentEvent) -> Result<()> {
             state.active_phase = None;
         }
         AgentEventKind::EffectCommitted { effect } => apply_effect(state, effect)?,
+        AgentEventKind::ToolApprovalRequested { approval } => {
+            state
+                .pending_tool_approvals
+                .insert(approval.approval_id.clone(), approval.clone());
+        }
+        AgentEventKind::ToolApprovalResolved { approval_id, .. }
+        | AgentEventKind::ToolApprovalExpired { approval_id, .. } => {
+            state.pending_tool_approvals.remove(approval_id);
+        }
         _ => {}
     }
     Ok(())

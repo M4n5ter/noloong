@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 pub type RunId = String;
 pub type MessageId = String;
 pub type ToolCallId = String;
+pub type ToolApprovalId = String;
 pub type TurnId = u64;
 pub type EventSequence = u64;
 
@@ -68,6 +69,17 @@ pub enum AgentEventKind {
         hook_id: Option<String>,
         decision: ToolPermissionDecision,
     },
+    ToolApprovalRequested {
+        approval: ToolApprovalRequest,
+    },
+    ToolApprovalResolved {
+        approval_id: ToolApprovalId,
+        decision: ToolPermissionDecision,
+    },
+    ToolApprovalExpired {
+        approval_id: ToolApprovalId,
+        decision: ToolPermissionDecision,
+    },
     ToolExecutionStarted {
         tool_call_id: ToolCallId,
         tool_name: String,
@@ -79,6 +91,12 @@ pub enum AgentEventKind {
     ToolExecutionCompleted {
         tool_call_id: ToolCallId,
         output: ToolOutput,
+    },
+    RunPaused {
+        reason: Box<RunPauseReason>,
+    },
+    RunResumed {
+        reason: RunResumeReason,
     },
     ExtensionEvent {
         extension: String,
@@ -124,6 +142,8 @@ pub struct AgentState {
     pub messages: Vec<AgentMessage>,
     pub context: BTreeMap<String, Value>,
     pub available_tools: BTreeMap<String, ToolSpec>,
+    #[serde(default)]
+    pub pending_tool_approvals: BTreeMap<ToolApprovalId, ToolApprovalRequest>,
     pub active_phase: Option<String>,
     pub completed_turns: u64,
     pub last_error: Option<String>,
@@ -137,6 +157,7 @@ impl Default for AgentState {
             messages: Vec::new(),
             context: BTreeMap::new(),
             available_tools: BTreeMap::new(),
+            pending_tool_approvals: BTreeMap::new(),
             active_phase: None,
             completed_turns: 0,
             last_error: None,
@@ -152,6 +173,7 @@ pub enum RunStatus {
     Completed,
     Aborted,
     Failed,
+    Paused,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -811,6 +833,91 @@ pub struct ToolPermissionAudit {
     pub decisions: Vec<ToolPermissionDecisionRecord>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalRequestSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default = "empty_json_object")]
+    pub metadata: Value,
+}
+
+fn empty_json_object() -> Value {
+    Value::Object(Map::new())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalRequest {
+    pub approval_id: ToolApprovalId,
+    pub tool_call: ToolCall,
+    #[serde(default)]
+    pub permissions: Vec<ToolPermissionRequirement>,
+    #[serde(default)]
+    pub hook_id: Option<String>,
+    pub request: ToolApprovalRequestSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalResolution {
+    pub approval_id: ToolApprovalId,
+    pub decision: ToolPermissionDecision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalContinuation {
+    pub run_id: RunId,
+    pub turn_id: TurnId,
+    pub phase: String,
+    pub scratch: crate::PhaseScratch,
+    pub tool_execution_mode: ToolExecutionMode,
+    #[serde(default)]
+    pub preflights: Vec<ToolApprovalPreflight>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalPreflight {
+    pub tool_call: ToolCall,
+    pub permission_audit: ToolPermissionAudit,
+    pub status: ToolApprovalPreflightStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolApprovalPreflightStatus {
+    Ready,
+    Denied {
+        decision: ToolPermissionDecision,
+    },
+    Pending {
+        approval_id: ToolApprovalId,
+        hook_index: usize,
+        #[serde(default)]
+        hook_id: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunPauseReason {
+    ToolApproval {
+        continuation: ToolApprovalContinuation,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunResumeReason {
+    ToolApproval { approval_ids: Vec<ToolApprovalId> },
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExecutionMode {
@@ -858,9 +965,20 @@ pub struct BeforeToolCallContext {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct BeforeToolCallResult {
-    pub decision: ToolPermissionDecision,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BeforeToolCallResult {
+    Decision { decision: ToolPermissionDecision },
+    Approval { approval: ToolApprovalRequestSpec },
+}
+
+impl BeforeToolCallResult {
+    pub fn decision(decision: ToolPermissionDecision) -> Self {
+        Self::Decision { decision }
+    }
+
+    pub fn approval(approval: ToolApprovalRequestSpec) -> Self {
+        Self::Approval { approval }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

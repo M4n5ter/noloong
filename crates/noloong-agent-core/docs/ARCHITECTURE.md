@@ -81,12 +81,12 @@ Reducer
 
 `AgentEventKind` 覆盖以下类别：
 
-- run 生命周期：`RunStarted`、`RunCompleted`、`RunAborted`、`RunFailed`。
+- run 生命周期：`RunStarted`、`RunCompleted`、`RunAborted`、`RunFailed`、`RunPaused`、`RunResumed`。
 - turn 生命周期：`TurnStarted`、`TurnCompleted`。
 - phase 生命周期：`PhaseStarted`、`PhaseCompleted`、`PhaseFailed`。
 - effect 生命周期：`EffectProposed`、`EffectCommitted`、`EffectRejected`。
 - model stream：`ModelStreamEvent`。
-- tool 生命周期：`ToolCallResolved`、`ToolExecutionStarted`、`ToolExecutionUpdate`、`ToolExecutionCompleted`。
+- tool 生命周期：`ToolCallResolved`、`ToolPermissionRequested`、`ToolPermissionDecided`、`ToolApprovalRequested`、`ToolApprovalResolved`、`ToolApprovalExpired`、`ToolExecutionStarted`、`ToolExecutionUpdate`、`ToolExecutionCompleted`。
 - extension event：`ExtensionEvent`。
 
 真正能修改 `AgentState` 的是 `AgentEffect`：
@@ -133,6 +133,7 @@ reducer 会校验 retained/dropped id 覆盖当前 messages，且 summary messag
 - `messages`
 - `context`
 - `available_tools`
+- `pending_tool_approvals`
 - `active_phase`
 - `completed_turns`
 - `last_error`
@@ -315,10 +316,11 @@ pub trait ToolCallHook: Send + Sync {
 
 hook 当前专注于工具调用前后：
 
-- before hook 接收 `tool_call`、完整 `tool_spec` 和当前 state，并可以通过 `tool_spec.permissions` 读取 permission requirements 后返回 `ToolPermissionDecision`。
+- before hook 接收 `tool_call`、完整 `tool_spec` 和当前 state，并可以通过 `tool_spec.permissions` 读取 permission requirements 后返回 `ToolPermissionDecision` 或 `ToolApprovalRequestSpec`。
 - `Allow` 或 no-op 会继续执行工具；`Deny` 会跳过 tool provider，并生成可审计的 error tool output。
+- `ToolApprovalRequestSpec` 会让当前 run 进入 `RunStatus::Paused`，并把 `ToolApprovalRequest` 写入 `AgentState.pending_tool_approvals`；调用方稍后用 `ToolApprovalResolution` 恢复同一个 `run_id`。
 - after hook 可以改写工具输出的 content、details、is_error。
-- `id()` 用于把 permission decision 归因到具体 hook；未提供 id 时审计记录保留匿名来源。
+- `id()` 用于把 permission decision 或 human approval 归因到具体 hook；未提供 id 时审计记录保留匿名来源。
 
 `PhaseHook`：
 
@@ -576,12 +578,23 @@ provider 可以发：
 
 执行工具调用。
 
-每个 tool call 进入执行前，runtime 都会先记录 permission request，再依序运行 `ToolCallHook::before_tool_call`：
+每个 tool call 进入执行前，runtime 会先做 preflight，再决定是否执行工具：
 
-- `ToolPermissionRequested` 记录 tool call 和 `ToolSpec.permissions`。
-- 每个返回 decision 的 hook 都会生成 `ToolPermissionDecided`，包含 hook id、decision outcome、reason、approver 和 metadata。
-- 任意 hook 返回 `Deny` 时，runtime 不调用对应 `ToolProvider`，而是把 denial reason 转成 `ToolOutput { is_error: true }` 进入正常 tool result message。
-- `Allow` decision 会被审计，但不会短路后续 hook；所有 hook 都允许或 no-op 后才执行 tool provider。
+- preflight 按 tool call source order 依序运行 `ToolCallHook::before_tool_call`。
+- hook no-op 时继续后续 hook。
+- hook 返回 `ToolPermissionDecision::Allow` 时记录到当前 tool call 的 permission audit，但不会短路后续 hook。
+- hook 返回 `ToolPermissionDecision::Deny` 时，该 tool call preflight 变成 denied；真正提交 phase 输出时，runtime 仍会生成 `ToolPermissionRequested`、`ToolPermissionDecided` 和 error tool result，但不会调用对应 `ToolProvider`。
+- hook 返回 `ToolApprovalRequestSpec` 时，该 tool call preflight 变成 pending approval；如果同一批 tool calls 中任意一个 pending，整个 `tool.execute` phase 会暂停，不执行任何 tool provider。
+
+暂停路径是 event-sourced 的：
+
+- runtime 写入 `ToolApprovalRequested`，其中包含 `approvalId`、`toolCall`、`permissions`、`hookId` 和 request spec。
+- runtime 写入 `RunPaused { reason: ToolApproval { continuation } }`，continuation 保存 `runId`、`turnId`、phase、scratch、tool execution mode、preflights 和 pending approval ids。
+- reducer 将 run 状态置为 `Paused`，并把 request 放入 `AgentState.pending_tool_approvals`。
+- `AgentRuntime::resume_tool_approvals` 或 `Agent::resume_tool_approvals` 接收 `ToolApprovalResolution`，在同一个 `run_id` 上写入 `ToolApprovalResolved` / `ToolApprovalExpired` 和 `RunResumed`，然后从 continuation 继续 `tool.execute`。
+- approval `Allow` 会作为该 hook 的 `ToolPermissionDecided` 进入既有 permission audit；approval `Deny` 或 timeout deny 会生成 denied tool output，并跳过 tool provider。
+
+timeout 不依赖 core 内置 UI 队列。调用方可以定时调用 `resume_tool_approvals(run_id, [])`；runtime 会把已经超过 `expiresAtMs` 的 pending approval 转成 `ToolApprovalExpired` 和 deny decision。未提供 resolution 且尚未过期的 approval 会让 resume 返回错误，而不是隐式 busy-wait。
 
 默认执行模式是 parallel，但存在两个切换到 sequential 的条件：
 
@@ -688,7 +701,7 @@ JSON-RPC bridge 采用 core strict conformance policy：
 
 `phase_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。返回值是统一 envelope：`modelRequest`、`modelEvents`、`assistantMessage` 都是可选字段；缺少对应字段表示 no-op，字段类型错误会让当前 phase 失败。
 
-`tool_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。before payload 包含 `toolCall`、`toolSpec` 和 `permissions`，response 可返回 `decision`；after payload 包含 `toolCall` 和 `output`，response 可返回改写后的 `content`、`details` 或 `isError`。malformed response 会让当前 `tool.execute` phase fail，合法 deny decision 会走正常 permission deny 语义。
+`tool_hook/run` 使用 `hookId`、`hookPoint`、`runId`、`turnId`、`state` 和 hook-specific payload。before payload 包含 `toolCall`、`toolSpec` 和 `permissions`，response 可返回 `decision` 或 `approval`，两者同时出现是 malformed response；after payload 包含 `toolCall` 和 `output`，response 可返回改写后的 `content`、`details` 或 `isError`。malformed response 会让当前 `tool.execute` phase fail，合法 deny decision 会走正常 permission deny 语义，合法 approval 会进入 event-sourced pause/resume 语义。
 
 `compaction/summarize` 使用 `summarizerId` 加 typed summary request。request 包含 `runId`、`turnId`、`previousSummary`、`messagesToSummarize`、`turnPrefixMessages`、`tokenBudget` 和 `metadata`。response 至少要返回 `summary`，可选 `metadata` 会进入 `CompactionSummaryResult` 并最终写入 summary message / compaction effect metadata。缺失或类型错误会让 `context.compact` phase 失败。
 
@@ -1325,7 +1338,7 @@ cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
 3. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
 4. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 5. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
-6. interactive/human approval queue：在当前同步 `ToolPermissionDecision` 基础上，引入可暂停、可恢复、可超时的人工审批流程。
+6. approval UX adapters：core 已内置 event-sourced pause/resume/timeout 状态机；具体的人机审批 UI、通知、队列持久化和组织策略应作为 hook/应用层适配器实现。
 7. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
 
 这些方向应该继续遵守当前核心原则：状态变更通过 effect，外部行为通过 trait 或 JSON-RPC，provider-specific 细节留在调用方配置或 provider 实现内，不泄漏到 runtime。

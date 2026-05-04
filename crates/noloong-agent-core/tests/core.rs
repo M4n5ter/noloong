@@ -5,17 +5,17 @@ use noloong_agent_core::{
     EventStore, InMemoryEventStore, MediaBlock, MediaDelta, MediaEncoding, MediaKind, MediaSource,
     ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, PHASE_CONTEXT_PREPARE,
     PhaseContext, PhaseNode, PhaseOutput, Result, RunStatus, StopReason, ThinkingBlock,
-    ThinkingDelta, ThinkingKind, ToolCall, ToolCallHook, ToolExecutionMode, ToolOutput,
-    ToolPermissionDecision, ToolPermissionOutcome, ToolPermissionRequirement, ToolProvider,
-    ToolRequest, ToolSpec, ToolUpdate, reduce_events,
+    ThinkingDelta, ThinkingKind, ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall,
+    ToolCallHook, ToolExecutionMode, ToolOutput, ToolPermissionDecision, ToolPermissionOutcome,
+    ToolPermissionRequirement, ToolProvider, ToolRequest, ToolSpec, ToolUpdate, reduce_events,
 };
 use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::Mutex;
-use tokio::time::{Duration, sleep};
+use tokio::sync::{Barrier, Mutex};
+use tokio::time::{Duration, sleep, timeout};
 
 #[test]
 fn thinking_type_serde_round_trips_structured_payloads() -> Result<()> {
@@ -466,6 +466,26 @@ async fn parallel_tools_emit_completion_order_but_commit_source_order() -> Resul
 }
 
 #[tokio::test]
+async fn parallel_tool_preflight_runs_before_hooks_concurrently() -> Result<()> {
+    let barrier = Arc::new(Barrier::new(2));
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(TwoToolModel))
+        .with_tool(Arc::new(DelayedTool::new("slow", Duration::from_millis(0))))
+        .with_tool(Arc::new(DelayedTool::new("fast", Duration::from_millis(0))))
+        .with_tool_hook(Arc::new(BarrierAllowToolHook {
+            barrier: Arc::clone(&barrier),
+        }))
+        .max_turns(1)
+        .build()?;
+
+    timeout(Duration::from_millis(500), runtime.run("tools"))
+        .await
+        .map_err(|_| AgentCoreError::Phase("parallel tool preflight timed out".into()))??;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn sequential_tools_emit_source_order() -> Result<()> {
     let runtime = AgentRuntime::builder()
         .with_model_provider(Arc::new(TwoToolModel))
@@ -691,6 +711,151 @@ async fn tool_permission_allow_decision_is_audited_and_executes_provider() -> Re
 }
 
 #[tokio::test]
+async fn tool_approval_pauses_and_crash_recovers_on_resume() -> Result<()> {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let fast_calls = Arc::new(AtomicU64::new(0));
+    let runtime = approval_runtime(Arc::clone(&store), Arc::clone(&fast_calls), None)?;
+
+    let paused = runtime.run("tools").await?;
+
+    assert_eq!(fast_calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(paused.state.status, RunStatus::Paused));
+    assert_eq!(paused.state.pending_tool_approvals.len(), 1);
+    assert!(paused.events.iter().any(|event| {
+        matches!(&event.kind, AgentEventKind::ToolApprovalRequested { approval }
+            if approval.tool_call.id == "fast-call"
+                && approval.hook_id.as_deref() == Some("approval-tool-hook"))
+    }));
+    assert!(
+        paused
+            .events
+            .iter()
+            .any(|event| { matches!(&event.kind, AgentEventKind::RunPaused { .. }) })
+    );
+    assert!(!paused.events.iter().any(|event| {
+        matches!(&event.kind, AgentEventKind::ToolExecutionStarted { tool_call_id, .. }
+            if tool_call_id == "fast-call")
+    }));
+
+    let approval_id = paused
+        .state
+        .pending_tool_approvals
+        .keys()
+        .next()
+        .expect("approval should be pending")
+        .clone();
+    let restarted_runtime = approval_runtime(Arc::clone(&store), Arc::clone(&fast_calls), None)?;
+    let resumed = restarted_runtime
+        .resume_tool_approvals(
+            &paused.run_id,
+            vec![ToolApprovalResolution {
+                approval_id: approval_id.clone(),
+                decision: ToolPermissionDecision {
+                    outcome: ToolPermissionOutcome::Allow,
+                    reason: Some("approved by test".into()),
+                    approver: Some("human".into()),
+                    metadata: json!({ "ticket": "T-1" }),
+                },
+            }],
+            None,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(resumed.run_id, paused.run_id);
+    assert_eq!(fast_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(resumed.state.status, RunStatus::Completed));
+    assert!(resumed.state.pending_tool_approvals.is_empty());
+    assert_eq!(reduce_events(&resumed.events)?, resumed.state);
+    assert!(
+        resumed
+            .events
+            .windows(2)
+            .all(|window| { window[0].sequence < window[1].sequence })
+    );
+    assert!(resumed.events.iter().any(|event| {
+        matches!(&event.kind, AgentEventKind::ToolApprovalResolved {
+            approval_id: event_approval_id,
+            decision,
+        } if event_approval_id == &approval_id
+            && decision.outcome == ToolPermissionOutcome::Allow)
+    }));
+    assert!(
+        resumed
+            .events
+            .iter()
+            .any(|event| { matches!(&event.kind, AgentEventKind::RunResumed { .. }) })
+    );
+    assert!(resumed.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                tool_call_id,
+                hook_id,
+                decision,
+                ..
+            } if tool_call_id == "fast-call"
+                && hook_id.as_deref() == Some("approval-tool-hook")
+                && decision.outcome == ToolPermissionOutcome::Allow
+                && decision.approver.as_deref() == Some("human")
+        )
+    }));
+    assert!(resumed.events.iter().any(|event| {
+        matches!(&event.kind, AgentEventKind::ToolExecutionCompleted { tool_call_id, output }
+            if tool_call_id == "fast-call" && !output.is_error)
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_tool_approval_denies_and_skips_provider() -> Result<()> {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let fast_calls = Arc::new(AtomicU64::new(0));
+    let runtime = approval_runtime(Arc::clone(&store), Arc::clone(&fast_calls), Some(0))?;
+    let paused = runtime.run("tools").await?;
+
+    assert!(matches!(paused.state.status, RunStatus::Paused));
+    let restarted_runtime = approval_runtime(Arc::clone(&store), Arc::clone(&fast_calls), Some(0))?;
+    let resumed = restarted_runtime
+        .resume_tool_approvals(&paused.run_id, Vec::new(), None, CancellationToken::new())
+        .await?;
+
+    assert_eq!(fast_calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(resumed.state.status, RunStatus::Completed));
+    assert!(resumed.state.pending_tool_approvals.is_empty());
+    assert!(resumed.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolApprovalExpired {
+                decision,
+                ..
+            } if decision.outcome == ToolPermissionOutcome::Deny
+                && decision.reason.as_deref() == Some("tool approval timed out")
+        )
+    }));
+    assert!(resumed.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::ToolPermissionDecided {
+                tool_call_id,
+                hook_id,
+                decision,
+                ..
+            } if tool_call_id == "fast-call"
+                && hook_id.as_deref() == Some("approval-tool-hook")
+                && decision.outcome == ToolPermissionOutcome::Deny
+                && decision.metadata.get("timeout").and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        )
+    }));
+    assert!(resumed.events.iter().any(|event| {
+        matches!(&event.kind, AgentEventKind::ToolExecutionCompleted { tool_call_id, output }
+            if tool_call_id == "fast-call" && output.is_error)
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_output_media_preserved() -> Result<()> {
     let runtime = AgentRuntime::builder()
         .with_model_provider(Arc::new(MediaToolModel))
@@ -788,6 +953,20 @@ fn native_runtime() -> noloong_agent_core::AgentRuntimeBuilder {
         .with_tool(Arc::new(NativeTool))
         .with_context_provider(Arc::new(NativeContext))
         .max_turns(4)
+}
+
+fn approval_runtime(
+    store: Arc<dyn EventStore>,
+    fast_calls: Arc<AtomicU64>,
+    expires_at_ms: Option<u64>,
+) -> Result<AgentRuntime> {
+    AgentRuntime::builder()
+        .with_event_store(store)
+        .with_model_provider(Arc::new(FastToolModel))
+        .with_tool(Arc::new(PermissionedCountingTool::new("fast", fast_calls)))
+        .with_tool_hook(Arc::new(ApprovalToolHook { expires_at_ms }))
+        .max_turns(1)
+        .build()
 }
 
 struct NativeModel {
@@ -1351,14 +1530,14 @@ impl ToolCallHook for TestToolHook {
     ) -> BoxFuture<'a, Option<BeforeToolCallResult>> {
         Box::pin(async move {
             Ok(
-                (context.tool_call.name == "slow").then_some(BeforeToolCallResult {
-                    decision: ToolPermissionDecision {
+                (context.tool_call.name == "slow").then_some(BeforeToolCallResult::decision(
+                    ToolPermissionDecision {
                         outcome: ToolPermissionOutcome::Deny,
                         reason: Some("blocked by test hook".into()),
                         approver: Some("test".into()),
                         metadata: json!({ "source": "test" }),
                     },
-                }),
+                )),
             )
         })
     }
@@ -1395,14 +1574,74 @@ impl ToolCallHook for AllowToolHook {
         _cancellation: CancellationToken,
     ) -> BoxFuture<'a, Option<BeforeToolCallResult>> {
         Box::pin(async {
-            Ok(Some(BeforeToolCallResult {
-                decision: ToolPermissionDecision {
+            Ok(Some(BeforeToolCallResult::decision(
+                ToolPermissionDecision {
                     outcome: ToolPermissionOutcome::Allow,
                     reason: Some("allowed by test hook".into()),
                     approver: Some("test".into()),
                     metadata: json!({ "source": "allow-test" }),
                 },
-            }))
+            )))
+        })
+    }
+}
+
+struct BarrierAllowToolHook {
+    barrier: Arc<Barrier>,
+}
+
+impl ToolCallHook for BarrierAllowToolHook {
+    fn id(&self) -> Option<&str> {
+        Some("barrier-allow-tool-hook")
+    }
+
+    fn before_tool_call<'a>(
+        &'a self,
+        _context: BeforeToolCallContext,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeToolCallResult>> {
+        let barrier = Arc::clone(&self.barrier);
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            barrier.wait().await;
+            cancellation.throw_if_cancelled()?;
+            Ok(Some(BeforeToolCallResult::decision(
+                ToolPermissionDecision {
+                    outcome: ToolPermissionOutcome::Allow,
+                    reason: Some("allowed by barrier test hook".into()),
+                    approver: Some("test".into()),
+                    metadata: json!({ "source": "barrier-allow-test" }),
+                },
+            )))
+        })
+    }
+}
+
+struct ApprovalToolHook {
+    expires_at_ms: Option<u64>,
+}
+
+impl ToolCallHook for ApprovalToolHook {
+    fn id(&self) -> Option<&str> {
+        Some("approval-tool-hook")
+    }
+
+    fn before_tool_call<'a>(
+        &'a self,
+        context: BeforeToolCallContext,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Option<BeforeToolCallResult>> {
+        Box::pin(async move {
+            Ok(
+                (context.tool_call.name == "fast").then_some(BeforeToolCallResult::approval(
+                    ToolApprovalRequestSpec {
+                        prompt: Some("Approve fast tool?".into()),
+                        reason: Some("test approval gate".into()),
+                        expires_at_ms: self.expires_at_ms,
+                        metadata: json!({ "source": "approval-test" }),
+                    },
+                )),
+            )
         })
     }
 }

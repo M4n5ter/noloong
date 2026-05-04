@@ -54,6 +54,13 @@ function hasMode(mode) {
   return modes.has(mode);
 }
 
+function stateHasUserText(params, expected) {
+  return (params.state?.messages ?? []).some((message) =>
+    message.role === "user" &&
+    (message.content ?? []).some((block) => block.type === "text" && block.text === expected),
+  );
+}
+
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
@@ -495,6 +502,16 @@ for await (const line of rl) {
           reason: "denied by conformance tool hook",
           approver: "jsonrpc-fixture",
           metadata: { fixture: "tool-hook-deny" },
+        },
+      });
+      continue;
+    }
+    if (params.hookPoint === "before_tool_call" && stateHasUserText(params, "approval")) {
+      result(id, {
+        approval: {
+          prompt: "Approve conformance tool?",
+          reason: "conformance approval case",
+          metadata: { fixture: "tool-hook-approval" },
         },
       });
       continue;

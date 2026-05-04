@@ -1,17 +1,20 @@
 use crate::phase::{
     PHASE_ASSISTANT_COMMIT, PHASE_CONTEXT_COMPACT, PHASE_CONTEXT_PREPARE, PHASE_INPUT_INGEST,
     PHASE_MODEL_REQUEST_PREPARE, PHASE_MODEL_STREAM, PHASE_TOOL_CALL_RESOLVE, PHASE_TOOL_EXECUTE,
-    PHASE_TURN_DECISION,
+    PHASE_TURN_DECISION, resume_tool_approval_continuation,
 };
 use crate::reducer::{apply_event, reduce_events, validate_effect_for_state};
 use crate::{
     AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentMessage, AgentState,
     CompactionSummarizer, ContextCompactionConfig, EventSinkFuture, EventStore,
     HeuristicTokenEstimator, InMemoryEventStore, ModelProvider, ModelStreamEvent, PhaseContext,
-    PhaseHook, PhaseNode, PhaseScratch, Result, StdioExtension, StdioExtensionConfig,
-    TokenEstimator, ToolCallHook, ToolExecutionMode, ToolProvider, TurnDecision,
+    PhaseHook, PhaseNode, PhaseOutput, PhaseScratch, Result, RunPauseReason, RunResumeReason,
+    RunStatus, StdioExtension, StdioExtensionConfig, TokenEstimator, ToolApprovalContinuation,
+    ToolApprovalPreflightStatus, ToolApprovalResolution, ToolCallHook, ToolExecutionMode,
+    ToolPermissionDecision, ToolPermissionOutcome, ToolProvider, TurnDecision,
 };
 use crate::{CancellationToken, ContextProvider, ModelStreamSink, StandardPhase};
+use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -19,6 +22,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub type AgentEventSink = Arc<dyn Fn(AgentEvent) -> EventSinkFuture + Send + Sync>;
@@ -52,6 +56,36 @@ enum ContextCompactionRegistration {
         summarizer_id: String,
         estimator: Arc<dyn TokenEstimator>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunFlow {
+    Completed,
+    Paused,
+}
+
+enum PhaseRecordResult {
+    Completed(Box<PhaseOutput>),
+    Paused,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedToolApproval {
+    resolution: ToolApprovalResolution,
+    expired: bool,
+}
+
+struct RunTurnCursor {
+    turn_id: u64,
+    scratch: PhaseScratch,
+    start_phase_index: usize,
+    record_turn_started: bool,
+}
+
+struct RunTurnContext<'a> {
+    run_id: &'a str,
+    state: &'a mut AgentState,
+    sink: Option<&'a AgentEventSink>,
 }
 
 pub enum AgentInput {
@@ -200,6 +234,70 @@ impl AgentRuntime {
             .await
     }
 
+    pub async fn resume_tool_approvals(
+        &self,
+        run_id: impl AsRef<str>,
+        resolutions: Vec<ToolApprovalResolution>,
+        sink: Option<AgentEventSink>,
+        cancellation: CancellationToken,
+    ) -> Result<RunReport> {
+        self.resume_tool_approvals_internal(run_id.as_ref(), resolutions, sink, cancellation, None)
+            .await
+    }
+
+    pub async fn resume_tool_approvals_with_queues(
+        &self,
+        run_id: impl AsRef<str>,
+        resolutions: Vec<ToolApprovalResolution>,
+        sink: Option<AgentEventSink>,
+        cancellation: CancellationToken,
+        queues: Arc<dyn RuntimeQueues>,
+    ) -> Result<RunReport> {
+        self.resume_tool_approvals_internal(
+            run_id.as_ref(),
+            resolutions,
+            sink,
+            cancellation,
+            Some(queues),
+        )
+        .await
+    }
+
+    pub async fn abort_paused_run(
+        &self,
+        run_id: impl AsRef<str>,
+        sink: Option<AgentEventSink>,
+    ) -> Result<RunReport> {
+        let run_id = run_id.as_ref().to_string();
+        let events = self.event_store.load(&run_id).await?;
+        if events.is_empty() {
+            return Err(AgentCoreError::Phase(format!(
+                "run {run_id} does not exist"
+            )));
+        }
+        self.ensure_event_counter_after(&events);
+        let mut state = reduce_events(&events)?;
+        if !matches!(state.status, RunStatus::Paused) {
+            return Err(AgentCoreError::Phase(format!("run {run_id} is not paused")));
+        }
+        self.record_event(
+            &mut state,
+            &run_id,
+            None,
+            None,
+            AgentEventKind::RunAborted,
+            sink.as_ref(),
+        )
+        .await?;
+
+        let events = self.event_store.load(&run_id).await?;
+        Ok(RunReport {
+            run_id,
+            events,
+            state,
+        })
+    }
+
     async fn run_with_options(
         &self,
         input: Option<AgentInput>,
@@ -233,7 +331,7 @@ impl AgentRuntime {
             )
             .await;
         match result {
-            Ok(()) => {
+            Ok(RunFlow::Completed) => {
                 self.record_event(
                     &mut state,
                     &run_id,
@@ -244,6 +342,7 @@ impl AgentRuntime {
                 )
                 .await?;
             }
+            Ok(RunFlow::Paused) => {}
             Err(error) => {
                 match error {
                     AgentCoreError::Aborted => {
@@ -302,6 +401,177 @@ impl AgentRuntime {
             run_id,
             events,
             state: replayed_state,
+        })
+    }
+
+    async fn resume_tool_approvals_internal(
+        &self,
+        run_id: &str,
+        resolutions: Vec<ToolApprovalResolution>,
+        sink: Option<AgentEventSink>,
+        cancellation: CancellationToken,
+        queues: Option<Arc<dyn RuntimeQueues>>,
+    ) -> Result<RunReport> {
+        let run_id = run_id.to_string();
+        let events = self.event_store.load(&run_id).await?;
+        if events.is_empty() {
+            return Err(AgentCoreError::Phase(format!(
+                "run {run_id} does not exist"
+            )));
+        }
+        self.ensure_event_counter_after(&events);
+        let mut state = reduce_events(&events)?;
+        if !matches!(state.status, RunStatus::Paused) {
+            return Err(AgentCoreError::Phase(format!("run {run_id} is not paused")));
+        }
+        let continuation = latest_tool_approval_continuation(&events)?;
+        let resolved_approvals =
+            resolve_tool_approval_decisions(&state, &continuation, resolutions)?;
+        let approval_ids = resolved_approvals
+            .iter()
+            .map(|approval| approval.resolution.approval_id.clone())
+            .collect::<Vec<_>>();
+
+        for approval in &resolved_approvals {
+            let kind = if approval.expired {
+                AgentEventKind::ToolApprovalExpired {
+                    approval_id: approval.resolution.approval_id.clone(),
+                    decision: approval.resolution.decision.clone(),
+                }
+            } else {
+                AgentEventKind::ToolApprovalResolved {
+                    approval_id: approval.resolution.approval_id.clone(),
+                    decision: approval.resolution.decision.clone(),
+                }
+            };
+            self.record_event(
+                &mut state,
+                &run_id,
+                Some(continuation.turn_id),
+                Some(&continuation.phase),
+                kind,
+                sink.as_ref(),
+            )
+            .await?;
+        }
+        self.record_event(
+            &mut state,
+            &run_id,
+            Some(continuation.turn_id),
+            Some(&continuation.phase),
+            AgentEventKind::RunResumed {
+                reason: RunResumeReason::ToolApproval { approval_ids },
+            },
+            sink.as_ref(),
+        )
+        .await?;
+
+        let phase_resolutions = resolved_approvals
+            .iter()
+            .map(|approval| approval.resolution.clone())
+            .collect::<Vec<_>>();
+        let result = async {
+            let phase_id = continuation.phase.clone();
+            let turn_id = continuation.turn_id;
+            let output = match resume_tool_approval_continuation(
+                self,
+                continuation.clone(),
+                state.clone(),
+                phase_resolutions,
+                cancellation.clone(),
+            )
+            .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    self.record_event(
+                        &mut state,
+                        &run_id,
+                        Some(turn_id),
+                        Some(&phase_id),
+                        AgentEventKind::PhaseFailed {
+                            phase: phase_id.clone(),
+                            error: error.to_string(),
+                        },
+                        sink.as_ref(),
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+
+            let output = match self
+                .record_phase_output(
+                    &mut state,
+                    &run_id,
+                    turn_id,
+                    &phase_id,
+                    output,
+                    sink.as_ref(),
+                )
+                .await?
+            {
+                PhaseRecordResult::Completed(output) => *output,
+                PhaseRecordResult::Paused => return Ok(RunFlow::Paused),
+            };
+            self.record_event(
+                &mut state,
+                &run_id,
+                Some(turn_id),
+                Some(&phase_id),
+                AgentEventKind::PhaseCompleted {
+                    phase: phase_id.clone(),
+                },
+                sink.as_ref(),
+            )
+            .await?;
+
+            let next_phase_index = self.phase_index_after(&phase_id)?;
+            self.run_turns_from(
+                RunTurnCursor {
+                    turn_id,
+                    scratch: output.scratch,
+                    start_phase_index: next_phase_index,
+                    record_turn_started: false,
+                },
+                RunTurnContext {
+                    run_id: &run_id,
+                    state: &mut state,
+                    sink: sink.as_ref(),
+                },
+                cancellation,
+                queues,
+            )
+            .await
+        }
+        .await;
+
+        match result {
+            Ok(RunFlow::Completed) => {
+                self.record_event(
+                    &mut state,
+                    &run_id,
+                    None,
+                    None,
+                    AgentEventKind::RunCompleted,
+                    sink.as_ref(),
+                )
+                .await?;
+            }
+            Ok(RunFlow::Paused) => {}
+            Err(error) => {
+                let error = self
+                    .record_run_error(&mut state, &run_id, sink.as_ref(), error)
+                    .await?;
+                return Err(error);
+            }
+        }
+
+        let events = self.event_store.load(&run_id).await?;
+        Ok(RunReport {
+            run_id,
+            events,
+            state,
         })
     }
 
@@ -364,26 +634,63 @@ impl AgentRuntime {
         sink: Option<&AgentEventSink>,
         cancellation: CancellationToken,
         queues: Option<Arc<dyn RuntimeQueues>>,
-    ) -> Result<()> {
-        let mut turn_id = 1;
-        let mut scratch = PhaseScratch {
+    ) -> Result<RunFlow> {
+        let turn_id = 1;
+        let scratch = PhaseScratch {
             input,
             ..PhaseScratch::default()
         };
+        self.run_turns_from(
+            RunTurnCursor {
+                turn_id,
+                scratch,
+                start_phase_index: 0,
+                record_turn_started: true,
+            },
+            RunTurnContext {
+                run_id,
+                state,
+                sink,
+            },
+            cancellation,
+            queues,
+        )
+        .await
+    }
 
+    async fn run_turns_from(
+        &self,
+        cursor: RunTurnCursor,
+        context: RunTurnContext<'_>,
+        cancellation: CancellationToken,
+        queues: Option<Arc<dyn RuntimeQueues>>,
+    ) -> Result<RunFlow> {
+        let RunTurnContext {
+            run_id,
+            state,
+            sink,
+        } = context;
+        let RunTurnCursor {
+            mut turn_id,
+            mut scratch,
+            mut start_phase_index,
+            mut record_turn_started,
+        } = cursor;
         loop {
             cancellation.throw_if_cancelled()?;
-            self.record_event(
-                state,
-                run_id,
-                Some(turn_id),
-                None,
-                AgentEventKind::TurnStarted,
-                sink,
-            )
-            .await?;
+            if record_turn_started {
+                self.record_event(
+                    state,
+                    run_id,
+                    Some(turn_id),
+                    None,
+                    AgentEventKind::TurnStarted,
+                    sink,
+                )
+                .await?;
+            }
 
-            for phase in &self.phases {
+            for phase in self.phases.iter().skip(start_phase_index) {
                 let phase_id = phase.id().to_string();
                 self.record_event(
                     state,
@@ -427,135 +734,13 @@ impl AgentRuntime {
                     }
                 };
 
-                for event in &output.stream_events {
-                    self.record_event(
-                        state,
-                        run_id,
-                        Some(turn_id),
-                        Some(&phase_id),
-                        AgentEventKind::ModelStreamEvent {
-                            provider: self.default_model_provider.clone(),
-                            event: event.clone(),
-                        },
-                        sink,
-                    )
-                    .await?;
-                }
-                for tool_call in &output.resolved_tool_calls {
-                    self.record_event(
-                        state,
-                        run_id,
-                        Some(turn_id),
-                        Some(&phase_id),
-                        AgentEventKind::ToolCallResolved {
-                            tool_call: tool_call.clone(),
-                        },
-                        sink,
-                    )
-                    .await?;
-                }
-                let completed_tool_outputs = if output.completed_tool_outputs.is_empty() {
-                    &output.tool_outputs
-                } else {
-                    &output.completed_tool_outputs
-                };
-                let completed_tool_permission_audits =
-                    if output.completed_tool_permission_audits.is_empty() {
-                        &output.tool_permission_audits
-                    } else {
-                        &output.completed_tool_permission_audits
-                    };
-                if !completed_tool_permission_audits.is_empty()
-                    && completed_tool_permission_audits.len() != completed_tool_outputs.len()
+                let output = match self
+                    .record_phase_output(state, run_id, turn_id, &phase_id, output, sink)
+                    .await?
                 {
-                    return Err(AgentCoreError::Phase(format!(
-                        "tool permission audit count {} does not match tool output count {}",
-                        completed_tool_permission_audits.len(),
-                        completed_tool_outputs.len()
-                    )));
-                }
-                for (index, (tool_call, tool_output)) in completed_tool_outputs.iter().enumerate() {
-                    if let Some(audit) = completed_tool_permission_audits.get(index) {
-                        if audit.tool_call.id != tool_call.id
-                            || audit.tool_call.name != tool_call.name
-                        {
-                            return Err(AgentCoreError::Phase(format!(
-                                "tool permission audit for {} does not match tool output {}",
-                                audit.tool_call.id, tool_call.id
-                            )));
-                        }
-                        self.record_event(
-                            state,
-                            run_id,
-                            Some(turn_id),
-                            Some(&phase_id),
-                            AgentEventKind::ToolPermissionRequested {
-                                tool_call: audit.tool_call.clone(),
-                                permissions: audit.permissions.clone(),
-                            },
-                            sink,
-                        )
-                        .await?;
-                        for record in &audit.decisions {
-                            self.record_event(
-                                state,
-                                run_id,
-                                Some(turn_id),
-                                Some(&phase_id),
-                                AgentEventKind::ToolPermissionDecided {
-                                    tool_call_id: audit.tool_call.id.clone(),
-                                    tool_name: audit.tool_call.name.clone(),
-                                    hook_id: record.hook_id.clone(),
-                                    decision: record.decision.clone(),
-                                },
-                                sink,
-                            )
-                            .await?;
-                        }
-                    }
-                    self.record_event(
-                        state,
-                        run_id,
-                        Some(turn_id),
-                        Some(&phase_id),
-                        AgentEventKind::ToolExecutionStarted {
-                            tool_call_id: tool_call.id.clone(),
-                            tool_name: tool_call.name.clone(),
-                        },
-                        sink,
-                    )
-                    .await?;
-                    for update in &tool_output.updates {
-                        self.record_event(
-                            state,
-                            run_id,
-                            Some(turn_id),
-                            Some(&phase_id),
-                            AgentEventKind::ToolExecutionUpdate {
-                                tool_call_id: tool_call.id.clone(),
-                                update: update.clone(),
-                            },
-                            sink,
-                        )
-                        .await?;
-                    }
-                    self.record_event(
-                        state,
-                        run_id,
-                        Some(turn_id),
-                        Some(&phase_id),
-                        AgentEventKind::ToolExecutionCompleted {
-                            tool_call_id: tool_call.id.clone(),
-                            output: tool_output.clone(),
-                        },
-                        sink,
-                    )
-                    .await?;
-                }
-                for effect in output.effects {
-                    self.commit_effect(state, run_id, Some(turn_id), Some(&phase_id), effect, sink)
-                        .await?;
-                }
+                    PhaseRecordResult::Completed(output) => *output,
+                    PhaseRecordResult::Paused => return Ok(RunFlow::Paused),
+                };
 
                 scratch = output.scratch;
                 self.record_event(
@@ -611,8 +796,181 @@ impl AgentRuntime {
 
             turn_id += 1;
             scratch = PhaseScratch::default();
+            start_phase_index = 0;
+            record_turn_started = true;
         }
-        Ok(())
+        Ok(RunFlow::Completed)
+    }
+
+    async fn record_phase_output(
+        &self,
+        state: &mut AgentState,
+        run_id: &str,
+        turn_id: u64,
+        phase_id: &str,
+        mut output: PhaseOutput,
+        sink: Option<&AgentEventSink>,
+    ) -> Result<PhaseRecordResult> {
+        for event in &output.stream_events {
+            self.record_event(
+                state,
+                run_id,
+                Some(turn_id),
+                Some(phase_id),
+                AgentEventKind::ModelStreamEvent {
+                    provider: self.default_model_provider.clone(),
+                    event: event.clone(),
+                },
+                sink,
+            )
+            .await?;
+        }
+        for tool_call in &output.resolved_tool_calls {
+            self.record_event(
+                state,
+                run_id,
+                Some(turn_id),
+                Some(phase_id),
+                AgentEventKind::ToolCallResolved {
+                    tool_call: tool_call.clone(),
+                },
+                sink,
+            )
+            .await?;
+        }
+
+        let completed_tool_outputs = if output.completed_tool_outputs.is_empty() {
+            &output.tool_outputs
+        } else {
+            &output.completed_tool_outputs
+        };
+        let completed_tool_permission_audits = if output.completed_tool_permission_audits.is_empty()
+        {
+            &output.tool_permission_audits
+        } else {
+            &output.completed_tool_permission_audits
+        };
+        if !completed_tool_permission_audits.is_empty()
+            && completed_tool_permission_audits.len() != completed_tool_outputs.len()
+        {
+            return Err(AgentCoreError::Phase(format!(
+                "tool permission audit count {} does not match tool output count {}",
+                completed_tool_permission_audits.len(),
+                completed_tool_outputs.len()
+            )));
+        }
+        for (index, (tool_call, tool_output)) in completed_tool_outputs.iter().enumerate() {
+            if let Some(audit) = completed_tool_permission_audits.get(index) {
+                if audit.tool_call.id != tool_call.id || audit.tool_call.name != tool_call.name {
+                    return Err(AgentCoreError::Phase(format!(
+                        "tool permission audit for {} does not match tool output {}",
+                        audit.tool_call.id, tool_call.id
+                    )));
+                }
+                self.record_event(
+                    state,
+                    run_id,
+                    Some(turn_id),
+                    Some(phase_id),
+                    AgentEventKind::ToolPermissionRequested {
+                        tool_call: audit.tool_call.clone(),
+                        permissions: audit.permissions.clone(),
+                    },
+                    sink,
+                )
+                .await?;
+                for record in &audit.decisions {
+                    self.record_event(
+                        state,
+                        run_id,
+                        Some(turn_id),
+                        Some(phase_id),
+                        AgentEventKind::ToolPermissionDecided {
+                            tool_call_id: audit.tool_call.id.clone(),
+                            tool_name: audit.tool_call.name.clone(),
+                            hook_id: record.hook_id.clone(),
+                            decision: record.decision.clone(),
+                        },
+                        sink,
+                    )
+                    .await?;
+                }
+            }
+            self.record_event(
+                state,
+                run_id,
+                Some(turn_id),
+                Some(phase_id),
+                AgentEventKind::ToolExecutionStarted {
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                },
+                sink,
+            )
+            .await?;
+            for update in &tool_output.updates {
+                self.record_event(
+                    state,
+                    run_id,
+                    Some(turn_id),
+                    Some(phase_id),
+                    AgentEventKind::ToolExecutionUpdate {
+                        tool_call_id: tool_call.id.clone(),
+                        update: update.clone(),
+                    },
+                    sink,
+                )
+                .await?;
+            }
+            self.record_event(
+                state,
+                run_id,
+                Some(turn_id),
+                Some(phase_id),
+                AgentEventKind::ToolExecutionCompleted {
+                    tool_call_id: tool_call.id.clone(),
+                    output: tool_output.clone(),
+                },
+                sink,
+            )
+            .await?;
+        }
+
+        let effects = std::mem::take(&mut output.effects);
+        for effect in effects {
+            self.commit_effect(state, run_id, Some(turn_id), Some(phase_id), effect, sink)
+                .await?;
+        }
+
+        if let Some(reason) = output.pause.clone() {
+            for approval in &output.tool_approval_requests {
+                self.record_event(
+                    state,
+                    run_id,
+                    Some(turn_id),
+                    Some(phase_id),
+                    AgentEventKind::ToolApprovalRequested {
+                        approval: approval.clone(),
+                    },
+                    sink,
+                )
+                .await?;
+            }
+            self.record_event(
+                state,
+                run_id,
+                Some(turn_id),
+                Some(phase_id),
+                AgentEventKind::RunPaused {
+                    reason: Box::new(reason),
+                },
+                sink,
+            )
+            .await?;
+            return Ok(PhaseRecordResult::Paused);
+        }
+
+        Ok(PhaseRecordResult::Completed(Box::new(output)))
     }
 
     async fn commit_queued_messages(
@@ -684,6 +1042,49 @@ impl AgentRuntime {
                 )
                 .await?;
                 Err(error)
+            }
+        }
+    }
+
+    async fn record_run_error(
+        &self,
+        state: &mut AgentState,
+        run_id: &str,
+        sink: Option<&AgentEventSink>,
+        error: AgentCoreError,
+    ) -> Result<AgentCoreError> {
+        match error {
+            AgentCoreError::Aborted => {
+                self.record_event(state, run_id, None, None, AgentEventKind::RunAborted, sink)
+                    .await?;
+                Ok(AgentCoreError::Aborted)
+            }
+            AgentCoreError::EventSink(message) => {
+                self.record_event(
+                    state,
+                    run_id,
+                    None,
+                    None,
+                    AgentEventKind::RunFailed {
+                        error: format!("event sink failed: {message}"),
+                    },
+                    None,
+                )
+                .await?;
+                Ok(AgentCoreError::EventSink(message))
+            }
+            error => {
+                let message = error.to_string();
+                self.record_event(
+                    state,
+                    run_id,
+                    None,
+                    None,
+                    AgentEventKind::RunFailed { error: message },
+                    sink,
+                )
+                .await?;
+                Ok(error)
             }
         }
     }
@@ -760,12 +1161,156 @@ impl AgentRuntime {
         format!("run-{id}")
     }
 
+    fn ensure_event_counter_after(&self, events: &[AgentEvent]) {
+        let Some(max_sequence) = events.iter().map(|event| event.sequence).max() else {
+            return;
+        };
+        let mut current = self.event_counter.load(Ordering::SeqCst);
+        while current < max_sequence {
+            match self.event_counter.compare_exchange(
+                current,
+                max_sequence,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn phase_index_after(&self, phase_id: &str) -> Result<usize> {
+        let index = self
+            .phases
+            .iter()
+            .position(|phase| phase.id() == phase_id)
+            .ok_or_else(|| AgentCoreError::Phase(format!("phase {phase_id} is not registered")))?;
+        Ok(index + 1)
+    }
+
     fn normalize_input(&self, run_id: &str, input: AgentInput) -> AgentMessage {
         match input {
             AgentInput::Text(text) => AgentMessage::user(format!("user-{run_id}-1"), text),
             AgentInput::Message(message) => message,
         }
     }
+}
+
+fn latest_tool_approval_continuation(events: &[AgentEvent]) -> Result<ToolApprovalContinuation> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            AgentEventKind::RunPaused { reason } => match reason.as_ref() {
+                RunPauseReason::ToolApproval { continuation } => Some(continuation.clone()),
+            },
+            _ => None,
+        })
+        .ok_or_else(|| AgentCoreError::Phase("paused run has no tool approval continuation".into()))
+}
+
+fn resolve_tool_approval_decisions(
+    state: &AgentState,
+    continuation: &ToolApprovalContinuation,
+    resolutions: Vec<ToolApprovalResolution>,
+) -> Result<Vec<ResolvedToolApproval>> {
+    let mut provided = BTreeMap::new();
+    for resolution in resolutions {
+        if provided
+            .insert(resolution.approval_id.clone(), resolution)
+            .is_some()
+        {
+            return Err(AgentCoreError::Phase(
+                "duplicate tool approval resolution id".into(),
+            ));
+        }
+    }
+
+    let now_ms = current_unix_ms();
+    let mut resolved = Vec::new();
+    let mut missing = Vec::new();
+    for approval_id in pending_tool_approval_ids(continuation) {
+        if let Some(resolution) = provided.remove(approval_id) {
+            resolved.push(ResolvedToolApproval {
+                resolution,
+                expired: false,
+            });
+            continue;
+        }
+
+        let Some(approval) = state.pending_tool_approvals.get(approval_id) else {
+            return Err(AgentCoreError::Phase(format!(
+                "pending tool approval {approval_id} is not present in state"
+            )));
+        };
+        if approval
+            .request
+            .expires_at_ms
+            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
+        {
+            resolved.push(ResolvedToolApproval {
+                resolution: timeout_tool_approval_resolution(
+                    approval_id,
+                    approval.request.expires_at_ms,
+                ),
+                expired: true,
+            });
+        } else {
+            missing.push(approval_id.clone());
+        }
+    }
+
+    if !provided.is_empty() {
+        let approval_ids = provided.keys().cloned().collect::<Vec<_>>();
+        return Err(AgentCoreError::Phase(format!(
+            "unknown tool approval resolution ids: {}",
+            approval_ids.join(", ")
+        )));
+    }
+    if !missing.is_empty() {
+        return Err(AgentCoreError::Phase(format!(
+            "missing tool approval resolutions: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(resolved)
+}
+
+fn pending_tool_approval_ids(
+    continuation: &ToolApprovalContinuation,
+) -> impl Iterator<Item = &String> {
+    continuation
+        .preflights
+        .iter()
+        .filter_map(|preflight| match &preflight.status {
+            ToolApprovalPreflightStatus::Pending { approval_id, .. } => Some(approval_id),
+            _ => None,
+        })
+}
+
+fn timeout_tool_approval_resolution(
+    approval_id: &str,
+    expires_at_ms: Option<u64>,
+) -> ToolApprovalResolution {
+    ToolApprovalResolution {
+        approval_id: approval_id.to_string(),
+        decision: ToolPermissionDecision {
+            outcome: ToolPermissionOutcome::Deny,
+            reason: Some("tool approval timed out".into()),
+            approver: None,
+            metadata: json!({
+                "timeout": true,
+                "expiresAtMs": expires_at_ms,
+            }),
+        },
+    }
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 pub struct AgentRuntimeBuilder {

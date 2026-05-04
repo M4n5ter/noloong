@@ -125,6 +125,15 @@ createStdioJsonRpcExtension({
   "tool_hook/run"(params) {
     requireHook(params, TOOL_HOOK_ID);
     if (params.hookPoint === "before_tool_call") {
+      if (stateHasUserText(params, "approval")) {
+        return {
+          approval: {
+            prompt: "Approve TypeScript conformance tool?",
+            reason: "TypeScript conformance approval case",
+            metadata: { example: "typescript" },
+          },
+        };
+      }
       return {
         decision: {
           outcome: "allow",
@@ -161,6 +170,24 @@ function finishEvent(stopReason: "stop" | "tool_use"): JsonObject {
 
 function hasToolResult(messages: unknown): boolean {
   return Array.isArray(messages) && messages.some((message) => objectValue(message).role === "tool_result");
+}
+
+function stateHasUserText(params: JsonObject, expected: string): boolean {
+  const state = objectValue(params.state);
+  const messages = state.messages;
+  if (!Array.isArray(messages)) {
+    return false;
+  }
+  return messages.some((messageValue) => {
+    const message = objectValue(messageValue);
+    if (message.role !== "user" || !Array.isArray(message.content)) {
+      return false;
+    }
+    return message.content.some((blockValue) => {
+      const block = objectValue(blockValue);
+      return block.type === "text" && block.text === expected;
+    });
+  });
 }
 
 function requireHook(params: JsonObject, expectedId: string) {

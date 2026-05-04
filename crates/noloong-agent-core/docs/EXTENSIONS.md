@@ -1,8 +1,8 @@
 # Noloong Extension Author Guide
 
-本文档是 Noloong process extension bridge 的 wire contract。目标读者是 TypeScript、Python 或其它语言的扩展作者：你应该能只读本文档和示例目录，就实现一个可以被 Rust agent core 加载、运行并通过 conformance 的 stdio JSON-RPC extension。
+This document is the wire contract for the Noloong process extension bridge. It is written for TypeScript, Python, and other non-Rust extension authors: after reading this guide and the example directories, you should be able to implement a stdio JSON-RPC extension that can be loaded by the Rust agent core, run correctly, and pass conformance.
 
-示例 helper 位于 `examples/extensions/typescript-conformance` 和 `examples/extensions/python-conformance`。它们是 example-local SDK skeleton，不是已发布的稳定 SDK 包。
+Example helpers live in `examples/extensions/typescript-conformance` and `examples/extensions/python-conformance`. They are example-local SDK skeletons, not published stable SDK packages.
 
 ## Quickstart
 
@@ -275,6 +275,7 @@ Params:
       "messages": [],
       "context": {},
       "availableTools": {},
+      "pendingToolApprovals": {},
       "activePhase": "tool.execute",
       "completedTurns": 0,
       "lastError": null
@@ -323,6 +324,7 @@ Params:
       "messages": [],
       "context": {},
       "availableTools": {},
+      "pendingToolApprovals": {},
       "activePhase": "context.prepare",
       "completedTurns": 0,
       "lastError": null
@@ -368,6 +370,7 @@ Params:
       "messages": [],
       "context": {},
       "availableTools": {},
+      "pendingToolApprovals": {},
       "activePhase": "example.phase",
       "completedTurns": 0,
       "lastError": null
@@ -429,6 +432,7 @@ Common fields:
     "messages": [],
     "context": {},
     "availableTools": {},
+    "pendingToolApprovals": {},
     "activePhase": "model.request.prepare",
     "completedTurns": 0,
     "lastError": null
@@ -607,6 +611,7 @@ Common fields:
     "messages": [],
     "context": {},
     "availableTools": {},
+    "pendingToolApprovals": {},
     "activePhase": "tool.execute",
     "completedTurns": 0,
     "lastError": null
@@ -651,7 +656,7 @@ Params payload:
 }
 ```
 
-Result:
+Decision result:
 
 ```json
 {
@@ -664,9 +669,22 @@ Result:
 }
 ```
 
+Approval result:
+
+```json
+{
+  "approval": {
+    "prompt": "Approve echo tool?",
+    "reason": "Writes to an external service",
+    "expiresAtMs": 1760000000000,
+    "metadata": {"ticket": "APPROVAL-1"}
+  }
+}
+```
+
 No-op behavior: return `{}`. The hook records no decision.
 
-Failure behavior: malformed `decision` fails the tool execution phase. A `deny` outcome is auditable and blocks the tool call.
+Failure behavior: malformed `decision` or `approval` fails the tool execution phase. Returning both `decision` and `approval` is invalid. A `deny` outcome is auditable and blocks the tool call. An approval pauses the whole `tool.execute` phase before any provider in that batch executes; the host must resume the same `runId` with a `ToolApprovalResolution`.
 
 ### `after_tool_call`
 
@@ -757,13 +775,14 @@ Failure behavior: malformed responses or an empty `summary` fail the `context.co
   "messages": [],
   "context": {},
   "availableTools": {},
+  "pendingToolApprovals": {},
   "activePhase": "model.stream",
   "completedTurns": 0,
   "lastError": null
 }
 ```
 
-`status` values: `idle`, `running`, `completed`, `aborted`, `failed`.
+`status` values: `idle`, `running`, `paused`, `completed`, `aborted`, `failed`.
 
 ### `AgentMessage`
 
@@ -978,6 +997,67 @@ Stop reasons: `stop`, `length`, `tool_use`, `error`, `aborted`.
 ```
 
 `outcome` values: `allow`, `deny`.
+
+### `ToolApprovalRequestSpec`
+
+Returned by a `before_tool_call` hook when the extension wants the host or application layer to ask a human or external approval service.
+
+```json
+{
+  "prompt": "Approve echo tool?",
+  "reason": "Writes to an external service",
+  "expiresAtMs": 1760000000000,
+  "metadata": {}
+}
+```
+
+All fields are optional except `metadata`, which defaults to `{}` when omitted. `expiresAtMs` is Unix time in milliseconds. Core does not run a background timer; callers trigger timeout handling by resuming with no explicit resolution after the deadline.
+
+### `ToolApprovalRequest`
+
+Emitted by core as `ToolApprovalRequested` and exposed through `AgentState.pendingToolApprovals`.
+
+```json
+{
+  "approvalId": "approval-run-1-1-call-1-0",
+  "toolCall": {
+    "id": "call-1",
+    "name": "echo",
+    "arguments": {"text": "hello"}
+  },
+  "permissions": [
+    {
+      "capability": "example.echo",
+      "description": "Allows echo execution",
+      "metadata": {}
+    }
+  ],
+  "hookId": "example-tool-hook",
+  "request": {
+    "prompt": "Approve echo tool?",
+    "reason": "Writes to an external service",
+    "metadata": {}
+  }
+}
+```
+
+### `ToolApprovalResolution`
+
+Passed to the Rust host API, not sent directly to the extension process.
+
+```json
+{
+  "approvalId": "approval-run-1-1-call-1-0",
+  "decision": {
+    "outcome": "allow",
+    "reason": "approved in UI",
+    "approver": "m4n5ter",
+    "metadata": {}
+  }
+}
+```
+
+The decision is replayed into the normal `ToolPermissionDecided` audit for the hook that requested approval. Timeout handling produces the same shape with `outcome: "deny"` and a timeout marker in `metadata`.
 
 ### `AgentEffect`
 

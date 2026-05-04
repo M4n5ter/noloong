@@ -260,6 +260,16 @@ for await (const line of rl) {
       });
       continue;
     }
+    if (params.hookPoint === "before_tool_call" && toolHookMode === "approval") {
+      result(id, {
+        approval: {
+          prompt: "Approve fixture tool?",
+          reason: "fixture approval mode",
+          metadata: { fixtureHook: "approval" },
+        },
+      });
+      continue;
+    }
     result(id, {});
     continue;
   }

@@ -37,4 +37,6 @@ The extension implements the full standard conformance capability set and should
 | `compaction/summarize` | Receives flattened compaction request fields plus `summarizerId`; returns `summary`. |
 | `shutdown` | Returns `{}`. |
 
+`tool_hook/run` demonstrates both permission decisions and human approval requests. The normal conformance path returns an allow `decision`; the approval conformance path returns `approval`, causing core to pause the run and later replay the human `ToolApprovalResolution` into the standard permission audit.
+
 The helper writes only JSON-RPC messages to stdout. Use stderr for diagnostics. For model streaming, call `context.streamEvent(streamId, event)` from the `model/stream` handler; the helper emits the `stream/event` notification shape required by the bridge.
