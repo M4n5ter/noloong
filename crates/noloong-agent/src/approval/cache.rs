@@ -1,4 +1,3 @@
-use super::{APPROVAL_CACHE_KEY_METADATA, BUILT_IN_APPROVAL_HOOK_ID};
 use crate::{BuiltInToolName, StartCommandRequest};
 use noloong_agent_core::{
     ToolApprovalRequest, ToolCall, ToolPermissionDecision, ToolPermissionOutcome,
@@ -8,6 +7,8 @@ use std::{
     collections::{BTreeMap, HashSet},
     sync::{Arc, Mutex},
 };
+
+use super::constants::{APPROVAL_CACHE_KEY_METADATA, BUILT_IN_APPROVAL_HOOK_ID};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ApprovalCacheKey(String);
@@ -49,12 +50,24 @@ impl ApprovalCache {
     }
 }
 
-pub(crate) fn approval_cache_key_for_tool_call(tool_call: &ToolCall) -> Option<ApprovalCacheKey> {
+pub(super) struct HostExecStartApprovalInput {
+    pub(super) input: StartCommandRequest,
+    pub(super) cache_key: Option<ApprovalCacheKey>,
+}
+
+pub(super) fn host_exec_start_approval_input(
+    tool_call: &ToolCall,
+) -> Option<HostExecStartApprovalInput> {
+    let input = parse_start_command_request(&tool_call.arguments)?;
+    let cache_key = host_exec_start_cache_key(&input);
+    Some(HostExecStartApprovalInput { input, cache_key })
+}
+
+pub(super) fn approval_cache_key_for_tool_call(tool_call: &ToolCall) -> Option<ApprovalCacheKey> {
     let tool_name = BuiltInToolName::parse(&tool_call.name).ok()?;
     match tool_name {
         BuiltInToolName::HostExecStart => {
-            let input = parse_start_command_request(&tool_call.arguments)?;
-            host_exec_start_cache_key(&input)
+            host_exec_start_approval_input(tool_call).and_then(|parsed| parsed.cache_key)
         }
         BuiltInToolName::HostExecWrite | BuiltInToolName::HostExecTerminate => {
             ApprovalCacheKey::from_json(json!({
@@ -69,7 +82,7 @@ pub(crate) fn approval_cache_key_for_tool_call(tool_call: &ToolCall) -> Option<A
     }
 }
 
-pub(super) fn host_exec_start_cache_key(input: &StartCommandRequest) -> Option<ApprovalCacheKey> {
+fn host_exec_start_cache_key(input: &StartCommandRequest) -> Option<ApprovalCacheKey> {
     ApprovalCacheKey::from_json(json!({
         "tool": BuiltInToolName::HostExecStart.as_str(),
         "command": &input.command,
@@ -98,7 +111,7 @@ pub(crate) fn cache_key_from_approval_resolution(
         .and_then(ApprovalCacheKey::from_metadata)
 }
 
-pub(super) fn parse_start_command_request(value: &Value) -> Option<StartCommandRequest> {
+fn parse_start_command_request(value: &Value) -> Option<StartCommandRequest> {
     serde_json::from_value(value.clone()).ok()
 }
 

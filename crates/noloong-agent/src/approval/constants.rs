@@ -1,0 +1,9 @@
+pub(in crate::approval) const BUILT_IN_APPROVAL_HOOK_ID: &str = "noloong.builtin.approval";
+pub(in crate::approval) const APPROVAL_CACHE_KEY_METADATA: &str = "approvalCacheKey";
+pub(in crate::approval) const CLASSIFICATION_DECISION_METADATA: &str = "classificationDecision";
+pub(in crate::approval) const CLASSIFICATION_REASON_METADATA: &str = "classificationReason";
+pub(in crate::approval) const CLASSIFICATION_SOURCE_METADATA: &str = "classificationSource";
+pub(in crate::approval) const REVIEWER_METADATA: &str = "reviewer";
+pub(in crate::approval) const REVIEWER_HUMAN: &str = "human";
+pub(in crate::approval) const TOOL_CALL_ID_METADATA: &str = "toolCallId";
+pub(in crate::approval) const TOOL_NAME_METADATA: &str = "toolName";
