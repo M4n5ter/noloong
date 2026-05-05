@@ -13,9 +13,9 @@ use crate::{
 };
 use noloong_agent_core::{
     Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, CompactionSummarizer,
-    ContextCompactionConfig, ContextProvider, EventStore, ModelProvider, PhaseHook, PhaseNode,
-    Result, StdioExtensionConfig, TokenEstimator, ToolApprovalRequest, ToolCallHook,
-    ToolExecutionMode, ToolPermissionDecision, ToolProvider,
+    ContextCompactionConfig, ContextCompactor, ContextProvider, EventStore, ModelProvider,
+    PhaseHook, PhaseNode, Result, StdioExtensionConfig, TokenEstimator, ToolApprovalRequest,
+    ToolCallHook, ToolExecutionMode, ToolPermissionDecision, ToolProvider,
 };
 use serde_json::{Map, json};
 use std::{
@@ -406,6 +406,48 @@ impl AgentSessionRuntimeBuilder {
         self.core = self
             .core
             .with_context_compaction_estimator(config, summarizer, estimator);
+        self
+    }
+
+    pub fn with_context_compactor(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor: Arc<dyn ContextCompactor>,
+    ) -> Self {
+        self.core = self.core.with_context_compactor(config, compactor);
+        self
+    }
+
+    pub fn with_context_compactor_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor: Arc<dyn ContextCompactor>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.core = self
+            .core
+            .with_context_compactor_estimator(config, compactor, estimator);
+        self
+    }
+
+    pub fn with_context_compactor_id(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor_id: impl Into<String>,
+    ) -> Self {
+        self.core = self.core.with_context_compactor_id(config, compactor_id);
+        self
+    }
+
+    pub fn with_context_compactor_id_and_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor_id: impl Into<String>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.core =
+            self.core
+                .with_context_compactor_id_and_estimator(config, compactor_id, estimator);
         self
     }
 

@@ -1,5 +1,6 @@
 use noloong_agent_core::{
-    CONFORMANCE_COMPACTION_SUMMARIZER_ID, CONFORMANCE_CONTEXT_PROVIDER_ID,
+    CONFORMANCE_COMPACTION_SUMMARIZER_ID, CONFORMANCE_CONTEXT_COMPACTOR_ID,
+    CONFORMANCE_CONTEXT_PROVIDER_ID, CONFORMANCE_HTTP_AUTH_PROVIDER_ID,
     CONFORMANCE_MODEL_PROVIDER_ID, CONFORMANCE_PHASE_HOOK_ID, CONFORMANCE_PHASE_NODE_ID,
     CONFORMANCE_TOOL_CALL_HOOK_ID, CONFORMANCE_TOOL_NAME,
 };
@@ -31,6 +32,9 @@ fn extension_docs_cover_current_contract() {
             "phase_hook/run",
             "tool_hook/run",
             "compaction/summarize",
+            "compaction/compact",
+            "auth/headers",
+            "auth/refresh",
             "shutdown",
         ],
     );
@@ -70,6 +74,12 @@ fn extension_docs_cover_current_contract() {
             "ToolApprovalResolution",
             "CompactionSummaryRequest",
             "CompactionSummaryResult",
+            "ContextCompactionRequest",
+            "ContextCompactionOutput",
+            "HttpAuthContext",
+            "HttpAuthHeaders",
+            "HttpAuthRefreshContext",
+            "HttpAuthRefreshResult",
         ],
     );
 
@@ -84,6 +94,8 @@ fn extension_docs_cover_current_contract() {
             CONFORMANCE_PHASE_HOOK_ID,
             CONFORMANCE_TOOL_CALL_HOOK_ID,
             CONFORMANCE_COMPACTION_SUMMARIZER_ID,
+            CONFORMANCE_CONTEXT_COMPACTOR_ID,
+            CONFORMANCE_HTTP_AUTH_PROVIDER_ID,
         ],
     );
 
@@ -96,6 +108,9 @@ fn extension_docs_cover_current_contract() {
             "phase_hook/run",
             "tool_hook/run",
             "compaction/summarize",
+            "compaction/compact",
+            "auth/headers",
+            "auth/refresh",
             "stream/event",
         ],
     );

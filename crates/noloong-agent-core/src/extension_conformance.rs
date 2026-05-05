@@ -1,11 +1,12 @@
 use crate::{
     AgentCoreError, AgentEventKind, AgentMessage, AgentRuntime, AgentState, CancellationToken,
-    ContentBlock, ContextCompactionConfig, ExtensionCapability, MessageRole, ModelStreamEvent,
-    Result, RunReport, StdioExtension, StdioExtensionConfig, ToolApprovalResolution,
-    ToolPermissionDecision, ToolPermissionOutcome,
+    ContentBlock, ContextCompactionConfig, ExtensionCapability, HttpAuthContext, HttpAuthProvider,
+    HttpAuthRefreshContext, MessageRole, ModelStreamEvent, Result, RunReport, StdioExtension,
+    StdioExtensionConfig, StdioHttpAuthProvider, ToolApprovalResolution, ToolPermissionDecision,
+    ToolPermissionOutcome,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
-use std::{collections::BTreeSet, time::Instant};
+use std::{collections::BTreeSet, sync::Arc, time::Instant};
 
 pub const CONFORMANCE_MODEL_PROVIDER_ID: &str = "conformance-model";
 pub const CONFORMANCE_TOOL_NAME: &str = "conformance_echo";
@@ -14,6 +15,8 @@ pub const CONFORMANCE_PHASE_NODE_ID: &str = "conformance.phase";
 pub const CONFORMANCE_PHASE_HOOK_ID: &str = "conformance-hook";
 pub const CONFORMANCE_TOOL_CALL_HOOK_ID: &str = "conformance-tool-hook";
 pub const CONFORMANCE_COMPACTION_SUMMARIZER_ID: &str = "conformance-compaction";
+pub const CONFORMANCE_CONTEXT_COMPACTOR_ID: &str = "conformance-context-compactor";
+pub const CONFORMANCE_HTTP_AUTH_PROVIDER_ID: &str = "conformance-auth";
 
 const CASE_LIFECYCLE: &str = "lifecycle";
 const CASE_RUNTIME_REGISTRATION: &str = "runtime_registration";
@@ -21,11 +24,15 @@ const CASE_STANDARD_CAPABILITIES: &str = "standard_capabilities";
 const CASE_ADAPTER_PAYLOADS: &str = "adapter_payloads";
 const CASE_TOOL_APPROVAL: &str = "tool_approval";
 const CASE_COMPACTION_SUMMARIZER: &str = "compaction_summarizer";
+const CASE_CONTEXT_COMPACTOR: &str = "context_compactor";
+const CASE_HTTP_AUTH_PROVIDER: &str = "http_auth_provider";
 
 const FULL_CASES: &[&str] = &[
     CASE_ADAPTER_PAYLOADS,
     CASE_TOOL_APPROVAL,
     CASE_COMPACTION_SUMMARIZER,
+    CASE_CONTEXT_COMPACTOR,
+    CASE_HTTP_AUTH_PROVIDER,
 ];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -284,21 +291,55 @@ pub async fn run_extension_conformance(
         }
         run_case(
             &mut report,
+            CASE_CONTEXT_COMPACTOR,
+            context_compactor_case(&config.stdio),
+        )
+        .await;
+        if should_stop(&report, config.fail_fast) {
+            return Ok(report);
+        }
+        run_case(
+            &mut report,
+            CASE_HTTP_AUTH_PROVIDER,
+            http_auth_provider_case(&config.stdio),
+        )
+        .await;
+        if should_stop(&report, config.fail_fast) {
+            return Ok(report);
+        }
+        run_case(
+            &mut report,
             CASE_TOOL_APPROVAL,
             tool_approval_case(&config.stdio),
         )
         .await;
     } else {
-        let (adapter_payloads, compaction_summarizer, tool_approval) = tokio::join!(
+        let (
+            adapter_payloads,
+            compaction_summarizer,
+            context_compactor,
+            http_auth_provider,
+            tool_approval,
+        ) = tokio::join!(
             evaluate_case(CASE_ADAPTER_PAYLOADS, adapter_payloads_case(&config.stdio)),
             evaluate_case(
                 CASE_COMPACTION_SUMMARIZER,
                 compaction_summarizer_case(&config.stdio)
             ),
+            evaluate_case(
+                CASE_CONTEXT_COMPACTOR,
+                context_compactor_case(&config.stdio)
+            ),
+            evaluate_case(
+                CASE_HTTP_AUTH_PROVIDER,
+                http_auth_provider_case(&config.stdio)
+            ),
             evaluate_case(CASE_TOOL_APPROVAL, tool_approval_case(&config.stdio))
         );
         report.push(adapter_payloads.0);
         report.push(compaction_summarizer.0);
+        report.push(context_compactor.0);
+        report.push(http_auth_provider.0);
         report.push(tool_approval.0);
     }
 
@@ -556,6 +597,86 @@ async fn compaction_summarizer_case(stdio: &StdioExtensionConfig) -> Result<()> 
     )
 }
 
+async fn context_compactor_case(stdio: &StdioExtensionConfig) -> Result<()> {
+    let builder = AgentRuntime::builder()
+        .with_stdio_extension(stdio.clone())
+        .await?;
+    let runtime = builder
+        .with_context_compactor_id(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10),
+            CONFORMANCE_CONTEXT_COMPACTOR_ID,
+        )
+        .max_turns(1)
+        .build()?;
+
+    let report = runtime
+        .continue_from_state(
+            conformance_compaction_trigger_state(),
+            None,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    ensure(
+        report.state.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains("conformance replacement summary")
+                )
+            })
+        }),
+        "context compactor did not produce expected replacement history",
+    )?;
+    ensure(
+        report.events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                AgentEventKind::EffectCommitted {
+                    effect: crate::AgentEffect::ReplaceMessages { .. }
+                }
+            )
+        }),
+        "context compactor did not commit a replacement effect",
+    )
+}
+
+async fn http_auth_provider_case(stdio: &StdioExtensionConfig) -> Result<()> {
+    let extension = Arc::new(StdioExtension::connect(stdio.clone()).await?);
+    let auth = StdioHttpAuthProvider::new(extension, CONFORMANCE_HTTP_AUTH_PROVIDER_ID.into());
+    let context = HttpAuthContext::new("conformance-provider", "POST", "https://example.test", 0);
+    let headers = auth
+        .headers(context.clone(), CancellationToken::new())
+        .await?;
+    ensure(
+        headers.headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("authorization")
+                && header.value == "Bearer conformance-auth"
+        }),
+        "http auth provider did not return expected authorization header",
+    )?;
+
+    let refresh = auth
+        .refresh(
+            HttpAuthRefreshContext::unauthorized(context, 401),
+            CancellationToken::new(),
+        )
+        .await?;
+    ensure(refresh.retry, "http auth provider refresh denied retry")?;
+    ensure(
+        refresh.headers.as_ref().is_some_and(|headers| {
+            headers.iter().any(|header| {
+                header.name.eq_ignore_ascii_case("authorization")
+                    && header.value == "Bearer conformance-refresh"
+            })
+        }),
+        "http auth provider refresh did not return expected authorization header",
+    )
+}
+
 enum FullConformanceDecision {
     Run,
     Skip(String),
@@ -598,6 +719,8 @@ const STANDARD_CAPABILITIES: &[StandardCapability] = &[
     StandardCapability::PhaseHook,
     StandardCapability::ToolCallHook,
     StandardCapability::CompactionSummarizer,
+    StandardCapability::ContextCompactor,
+    StandardCapability::HttpAuthProvider,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -609,6 +732,8 @@ enum StandardCapability {
     PhaseHook,
     ToolCallHook,
     CompactionSummarizer,
+    ContextCompactor,
+    HttpAuthProvider,
 }
 
 impl StandardCapability {
@@ -621,6 +746,8 @@ impl StandardCapability {
             Self::PhaseHook => CONFORMANCE_PHASE_HOOK_ID,
             Self::ToolCallHook => CONFORMANCE_TOOL_CALL_HOOK_ID,
             Self::CompactionSummarizer => CONFORMANCE_COMPACTION_SUMMARIZER_ID,
+            Self::ContextCompactor => CONFORMANCE_CONTEXT_COMPACTOR_ID,
+            Self::HttpAuthProvider => CONFORMANCE_HTTP_AUTH_PROVIDER_ID,
         }
     }
 
@@ -644,6 +771,12 @@ impl StandardCapability {
             }
             (Self::CompactionSummarizer, ExtensionCapability::CompactionSummarizer { id }) => {
                 id == CONFORMANCE_COMPACTION_SUMMARIZER_ID
+            }
+            (Self::ContextCompactor, ExtensionCapability::ContextCompactor { id }) => {
+                id == CONFORMANCE_CONTEXT_COMPACTOR_ID
+            }
+            (Self::HttpAuthProvider, ExtensionCapability::HttpAuthProvider { id }) => {
+                id == CONFORMANCE_HTTP_AUTH_PROVIDER_ID
             }
             _ => false,
         }

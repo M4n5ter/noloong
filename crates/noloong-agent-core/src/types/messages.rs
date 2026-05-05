@@ -121,4 +121,9 @@ pub enum ContentBlock {
         content: Vec<ContentBlock>,
         is_error: bool,
     },
+    ProviderPayload {
+        provider: String,
+        kind: String,
+        value: Value,
+    },
 }

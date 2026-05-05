@@ -1,6 +1,7 @@
 use crate::{
     AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentState, ContextPatch,
-    MessageCompaction, MessageRole, Result, RunPauseReason, RunStatus, compacted_messages,
+    MessageCompaction, MessageReplacement, MessageRole, Result, RunPauseReason, RunStatus,
+    compacted_messages,
 };
 use std::collections::BTreeSet;
 
@@ -94,6 +95,9 @@ pub fn validate_effect(effect: &AgentEffect) -> Result<()> {
             }
         },
         AgentEffect::CompactMessages { compaction } => validate_message_compaction(compaction)?,
+        AgentEffect::ReplaceMessages { replacement } => {
+            validate_message_replacement(replacement)?;
+        }
         AgentEffect::SetAvailableTools { tools } => {
             let mut names = BTreeSet::new();
             for tool in tools {
@@ -116,8 +120,14 @@ pub fn validate_effect(effect: &AgentEffect) -> Result<()> {
 
 pub fn validate_effect_for_state(state: &AgentState, effect: &AgentEffect) -> Result<()> {
     validate_effect(effect)?;
-    if let AgentEffect::CompactMessages { compaction } = effect {
-        validate_message_compaction_for_state(state, compaction)?;
+    match effect {
+        AgentEffect::CompactMessages { compaction } => {
+            validate_message_compaction_for_state(state, compaction)?;
+        }
+        AgentEffect::ReplaceMessages { replacement } => {
+            validate_message_replacement_for_state(state, replacement)?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -157,6 +167,9 @@ fn apply_effect(state: &mut AgentState, effect: &AgentEffect) -> Result<()> {
                 .collect::<Vec<_>>();
             state.messages =
                 compacted_messages(compaction.summary_message.clone(), &retained_messages);
+        }
+        AgentEffect::ReplaceMessages { replacement } => {
+            state.messages = replacement.replacement_messages.clone();
         }
     }
     Ok(())
@@ -234,6 +247,48 @@ fn validate_message_compaction_for_state(
     if covered_ids != existing_ids {
         return Err(AgentCoreError::InvalidEffect(
             "compaction retained and dropped message ids must cover current messages".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_message_replacement(replacement: &MessageReplacement) -> Result<()> {
+    if replacement.replacement_messages.is_empty() {
+        return Err(AgentCoreError::InvalidEffect(
+            "replacement messages must not be empty".into(),
+        ));
+    }
+    let mut replacement_ids = BTreeSet::new();
+    for message in &replacement.replacement_messages {
+        validate_message_id(&message.id)?;
+        if !replacement_ids.insert(message.id.as_str()) {
+            return Err(AgentCoreError::InvalidEffect(format!(
+                "duplicate replacement message id: {}",
+                message.id
+            )));
+        }
+    }
+    unique_message_ids(&replacement.replaced_message_ids, "replaced")?;
+    Ok(())
+}
+
+fn validate_message_replacement_for_state(
+    state: &AgentState,
+    replacement: &MessageReplacement,
+) -> Result<()> {
+    let existing_ids = state
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let replaced_ids = replacement
+        .replaced_message_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if replaced_ids != existing_ids {
+        return Err(AgentCoreError::InvalidEffect(
+            "replacement message ids must cover current messages".into(),
         ));
     }
     Ok(())

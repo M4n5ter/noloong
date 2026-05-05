@@ -23,8 +23,8 @@ use tokio::{
 };
 
 pub use adapters::{
-    StdioCompactionSummarizer, StdioContextProvider, StdioModelProvider, StdioPhaseHook,
-    StdioPhaseNode, StdioToolCallHook, StdioToolProvider,
+    StdioCompactionSummarizer, StdioContextCompactor, StdioContextProvider, StdioHttpAuthProvider,
+    StdioModelProvider, StdioPhaseHook, StdioPhaseNode, StdioToolCallHook, StdioToolProvider,
 };
 use wire::{CapabilitiesResult, InitializeResult, JsonRpcRequest};
 

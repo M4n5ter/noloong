@@ -2,6 +2,8 @@ pub mod approval;
 pub mod host;
 pub mod i18n;
 pub mod manifest;
+#[cfg(feature = "openai")]
+pub mod openai;
 pub mod process;
 pub mod session;
 pub mod tools;

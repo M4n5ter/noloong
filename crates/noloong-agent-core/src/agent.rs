@@ -1,9 +1,10 @@
 use crate::{
     AgentCoreError, AgentEvent, AgentEventSink, AgentInput, AgentMessage, AgentRuntime,
     AgentRuntimeBuilder, AgentState, CancellationToken, CompactionSummarizer,
-    ContextCompactionConfig, ContextProvider, EventSinkFuture, ModelProvider, PhaseHook, QueueMode,
-    QueuedAgentMessage, Result, RunReport, RuntimeQueues, StdioExtensionConfig, TokenEstimator,
-    ToolApprovalResolution, ToolCallHook, ToolExecutionMode, ToolProvider, apply_event,
+    ContextCompactionConfig, ContextCompactor, ContextProvider, EventSinkFuture, ModelProvider,
+    PhaseHook, QueueMode, QueuedAgentMessage, Result, RunReport, RuntimeQueues,
+    StdioExtensionConfig, TokenEstimator, ToolApprovalResolution, ToolCallHook, ToolExecutionMode,
+    ToolProvider, apply_event,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -535,6 +536,52 @@ impl AgentBuilder {
         self.runtime_builder = self
             .runtime_builder
             .with_context_compaction_estimator(config, summarizer, estimator);
+        self
+    }
+
+    pub fn with_context_compactor(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor: Arc<dyn ContextCompactor>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compactor(config, compactor);
+        self
+    }
+
+    pub fn with_context_compactor_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor: Arc<dyn ContextCompactor>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compactor_estimator(config, compactor, estimator);
+        self
+    }
+
+    pub fn with_context_compactor_id(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor_id: impl Into<String>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compactor_id(config, compactor_id);
+        self
+    }
+
+    pub fn with_context_compactor_id_and_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor_id: impl Into<String>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .with_context_compactor_id_and_estimator(config, compactor_id, estimator);
         self
     }
 

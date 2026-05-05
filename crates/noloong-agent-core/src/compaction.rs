@@ -26,6 +26,16 @@ pub trait CompactionSummarizer: Send + Sync {
     ) -> BoxFuture<'a, CompactionSummaryResult>;
 }
 
+pub trait ContextCompactor: Send + Sync {
+    fn id(&self) -> &str;
+
+    fn compact<'a>(
+        &'a self,
+        request: ContextCompactionRequest,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ContextCompactionOutput>;
+}
+
 pub trait TokenEstimator: Send + Sync {
     fn estimate_message_tokens(&self, message: &AgentMessage) -> u64;
 
@@ -133,6 +143,106 @@ pub struct CompactionSummaryResult {
     pub summary: String,
     #[serde(default)]
     pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCompactionRequest {
+    pub run_id: String,
+    pub turn_id: u64,
+    #[serde(default)]
+    pub current_messages: Vec<AgentMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_summary: Option<String>,
+    #[serde(default)]
+    pub messages_to_summarize: Vec<AgentMessage>,
+    #[serde(default)]
+    pub turn_prefix_messages: Vec<AgentMessage>,
+    #[serde(default)]
+    pub retained_messages: Vec<AgentMessage>,
+    pub token_budget: u64,
+    pub tokens_before: u64,
+    pub estimated_retained_tokens: u64,
+    pub is_split_turn: bool,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+impl ContextCompactionRequest {
+    fn into_summary_request(self) -> CompactionSummaryRequest {
+        CompactionSummaryRequest {
+            run_id: self.run_id,
+            turn_id: self.turn_id,
+            previous_summary: self.previous_summary,
+            messages_to_summarize: self.messages_to_summarize,
+            turn_prefix_messages: self.turn_prefix_messages,
+            token_budget: self.token_budget,
+            metadata: self.metadata,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", content = "result", rename_all = "snake_case")]
+pub enum ContextCompactionOutput {
+    Summary(CompactionSummaryResult),
+    Replacement(CompactionReplacementResult),
+}
+
+impl ContextCompactionOutput {
+    pub fn summary(summary: impl Into<String>) -> Self {
+        Self::Summary(CompactionSummaryResult {
+            summary: summary.into(),
+            metadata: Map::new(),
+        })
+    }
+
+    pub fn replacement(messages: Vec<AgentMessage>) -> Self {
+        Self::Replacement(CompactionReplacementResult {
+            replacement_messages: messages,
+            metadata: Map::new(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionReplacementResult {
+    #[serde(default)]
+    pub replacement_messages: Vec<AgentMessage>,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone)]
+pub struct SummaryContextCompactor {
+    summarizer: Arc<dyn CompactionSummarizer>,
+}
+
+impl SummaryContextCompactor {
+    pub fn new(summarizer: Arc<dyn CompactionSummarizer>) -> Self {
+        Self { summarizer }
+    }
+}
+
+impl ContextCompactor for SummaryContextCompactor {
+    fn id(&self) -> &str {
+        self.summarizer.id()
+    }
+
+    fn compact<'a>(
+        &'a self,
+        request: ContextCompactionRequest,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ContextCompactionOutput> {
+        Box::pin(async move {
+            let result = self
+                .summarizer
+                .summarize(request.into_summary_request(), cancellation)
+                .await?;
+            Ok(ContextCompactionOutput::Summary(result))
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -598,6 +708,13 @@ fn serialize_content_for_summary(content: &[ContentBlock]) -> String {
                     "[tool_result:{tool_name} id={tool_call_id} is_error={is_error}] {nested}"
                 ));
             }
+            ContentBlock::ProviderPayload {
+                provider,
+                kind,
+                value,
+            } => {
+                parts.push(format!("[provider_payload:{provider}/{kind}] {value}"));
+            }
         }
     }
     parts.join("\n")
@@ -632,6 +749,11 @@ fn estimate_content_chars(content: &[ContentBlock]) -> usize {
                 tool_call.name.len() + tool_call.arguments.to_string().len()
             }
             ContentBlock::ToolResult { content, .. } => estimate_content_chars(content),
+            ContentBlock::ProviderPayload {
+                provider,
+                kind,
+                value,
+            } => provider.len() + kind.len() + value.to_string().len(),
         })
         .sum()
 }

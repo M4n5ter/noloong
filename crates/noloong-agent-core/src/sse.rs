@@ -142,7 +142,11 @@ async fn handle_http_error(
     if is_retryable_status(status) {
         Ok(SseAttemptOutcome::RetryableBeforeData(message))
     } else {
-        Err(AgentCoreError::Provider(message))
+        Err(AgentCoreError::HttpStatus {
+            provider: options.provider_label.into(),
+            status: status.as_u16(),
+            body,
+        })
     }
 }
 

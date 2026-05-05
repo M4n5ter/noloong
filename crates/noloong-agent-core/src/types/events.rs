@@ -109,6 +109,7 @@ pub enum AgentEffect {
     PatchContext { patch: ContextPatch },
     SetAvailableTools { tools: Vec<ToolSpec> },
     CompactMessages { compaction: MessageCompaction },
+    ReplaceMessages { replacement: MessageReplacement },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +127,19 @@ pub struct MessageCompaction {
     pub retained_message_ids: Vec<MessageId>,
     #[serde(default)]
     pub dropped_message_ids: Vec<MessageId>,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReplacement {
+    #[serde(default)]
+    pub replacement_messages: Vec<AgentMessage>,
+    #[serde(default)]
+    pub replaced_message_ids: Vec<MessageId>,
     pub tokens_before: u64,
     pub tokens_after: u64,
     #[serde(default)]

@@ -14,7 +14,9 @@ const Mode = Object.freeze({
   adapterPayloads: "adapter-payloads",
   delayedStream: "delayed-stream",
   duplicateCompaction: "duplicate-compaction",
+  duplicateContextCompactor: "duplicate-context-compactor",
   duplicateContext: "duplicate-context",
+  duplicateHttpAuth: "duplicate-http-auth",
   duplicateModel: "duplicate-model",
   duplicatePhase: "duplicate-phase",
   duplicatePhaseHook: "duplicate-phase-hook",
@@ -128,6 +130,8 @@ function allCapabilities() {
     { type: "phase_hook", id: "conformance-hook" },
     { type: "tool_call_hook", id: "conformance-tool-hook" },
     { type: "compaction_summarizer", id: "conformance-compaction" },
+    { type: "context_compactor", id: "conformance-context-compactor" },
+    { type: "http_auth_provider", id: "conformance-auth" },
   ];
 }
 
@@ -207,6 +211,20 @@ function duplicateCapabilityCases() {
       [
         { type: "compaction_summarizer", id: "duplicate-compaction" },
         { type: "compaction_summarizer", id: "duplicate-compaction" },
+      ],
+    ],
+    [
+      Mode.duplicateContextCompactor,
+      [
+        { type: "context_compactor", id: "duplicate-context-compactor" },
+        { type: "context_compactor", id: "duplicate-context-compactor" },
+      ],
+    ],
+    [
+      Mode.duplicateHttpAuth,
+      [
+        { type: "http_auth_provider", id: "duplicate-http-auth" },
+        { type: "http_auth_provider", id: "duplicate-http-auth" },
       ],
     ],
   ];
@@ -325,6 +343,37 @@ function assertCompactionParams(id, params) {
     assertOrError(id, Array.isArray(params.turnPrefixMessages), "turnPrefixMessages missing") &&
     assertOrError(id, Number.isInteger(params.tokenBudget), "tokenBudget missing") &&
     assertOrError(id, params.metadata, "metadata missing")
+  );
+}
+
+function assertContextCompactorParams(id, params) {
+  return (
+    assertOrError(id, params.compactorId === "conformance-context-compactor", "compactorId mismatch") &&
+    assertOrError(id, params.runId === "run-1", "context compactor runId mismatch") &&
+    assertOrError(id, Number.isInteger(params.turnId), "context compactor turnId missing") &&
+    assertOrError(id, Array.isArray(params.currentMessages), "currentMessages missing") &&
+    assertOrError(id, Array.isArray(params.messagesToSummarize), "messagesToSummarize missing") &&
+    assertOrError(id, Array.isArray(params.retainedMessages), "retainedMessages missing") &&
+    assertOrError(id, Number.isInteger(params.tokenBudget), "tokenBudget missing") &&
+    assertOrError(id, Number.isInteger(params.tokensBefore), "tokensBefore missing")
+  );
+}
+
+function assertAuthHeadersParams(id, params) {
+  return (
+    assertOrError(id, params.authProviderId === "conformance-auth", "authProviderId mismatch") &&
+    assertOrError(id, params.context?.providerId === "conformance-provider", "auth context providerId mismatch") &&
+    assertOrError(id, params.context?.method === "POST", "auth context method mismatch") &&
+    assertOrError(id, params.context?.url === "https://example.test", "auth context url mismatch") &&
+    assertOrError(id, params.context?.attempt === 0, "auth context attempt mismatch")
+  );
+}
+
+function assertAuthRefreshParams(id, params) {
+  return (
+    assertAuthHeadersParams(id, params) &&
+    assertOrError(id, params.reason === "unauthorized", "auth refresh reason mismatch") &&
+    assertOrError(id, params.status === 401, "auth refresh status mismatch")
   );
 }
 
@@ -571,6 +620,50 @@ for await (const line of rl) {
     result(id, {
       summary: `conformance compaction summary: ${params.messagesToSummarize.length}`,
       metadata: { conformanceCompaction: true },
+    });
+    continue;
+  }
+
+  if (method === "compaction/compact") {
+    if (!assertContextCompactorParams(id, params)) continue;
+    result(id, {
+      type: "replacement",
+      result: {
+        replacementMessages: [
+          {
+            id: "conformance-replacement-summary",
+            role: "system",
+            content: [
+              {
+                type: "text",
+                text: `conformance replacement summary: ${params.messagesToSummarize.length}`,
+              },
+            ],
+            metadata: {},
+          },
+          ...(params.retainedMessages ?? []),
+        ],
+        metadata: { conformanceContextCompactor: true },
+      },
+    });
+    continue;
+  }
+
+  if (method === "auth/headers") {
+    if (!assertAuthHeadersParams(id, params)) continue;
+    result(id, {
+      headers: [{ name: "Authorization", value: "Bearer conformance-auth" }],
+      metadata: { conformanceAuth: true },
+    });
+    continue;
+  }
+
+  if (method === "auth/refresh") {
+    if (!assertAuthRefreshParams(id, params)) continue;
+    result(id, {
+      retry: true,
+      headers: [{ name: "Authorization", value: "Bearer conformance-refresh" }],
+      metadata: { conformanceRefresh: true },
     });
     continue;
   }

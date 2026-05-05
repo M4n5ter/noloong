@@ -22,6 +22,31 @@ fn reconnect_config_builder_sets_stream_reconnect() {
 }
 
 #[tokio::test]
+async fn provider_payload_blocks_are_rejected() -> Result<()> {
+    let provider = AnthropicMessagesProvider::new(
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .base_url("http://127.0.0.1:9")
+            .api_key("secret-key"),
+    )?;
+
+    let error = provider
+        .stream_model(
+            request_with_user_content(vec![ContentBlock::ProviderPayload {
+                provider: "openai.responses".into(),
+                kind: "response_item".into(),
+                value: json!({"type": "reasoning"}),
+            }]),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("provider payload should fail before request");
+
+    assert!(error.to_string().contains("provider payload"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn config_sends_official_headers_and_defaults() -> Result<()> {
     let body = captured_request_body(
         simple_request(),

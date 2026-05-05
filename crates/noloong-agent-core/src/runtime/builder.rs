@@ -1,10 +1,10 @@
 use super::{AgentRuntime, ContextCompactionRuntime};
 use crate::phase::{PHASE_CONTEXT_COMPACT, PHASE_MODEL_REQUEST_PREPARE, PHASE_TURN_DECISION};
 use crate::{
-    AgentCoreError, CompactionSummarizer, ContextCompactionConfig, ContextProvider, EventStore,
-    HeuristicTokenEstimator, InMemoryEventStore, ModelProvider, PhaseHook, PhaseNode, Result,
-    StandardPhase, StdioExtension, StdioExtensionConfig, TokenEstimator, ToolCallHook,
-    ToolExecutionMode, ToolProvider,
+    AgentCoreError, CompactionSummarizer, ContextCompactionConfig, ContextCompactor,
+    ContextProvider, EventStore, HeuristicTokenEstimator, InMemoryEventStore, ModelProvider,
+    PhaseHook, PhaseNode, Result, StandardPhase, StdioExtension, StdioExtensionConfig,
+    SummaryContextCompactor, TokenEstimator, ToolCallHook, ToolExecutionMode, ToolProvider,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,12 +14,17 @@ use std::{
 enum ContextCompactionRegistration {
     Direct {
         config: ContextCompactionConfig,
-        summarizer: Arc<dyn CompactionSummarizer>,
+        compactor: Arc<dyn ContextCompactor>,
         estimator: Arc<dyn TokenEstimator>,
     },
     SummarizerId {
         config: ContextCompactionConfig,
         summarizer_id: String,
+        estimator: Arc<dyn TokenEstimator>,
+    },
+    CompactorId {
+        config: ContextCompactionConfig,
+        compactor_id: String,
         estimator: Arc<dyn TokenEstimator>,
     },
 }
@@ -41,6 +46,8 @@ pub struct AgentRuntimeBuilder {
     phase_hooks: Vec<Arc<dyn PhaseHook>>,
     context_providers: Vec<Arc<dyn ContextProvider>>,
     compaction_summarizers: BTreeMap<String, Arc<dyn CompactionSummarizer>>,
+    context_compactors: BTreeMap<String, Arc<dyn ContextCompactor>>,
+    http_auth_provider_ids: BTreeSet<String>,
     context_compaction: Option<ContextCompactionRegistration>,
     stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
@@ -59,6 +66,8 @@ impl Default for AgentRuntimeBuilder {
             phase_hooks: Vec::new(),
             context_providers: Vec::new(),
             compaction_summarizers: BTreeMap::new(),
+            context_compactors: BTreeMap::new(),
+            http_auth_provider_ids: BTreeSet::new(),
             context_compaction: None,
             stdio_extensions: Vec::new(),
             max_turns: 8,
@@ -143,14 +152,61 @@ impl AgentRuntimeBuilder {
     }
 
     pub fn with_context_compaction_estimator(
-        mut self,
+        self,
         config: ContextCompactionConfig,
         summarizer: Arc<dyn CompactionSummarizer>,
         estimator: Arc<dyn TokenEstimator>,
     ) -> Self {
+        self.with_context_compactor_estimator(
+            config,
+            Arc::new(SummaryContextCompactor::new(summarizer)),
+            estimator,
+        )
+    }
+
+    pub fn with_context_compactor(
+        self,
+        config: ContextCompactionConfig,
+        compactor: Arc<dyn ContextCompactor>,
+    ) -> Self {
+        self.with_context_compactor_estimator(config, compactor, Arc::new(HeuristicTokenEstimator))
+    }
+
+    pub fn with_context_compactor_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor: Arc<dyn ContextCompactor>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
         self.context_compaction = Some(ContextCompactionRegistration::Direct {
             config,
-            summarizer,
+            compactor,
+            estimator,
+        });
+        self
+    }
+
+    pub fn with_context_compactor_id(
+        self,
+        config: ContextCompactionConfig,
+        compactor_id: impl Into<String>,
+    ) -> Self {
+        self.with_context_compactor_id_and_estimator(
+            config,
+            compactor_id,
+            Arc::new(HeuristicTokenEstimator),
+        )
+    }
+
+    pub fn with_context_compactor_id_and_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        compactor_id: impl Into<String>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.context_compaction = Some(ContextCompactionRegistration::CompactorId {
+            config,
+            compactor_id: compactor_id.into(),
             estimator,
         });
         self
@@ -267,6 +323,18 @@ impl AgentRuntimeBuilder {
                         )),
                     );
                 }
+                crate::ExtensionCapability::ContextCompactor { id } => {
+                    self.context_compactors.insert(
+                        id.clone(),
+                        Arc::new(crate::jsonrpc::StdioContextCompactor::new(
+                            extension.clone(),
+                            id,
+                        )),
+                    );
+                }
+                crate::ExtensionCapability::HttpAuthProvider { id } => {
+                    self.http_auth_provider_ids.insert(id);
+                }
             }
         }
         self.stdio_extensions.push(extension);
@@ -330,6 +398,18 @@ impl AgentRuntimeBuilder {
                         self.compaction_summarizers.contains_key(id),
                     )?
                 }
+                crate::ExtensionCapability::ContextCompactor { id } => ensure_unique_capability(
+                    &mut seen,
+                    "context compactor",
+                    id,
+                    self.context_compactors.contains_key(id),
+                )?,
+                crate::ExtensionCapability::HttpAuthProvider { id } => ensure_unique_capability(
+                    &mut seen,
+                    "http auth provider",
+                    id,
+                    self.http_auth_provider_ids.contains(id),
+                )?,
             }
         }
         Ok(())
@@ -342,8 +422,11 @@ impl AgentRuntimeBuilder {
         if !self.model_providers.contains_key(&default_model_provider) {
             return Err(AgentCoreError::MissingModelProvider(default_model_provider));
         }
-        let context_compaction =
-            resolve_context_compaction(self.context_compaction, &self.compaction_summarizers)?;
+        let context_compaction = resolve_context_compaction(
+            self.context_compaction,
+            &self.compaction_summarizers,
+            &self.context_compactors,
+        )?;
         let mut phases = self.phases;
         if context_compaction.is_some() {
             ensure_context_compaction_phase(&mut phases);
@@ -422,6 +505,7 @@ fn duplicate_extension_capability(kind: &str, id: &str) -> AgentCoreError {
 fn resolve_context_compaction(
     registration: Option<ContextCompactionRegistration>,
     summarizers: &BTreeMap<String, Arc<dyn CompactionSummarizer>>,
+    compactors: &BTreeMap<String, Arc<dyn ContextCompactor>>,
 ) -> Result<Option<ContextCompactionRuntime>> {
     let Some(registration) = registration else {
         return Ok(None);
@@ -429,13 +513,13 @@ fn resolve_context_compaction(
     match registration {
         ContextCompactionRegistration::Direct {
             config,
-            summarizer,
+            compactor,
             estimator,
         } => {
             config.validate()?;
             Ok(Some(ContextCompactionRuntime {
                 config,
-                summarizer,
+                compactor,
                 estimator,
             }))
         }
@@ -450,7 +534,22 @@ fn resolve_context_compaction(
             })?;
             Ok(Some(ContextCompactionRuntime {
                 config,
-                summarizer,
+                compactor: Arc::new(SummaryContextCompactor::new(summarizer)),
+                estimator,
+            }))
+        }
+        ContextCompactionRegistration::CompactorId {
+            config,
+            compactor_id,
+            estimator,
+        } => {
+            config.validate()?;
+            let compactor = compactors.get(&compactor_id).cloned().ok_or_else(|| {
+                AgentCoreError::Phase(format!("context compactor not found: {compactor_id}"))
+            })?;
+            Ok(Some(ContextCompactionRuntime {
+                config,
+                compactor,
                 estimator,
             }))
         }

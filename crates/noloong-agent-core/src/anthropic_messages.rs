@@ -412,6 +412,11 @@ fn render_anthropic_user_content(
                     "tool blocks cannot be rendered as anthropic user content".into(),
                 ));
             }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks cannot be rendered for anthropic messages".into(),
+                ));
+            }
             ContentBlock::Text { .. }
             | ContentBlock::Json { .. }
             | ContentBlock::Thinking { .. } => {}
@@ -436,6 +441,11 @@ fn render_anthropic_content_text_only(content: &[ContentBlock]) -> Result<Vec<Va
             ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => {
                 return Err(AgentCoreError::Provider(
                     "tool blocks cannot be rendered as anthropic text content".into(),
+                ));
+            }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks cannot be rendered for anthropic messages".into(),
                 ));
             }
             ContentBlock::Text { .. }
@@ -472,6 +482,11 @@ fn render_anthropic_assistant_content(
             ContentBlock::ToolResult { .. } => {
                 return Err(AgentCoreError::Provider(
                     "tool result blocks cannot be rendered as anthropic assistant content".into(),
+                ));
+            }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks cannot be rendered for anthropic messages".into(),
                 ));
             }
             ContentBlock::Text { .. }
@@ -531,6 +546,11 @@ fn render_tool_result_content(
             ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => {
                 return Err(AgentCoreError::Provider(
                     "nested tool blocks cannot be rendered as anthropic tool results".into(),
+                ));
+            }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks cannot be rendered for anthropic messages".into(),
                 ));
             }
             ContentBlock::Text { .. }

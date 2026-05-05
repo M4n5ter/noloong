@@ -1,14 +1,14 @@
 use crate::provider_utils::{
-    ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
-    resolve_api_key,
+    ReplayScopeMatch, emit_model_stream_event, headers_from_map, refresh_auth_provider,
+    replay_scope_match, resolve_auth_headers,
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
 use crate::{
-    AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaEncoding,
-    MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent,
-    ModelStreamSink, Result, StopReason, ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall,
-    ToolSpec,
+    AgentCoreError, AgentMessage, CancellationToken, ContentBlock, HttpAuthContext, HttpAuthHeader,
+    HttpAuthProvider, HttpAuthRefreshContext, MediaBlock, MediaEncoding, MediaKind, MediaSource,
+    MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, Result,
+    StopReason, ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall, ToolSpec,
 };
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
@@ -16,12 +16,15 @@ use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{Debug, Formatter},
+    sync::Arc,
     time::Duration,
 };
 
 const DEFAULT_RESPONSES_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const RESPONSES_REASONING_REPLAY_KIND: &str = "openai_responses_reasoning_replay";
+const RESPONSES_PROVIDER_PAYLOAD: &str = "openai.responses";
+const RESPONSES_RESPONSE_ITEM_PAYLOAD: &str = "response_item";
 
 #[derive(Clone)]
 pub struct ResponsesApiProviderConfig {
@@ -30,10 +33,13 @@ pub struct ResponsesApiProviderConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
+    pub auth_provider: Option<Arc<dyn HttpAuthProvider>>,
     pub headers: BTreeMap<String, String>,
     pub extra_body: Map<String, Value>,
     pub max_output_tokens: Option<u64>,
     pub temperature: Option<f64>,
+    pub text: Option<Value>,
+    pub fallback_instructions: Option<String>,
     pub request_timeout: Duration,
     pub stream_idle_timeout: Duration,
     pub stream_reconnect: SseReconnectConfig,
@@ -120,10 +126,16 @@ impl Debug for ResponsesApiProviderConfig {
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("api_key_env", &self.api_key_env)
+            .field(
+                "auth_provider",
+                &self.auth_provider.as_ref().map(|provider| provider.id()),
+            )
             .field("headers", &self.headers)
             .field("extra_body", &self.extra_body)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("temperature", &self.temperature)
+            .field("text", &self.text)
+            .field("fallback_instructions", &self.fallback_instructions)
             .field("request_timeout", &self.request_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("stream_reconnect", &self.stream_reconnect)
@@ -148,10 +160,13 @@ impl ResponsesApiProviderConfig {
             model: model.into(),
             api_key: None,
             api_key_env: Some(DEFAULT_OPENAI_API_KEY_ENV.into()),
+            auth_provider: None,
             headers: BTreeMap::new(),
             extra_body: Map::new(),
             max_output_tokens: None,
             temperature: None,
+            text: None,
+            fallback_instructions: None,
             request_timeout: Duration::from_secs(60),
             stream_idle_timeout: Duration::from_secs(300),
             stream_reconnect: SseReconnectConfig::default(),
@@ -185,6 +200,11 @@ impl ResponsesApiProviderConfig {
         self
     }
 
+    pub fn auth_provider(mut self, auth_provider: Arc<dyn HttpAuthProvider>) -> Self {
+        self.auth_provider = Some(auth_provider);
+        self
+    }
+
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(name.into(), value.into());
         self
@@ -202,6 +222,16 @@ impl ResponsesApiProviderConfig {
 
     pub fn temperature(mut self, temperature: f64) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    pub fn text_controls(mut self, text: Value) -> Self {
+        self.text = Some(text);
+        self
+    }
+
+    pub fn fallback_instructions(mut self, fallback_instructions: impl Into<String>) -> Self {
+        self.fallback_instructions = Some(fallback_instructions.into());
         self
     }
 
@@ -256,6 +286,123 @@ impl ResponsesApiProviderConfig {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ResponsesApiRequestRenderConfig {
+    pub provider_id: String,
+    pub model: String,
+    pub extra_body: Map<String, Value>,
+    pub max_output_tokens: Option<u64>,
+    pub temperature: Option<f64>,
+    pub text: Option<Value>,
+    pub fallback_instructions: Option<String>,
+    pub store: bool,
+    pub reasoning: Option<ResponsesReasoningConfig>,
+    pub include_encrypted_reasoning: bool,
+    pub native_tools: Vec<Value>,
+    pub function_tool_strict: Option<bool>,
+    pub allow_file_data_url_input: bool,
+}
+
+impl ResponsesApiRequestRenderConfig {
+    pub fn new(provider_id: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            model: model.into(),
+            extra_body: Map::new(),
+            max_output_tokens: None,
+            temperature: None,
+            text: None,
+            fallback_instructions: None,
+            store: false,
+            reasoning: None,
+            include_encrypted_reasoning: false,
+            native_tools: Vec::new(),
+            function_tool_strict: None,
+            allow_file_data_url_input: false,
+        }
+    }
+
+    pub fn extra_body(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.extra_body.insert(key.into(), value);
+        self
+    }
+
+    pub fn max_output_tokens(mut self, max_output_tokens: u64) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+
+    pub fn temperature(mut self, temperature: f64) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    pub fn text_controls(mut self, text: Value) -> Self {
+        self.text = Some(text);
+        self
+    }
+
+    pub fn fallback_instructions(mut self, fallback_instructions: impl Into<String>) -> Self {
+        self.fallback_instructions = Some(fallback_instructions.into());
+        self
+    }
+
+    pub fn store(mut self, store: bool) -> Self {
+        self.store = store;
+        self
+    }
+
+    pub fn reasoning(mut self, reasoning: ResponsesReasoningConfig) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+
+    pub fn include_encrypted_reasoning(mut self, include_encrypted_reasoning: bool) -> Self {
+        self.include_encrypted_reasoning = include_encrypted_reasoning;
+        self
+    }
+
+    pub fn native_tool(mut self, tool: Value) -> Self {
+        self.native_tools.push(tool);
+        self
+    }
+
+    pub fn native_tools(mut self, tools: impl IntoIterator<Item = Value>) -> Self {
+        self.native_tools = tools.into_iter().collect();
+        self
+    }
+
+    pub fn function_tool_strict(mut self, strict: bool) -> Self {
+        self.function_tool_strict = Some(strict);
+        self
+    }
+
+    pub fn allow_file_data_url_input(mut self, allow_file_data_url_input: bool) -> Self {
+        self.allow_file_data_url_input = allow_file_data_url_input;
+        self
+    }
+}
+
+impl From<&ResponsesApiProviderConfig> for ResponsesApiRequestRenderConfig {
+    fn from(config: &ResponsesApiProviderConfig) -> Self {
+        Self {
+            provider_id: config.id.clone(),
+            model: config.model.clone(),
+            extra_body: config.extra_body.clone(),
+            max_output_tokens: config.max_output_tokens,
+            temperature: config.temperature,
+            text: config.text.clone(),
+            fallback_instructions: config.fallback_instructions.clone(),
+            store: config.store,
+            reasoning: config.reasoning.clone(),
+            include_encrypted_reasoning: config.include_encrypted_reasoning,
+            native_tools: config.native_tools.clone(),
+            function_tool_strict: config.function_tool_strict,
+            allow_file_data_url_input: config.allow_file_data_url_input,
+        }
+    }
+}
+
 pub struct ResponsesApiProvider {
     config: ResponsesApiProviderConfig,
     client: reqwest::Client,
@@ -282,8 +429,29 @@ impl ResponsesApiProvider {
         &self.config
     }
 
-    fn api_key(&self) -> Result<Option<String>> {
-        resolve_api_key(&self.config.api_key, &self.config.api_key_env)
+    async fn request_headers(
+        &self,
+        attempt: u32,
+        refreshed_headers: Option<Vec<HttpAuthHeader>>,
+        cancellation: CancellationToken,
+    ) -> Result<HeaderMap> {
+        let mut headers = self.headers.clone();
+        headers.extend(
+            resolve_auth_headers(
+                self.config.auth_provider.as_ref(),
+                &self.config.api_key,
+                &self.config.api_key_env,
+                self.auth_context("POST", attempt),
+                refreshed_headers,
+                cancellation,
+            )
+            .await?,
+        );
+        Ok(headers)
+    }
+
+    fn auth_context(&self, method: &str, attempt: u32) -> HttpAuthContext {
+        HttpAuthContext::new(&self.config.id, method, &self.endpoint, attempt)
     }
 }
 
@@ -304,38 +472,66 @@ impl ModelProvider for ResponsesApiProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
-            let payload = build_responses_payload(&self.config, &request)?;
-            let api_key = self.api_key()?;
+            let render_config = ResponsesApiRequestRenderConfig::from(&self.config);
+            let payload = render_responses_api_request(&render_config, &request)?;
 
             let mut events = Vec::new();
             let mut state = ResponsesStreamState::new(&self.config, &request);
-            run_sse_model_stream(
-                SseStreamOptions {
-                    provider_label: "responses api",
-                    request_timeout: self.config.request_timeout,
-                    stream_idle_timeout: self.config.stream_idle_timeout,
-                    reconnect: &self.config.stream_reconnect,
-                    cancellation: &cancellation,
-                },
-                &stream,
-                &mut events,
-                || {
-                    let mut request_builder = self
-                        .client
-                        .post(&self.endpoint)
-                        .headers(self.headers.clone())
-                        .json(&payload);
-                    if let Some(api_key) = &api_key {
-                        request_builder = request_builder.bearer_auth(api_key);
+            let mut attempt = 0_u32;
+            let mut refreshed_headers = None;
+            loop {
+                let headers = self
+                    .request_headers(attempt, refreshed_headers.take(), cancellation.clone())
+                    .await?;
+                let result = run_sse_model_stream(
+                    SseStreamOptions {
+                        provider_label: "responses api",
+                        request_timeout: self.config.request_timeout,
+                        stream_idle_timeout: self.config.stream_idle_timeout,
+                        reconnect: &self.config.stream_reconnect,
+                        cancellation: &cancellation,
+                    },
+                    &stream,
+                    &mut events,
+                    || {
+                        Ok(self
+                            .client
+                            .post(&self.endpoint)
+                            .headers(headers.clone())
+                            .json(&payload))
+                    },
+                    |data| {
+                        let events = state.apply_chunk(data)?;
+                        Ok(SseFrameResult::new(events, state.done))
+                    },
+                )
+                .await;
+                match result {
+                    Ok(()) => break,
+                    Err(error @ AgentCoreError::HttpStatus { status: 401, .. })
+                        if attempt == 0 && self.config.auth_provider.is_some() =>
+                    {
+                        let refresh_context = HttpAuthRefreshContext::unauthorized(
+                            self.auth_context("POST", attempt),
+                            401,
+                        );
+                        if let Some(refresh) = refresh_auth_provider(
+                            self.config.auth_provider.as_ref(),
+                            refresh_context,
+                            cancellation.clone(),
+                        )
+                        .await?
+                            && refresh.retry
+                        {
+                            refreshed_headers = refresh.headers;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(error);
                     }
-                    Ok(request_builder)
-                },
-                |data| {
-                    let events = state.apply_chunk(data)?;
-                    Ok(SseFrameResult::new(events, state.done))
-                },
-            )
-            .await?;
+                    Err(error) => return Err(error),
+                }
+            }
             for event in state.finish_events() {
                 emit_model_stream_event(&stream, &mut events, event).await?;
             }
@@ -344,8 +540,8 @@ impl ModelProvider for ResponsesApiProvider {
     }
 }
 
-fn build_responses_payload(
-    config: &ResponsesApiProviderConfig,
+pub fn render_responses_api_request(
+    config: &ResponsesApiRequestRenderConfig,
     request: &ModelRequest,
 ) -> Result<Value> {
     let mut payload = Map::new();
@@ -363,6 +559,9 @@ fn build_responses_payload(
     if let Some(temperature) = config.temperature {
         payload.insert("temperature".into(), json!(temperature));
     }
+    if let Some(text) = &config.text {
+        payload.insert("text".into(), text.clone());
+    }
     if let Some(reasoning) = &config.reasoning {
         payload.insert("reasoning".into(), reasoning_to_value(reasoning));
     }
@@ -372,7 +571,11 @@ fn build_responses_payload(
             Value::Array(vec![Value::String("reasoning.encrypted_content".into())]),
         );
     }
-    if let Some(instructions) = rendered_messages.instructions {
+    if let Some(instructions) = rendered_messages
+        .instructions
+        .or_else(|| config.fallback_instructions.clone())
+        .filter(|instructions| !instructions.is_empty())
+    {
         payload.insert("instructions".into(), Value::String(instructions));
     }
     let tools = to_responses_tools(config, &request.tools);
@@ -400,12 +603,16 @@ struct RenderedResponsesMessages {
 }
 
 fn render_responses_messages(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     messages: &[AgentMessage],
 ) -> Result<RenderedResponsesMessages> {
     let mut input = Vec::new();
     let mut instruction_parts = Vec::new();
     for message in messages {
+        if let Some(items) = render_responses_provider_payload_items(&message.content)? {
+            input.extend(items);
+            continue;
+        }
         match &message.role {
             MessageRole::System => {
                 instruction_parts.extend(render_text_only_blocks(
@@ -438,8 +645,42 @@ fn render_responses_messages(
     })
 }
 
+fn render_responses_provider_payload_items(content: &[ContentBlock]) -> Result<Option<Vec<Value>>> {
+    let payload_count = content
+        .iter()
+        .filter(|block| matches!(block, ContentBlock::ProviderPayload { .. }))
+        .count();
+    if payload_count == 0 {
+        return Ok(None);
+    }
+    if payload_count != content.len() {
+        return Err(AgentCoreError::Provider(
+            "responses provider payload blocks cannot be mixed with normal content".into(),
+        ));
+    }
+
+    let mut items = Vec::with_capacity(payload_count);
+    for block in content {
+        let ContentBlock::ProviderPayload {
+            provider,
+            kind,
+            value,
+        } = block
+        else {
+            continue;
+        };
+        if provider != RESPONSES_PROVIDER_PAYLOAD || kind != RESPONSES_RESPONSE_ITEM_PAYLOAD {
+            return Err(AgentCoreError::Provider(format!(
+                "unsupported responses provider payload: {provider}/{kind}"
+            )));
+        }
+        items.push(value.clone());
+    }
+    Ok(Some(items))
+}
+
 fn render_user_content(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     content: &[ContentBlock],
 ) -> Result<Vec<Value>> {
     let mut parts = Vec::new();
@@ -460,30 +701,34 @@ fn render_user_content(
                     "tool blocks cannot be rendered as responses user content".into(),
                 ));
             }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks must occupy an entire responses message".into(),
+                ));
+            }
         }
     }
     Ok(parts)
 }
 
 fn render_assistant_items(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     message: &AgentMessage,
 ) -> Result<Vec<Value>> {
     let mut items = Vec::new();
     let mut text_parts = Vec::new();
-    let mut text_index = 0_u64;
     for block in &message.content {
         match block {
             ContentBlock::Text { text } => text_parts.push(output_text_part(text.clone())),
             ContentBlock::Json { value } => text_parts.push(output_text_part(value.to_string())),
             ContentBlock::Thinking { thinking } => {
-                flush_assistant_text_message(&mut items, message, &mut text_parts, &mut text_index);
+                flush_assistant_text_message(&mut items, &mut text_parts);
                 if let Some(item) = replay_reasoning(config, thinking) {
                     items.push(item);
                 }
             }
             ContentBlock::ToolCall { tool_call } => {
-                flush_assistant_text_message(&mut items, message, &mut text_parts, &mut text_index);
+                flush_assistant_text_message(&mut items, &mut text_parts);
                 items.push(function_call_item(tool_call));
             }
             ContentBlock::Media { .. } => {
@@ -496,30 +741,23 @@ fn render_assistant_items(
                     "tool result blocks cannot be rendered as responses assistant content".into(),
                 ));
             }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks must occupy an entire responses message".into(),
+                ));
+            }
         }
     }
-    flush_assistant_text_message(&mut items, message, &mut text_parts, &mut text_index);
+    flush_assistant_text_message(&mut items, &mut text_parts);
     Ok(items)
 }
 
-fn flush_assistant_text_message(
-    items: &mut Vec<Value>,
-    message: &AgentMessage,
-    text_parts: &mut Vec<Value>,
-    text_index: &mut u64,
-) {
+fn flush_assistant_text_message(items: &mut Vec<Value>, text_parts: &mut Vec<Value>) {
     if text_parts.is_empty() {
         return;
     }
-    let id = if *text_index == 0 {
-        message.id.clone()
-    } else {
-        format!("{}-text-{}", message.id, text_index)
-    };
-    *text_index += 1;
     items.push(json!({
         "type": "message",
-        "id": id,
         "status": "completed",
         "role": "assistant",
         "content": std::mem::take(text_parts),
@@ -587,6 +825,11 @@ fn render_text_only_blocks(
             ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => {
                 return Err(AgentCoreError::Provider(tool_error.into()));
             }
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks cannot be rendered as plain responses text".into(),
+                ));
+            }
         }
     }
     Ok(parts)
@@ -603,7 +846,6 @@ fn output_text_part(text: String) -> Value {
 fn function_call_item(tool_call: &ToolCall) -> Value {
     json!({
         "type": "function_call",
-        "id": tool_call.id,
         "call_id": tool_call.id,
         "name": tool_call.name,
         "arguments": tool_call.arguments.to_string(),
@@ -612,7 +854,7 @@ fn function_call_item(tool_call: &ToolCall) -> Value {
 }
 
 fn media_to_responses_input_part(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     media: &MediaBlock,
 ) -> Result<Value> {
     match &media.kind {
@@ -631,7 +873,7 @@ fn media_to_responses_input_part(
 }
 
 fn image_to_responses_part(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     media: &MediaBlock,
 ) -> Result<Value> {
     let mut part = Map::new();
@@ -663,7 +905,7 @@ fn image_to_responses_part(
 }
 
 fn file_to_responses_part(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     media: &MediaBlock,
 ) -> Result<Value> {
     let mut part = Map::new();
@@ -704,11 +946,11 @@ fn file_to_responses_part(
 }
 
 fn ensure_provider_scope(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     provider_id: &str,
     label: &str,
 ) -> Result<()> {
-    if provider_id == config.id.as_str() {
+    if provider_id == config.provider_id.as_str() {
         Ok(())
     } else {
         Err(AgentCoreError::Provider(format!(
@@ -724,7 +966,7 @@ fn data_url(media: &MediaBlock, data: &str, label: &str) -> Result<String> {
     Ok(format!("data:{mime_type};base64,{data}"))
 }
 
-fn to_responses_tools(config: &ResponsesApiProviderConfig, tools: &[ToolSpec]) -> Vec<Value> {
+fn to_responses_tools(config: &ResponsesApiRequestRenderConfig, tools: &[ToolSpec]) -> Vec<Value> {
     let mut rendered = tools
         .iter()
         .map(|tool| to_responses_function_tool(config, tool))
@@ -733,7 +975,7 @@ fn to_responses_tools(config: &ResponsesApiProviderConfig, tools: &[ToolSpec]) -
     rendered
 }
 
-fn to_responses_function_tool(config: &ResponsesApiProviderConfig, tool: &ToolSpec) -> Value {
+fn to_responses_function_tool(config: &ResponsesApiRequestRenderConfig, tool: &ToolSpec) -> Value {
     let mut value = json!({
         "type": "function",
         "name": tool.name,
@@ -749,7 +991,7 @@ fn to_responses_function_tool(config: &ResponsesApiProviderConfig, tool: &ToolSp
 }
 
 fn replay_reasoning(
-    config: &ResponsesApiProviderConfig,
+    config: &ResponsesApiRequestRenderConfig,
     thinking: &ThinkingBlock,
 ) -> Option<Value> {
     let descriptor = serde_json::from_value::<ResponsesReasoningReplayDescriptor>(
@@ -761,7 +1003,7 @@ fn replay_reasoning(
         &descriptor.kind,
         RESPONSES_REASONING_REPLAY_KIND,
         &descriptor.provider_id,
-        &config.id,
+        &config.provider_id,
         &descriptor.model,
         &config.model,
     ) {

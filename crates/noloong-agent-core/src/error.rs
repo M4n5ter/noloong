@@ -1,64 +1,43 @@
-use std::fmt::{Display, Formatter};
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, AgentCoreError>;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AgentCoreError {
+    #[error("run aborted")]
     Aborted,
+    #[error("event sink failed: {0}")]
     EventSink(String),
+    #[error("invalid effect: {0}")]
     InvalidEffect(String),
+    #[error("model provider not found: {0}")]
     MissingModelProvider(String),
+    #[error("tool not found: {0}")]
     MissingTool(String),
+    #[error("phase failed: {0}")]
     Phase(String),
+    #[error("provider error: {0}")]
     Provider(String),
+    #[error("{provider} request failed with status {status}: {body}")]
+    HttpStatus {
+        provider: String,
+        status: u16,
+        body: String,
+    },
+    #[error("json-rpc error: {0}")]
     JsonRpc(String),
+    #[error("store error: {0}")]
     Store(String),
-    Io(std::io::Error),
-    Json(serde_json::Error),
-    Join(tokio::task::JoinError),
-}
-
-impl Display for AgentCoreError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Aborted => write!(f, "run aborted"),
-            Self::EventSink(message) => write!(f, "event sink failed: {message}"),
-            Self::InvalidEffect(message) => write!(f, "invalid effect: {message}"),
-            Self::MissingModelProvider(id) => write!(f, "model provider not found: {id}"),
-            Self::MissingTool(name) => write!(f, "tool not found: {name}"),
-            Self::Phase(message) => write!(f, "phase failed: {message}"),
-            Self::Provider(message) => write!(f, "provider error: {message}"),
-            Self::JsonRpc(message) => write!(f, "json-rpc error: {message}"),
-            Self::Store(message) => write!(f, "store error: {message}"),
-            Self::Io(error) => write!(f, "io error: {error}"),
-            Self::Json(error) => write!(f, "json error: {error}"),
-            Self::Join(error) => write!(f, "task join error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for AgentCoreError {}
-
-impl From<std::io::Error> for AgentCoreError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<serde_json::Error> for AgentCoreError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
-    }
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("task join error: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }
 
 impl From<reqwest::Error> for AgentCoreError {
     fn from(error: reqwest::Error) -> Self {
         Self::Provider(error.to_string())
-    }
-}
-
-impl From<tokio::task::JoinError> for AgentCoreError {
-    fn from(error: tokio::task::JoinError) -> Self {
-        Self::Join(error)
     }
 }

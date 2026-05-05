@@ -37,6 +37,9 @@ python3 full_conformance_extension.py
 | `run_phase_hook` | `phase_hook/run` | Receives `hookId`, `hookPoint`, common state fields, and hook-specific payload. |
 | `run_tool_hook` | `tool_hook/run` | Receives `hookId`, `hookPoint`, common state fields, and tool-specific payload. |
 | `summarize_compaction` | `compaction/summarize` | Receives flattened compaction request fields plus `summarizerId`; returns `summary`. |
+| `compact_context` | `compaction/compact` | Receives flattened context compaction fields plus `compactorId`; returns summary or replacement history. |
+| `auth_headers` | `auth/headers` | Receives `authProviderId` and `HttpAuthContext`; returns HTTP headers. |
+| `auth_refresh` | `auth/refresh` | Receives `authProviderId`, `HttpAuthContext`, refresh reason, and optional status; returns retry decision and optional headers. |
 | `shutdown` | `shutdown` | Returns `{}`. |
 
 `run_tool_hook` demonstrates both permission decisions and human approval requests. The normal conformance path returns an allow `decision`; the approval conformance path returns `approval`, causing core to pause the run and later replay the human `ToolApprovalResolution` into the standard permission audit.

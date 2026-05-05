@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/noloong-agent-core", "crates/noloong-agent"]
+members = [
+    ".",
+    "crates/noloong-agent-core",
+    "crates/noloong-agent",
+    "crates/noloong-openai",
+]
 resolver = "3"
 
 [workspace.package]
@@ -9,15 +14,21 @@ edition = "2024"
 [workspace.dependencies]
 noloong-agent-core = { path = "crates/noloong-agent-core" }
 noloong-agent = { path = "crates/noloong-agent" }
+noloong-openai = { path = "crates/noloong-openai" }
+base64 = "0.22"
 bytes = "1.11"
+getrandom = "0.4"
 memchr = "2.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = "0.39"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
+thiserror = "2.0"
 tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 toasty = { version = "0.5", default-features = false, features = ["sqlite"] }
 toasty-driver-sqlite = "0.5"
+url = "2.5"
 
 [workspace.lints.rust]
 dead_code = "deny"

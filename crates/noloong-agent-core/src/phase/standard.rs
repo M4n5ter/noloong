@@ -4,9 +4,10 @@ use crate::compaction::{
     COMPACTION_METADATA_TOKENS_BEFORE_KEY,
 };
 use crate::{
-    AgentEffect, CompactionDecision, ContentBlock, ContextCompactionMode, ContextRequest,
-    MessageCompaction, ModelRequest, Result, TurnDecision, compacted_messages,
-    compaction_summary_message, plan_compaction, provider_utils::collect_model_stream,
+    AgentEffect, CompactionDecision, ContentBlock, ContextCompactionMode, ContextCompactionOutput,
+    ContextRequest, MessageCompaction, MessageReplacement, ModelRequest, Result, TurnDecision,
+    compacted_messages, compaction_summary_message, plan_compaction,
+    provider_utils::collect_model_stream,
 };
 
 use super::hooks::PhaseHookRunner;
@@ -67,69 +68,116 @@ pub(super) async fn context_compact(context: PhaseContext<'_>) -> Result<PhaseOu
 
     let retained_message_ids = plan.retained_message_ids().to_vec();
     let dropped_message_ids = plan.dropped_message_ids().to_vec();
+    let replaced_message_ids = state
+        .messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
     let crate::CompactionPlan {
         previous_summary,
         messages_to_summarize,
         turn_prefix_messages,
         retained_messages,
         tokens_before,
+        estimated_retained_tokens,
         is_split_turn,
         ..
     } = plan;
-    let request = crate::CompactionSummaryRequest {
+    let request = crate::ContextCompactionRequest {
         run_id: run_id.to_string(),
         turn_id,
+        current_messages: state.messages.clone(),
         previous_summary,
         messages_to_summarize,
         turn_prefix_messages,
+        retained_messages: retained_messages.clone(),
         token_budget: compaction.config.reserve_tokens,
+        tokens_before,
+        estimated_retained_tokens,
+        is_split_turn,
         metadata: compaction.config.metadata.clone(),
     };
-    let summary_result = compaction
-        .summarizer
-        .summarize(request, cancellation.clone())
+    let compaction_output = compaction
+        .compactor
+        .compact(request, cancellation.clone())
         .await?;
-    if summary_result.summary.trim().is_empty() {
-        return Err(crate::AgentCoreError::Phase(
-            "compaction summarizer returned an empty summary".into(),
-        ));
-    }
-    let mut summary_metadata = compaction.config.metadata.clone();
-    summary_metadata.extend(summary_result.metadata);
-    summary_metadata.insert(
+    let mut metadata = compaction.config.metadata.clone();
+    metadata.insert(
         COMPACTION_METADATA_MODE_KEY.into(),
         serde_json::json!(compaction.config.mode),
     );
-    summary_metadata.insert(
+    metadata.insert(
         COMPACTION_METADATA_TOKENS_BEFORE_KEY.into(),
         serde_json::json!(tokens_before),
     );
-    summary_metadata.insert(
+    metadata.insert(
         COMPACTION_METADATA_IS_SPLIT_TURN_KEY.into(),
         serde_json::json!(is_split_turn),
     );
-    let summary_message =
-        compaction_summary_message(run_id, turn_id, summary_result.summary, summary_metadata);
-    let compacted_messages = compacted_messages(summary_message.clone(), &retained_messages);
-    let tokens_after = compaction
-        .estimator
-        .estimate_messages_tokens(&compacted_messages);
 
-    match compaction.config.mode {
-        ContextCompactionMode::PersistentState => {
-            output.effects.push(AgentEffect::CompactMessages {
-                compaction: MessageCompaction {
-                    summary_message,
-                    retained_message_ids,
-                    dropped_message_ids,
-                    tokens_before,
-                    tokens_after,
-                    metadata: compaction.config.metadata.clone(),
-                },
-            });
+    match compaction_output {
+        ContextCompactionOutput::Summary(summary_result) => {
+            if summary_result.summary.trim().is_empty() {
+                return Err(crate::AgentCoreError::Phase(
+                    "compaction summarizer returned an empty summary".into(),
+                ));
+            }
+            metadata.extend(summary_result.metadata);
+            let effect_metadata = metadata.clone();
+            let summary_message =
+                compaction_summary_message(run_id, turn_id, summary_result.summary, metadata);
+            let compacted_messages =
+                compacted_messages(summary_message.clone(), &retained_messages);
+            let tokens_after = compaction
+                .estimator
+                .estimate_messages_tokens(&compacted_messages);
+
+            match compaction.config.mode {
+                ContextCompactionMode::PersistentState => {
+                    output.effects.push(AgentEffect::CompactMessages {
+                        compaction: MessageCompaction {
+                            summary_message,
+                            retained_message_ids,
+                            dropped_message_ids,
+                            tokens_before,
+                            tokens_after,
+                            metadata: effect_metadata,
+                        },
+                    });
+                }
+                ContextCompactionMode::RequestOnly => {
+                    output.scratch.request_messages_override = Some(compacted_messages);
+                }
+            }
         }
-        ContextCompactionMode::RequestOnly => {
-            output.scratch.request_messages_override = Some(compacted_messages);
+        ContextCompactionOutput::Replacement(replacement_result) => {
+            let replacement_messages = replacement_result.replacement_messages;
+            if replacement_messages.is_empty() {
+                return Err(crate::AgentCoreError::Phase(
+                    "context compactor returned no replacement messages".into(),
+                ));
+            }
+            metadata.extend(replacement_result.metadata);
+            let tokens_after = compaction
+                .estimator
+                .estimate_messages_tokens(&replacement_messages);
+
+            match compaction.config.mode {
+                ContextCompactionMode::PersistentState => {
+                    output.effects.push(AgentEffect::ReplaceMessages {
+                        replacement: MessageReplacement {
+                            replacement_messages,
+                            replaced_message_ids,
+                            tokens_before,
+                            tokens_after,
+                            metadata,
+                        },
+                    });
+                }
+                ContextCompactionMode::RequestOnly => {
+                    output.scratch.request_messages_override = Some(replacement_messages);
+                }
+            }
         }
     }
     Ok(output)

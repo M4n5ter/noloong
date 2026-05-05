@@ -75,6 +75,9 @@ Example error:
 | `phase_hook/run` | `phase_hook` | Run phase lifecycle hooks |
 | `tool_hook/run` | `tool_call_hook` | Run tool permission and output hooks |
 | `compaction/summarize` | `compaction_summarizer` | Summarize messages during context compaction |
+| `compaction/compact` | `context_compactor` | Return summary or replacement history during context compaction |
+| `auth/headers` | `http_auth_provider` | Return dynamic HTTP headers for built-in HTTP model providers |
+| `auth/refresh` | `http_auth_provider` | Refresh credentials after auth failure or proactive refresh |
 | `shutdown` | all extensions | Graceful process shutdown |
 
 ## Lifecycle Methods
@@ -127,6 +130,8 @@ Result:
     {"type": "phase_hook", "id": "example-hook"},
     {"type": "tool_call_hook", "id": "example-tool-hook"},
     {"type": "compaction_summarizer", "id": "example-compaction"},
+    {"type": "context_compactor", "id": "example-context-compactor"},
+    {"type": "http_auth_provider", "id": "example-auth"},
     {
       "type": "tool",
       "spec": {
@@ -764,6 +769,137 @@ No-op behavior: none. `summary` is required and must not be empty after trimming
 
 Failure behavior: malformed responses or an empty `summary` fail the `context.compact` phase.
 
+## Context Compactor Contract
+
+### `compaction/compact`
+
+Called by `context.compact` when the extension owns the whole compaction decision. Unlike `compaction/summarize`, this method may return either a summary result or a complete replacement message history.
+
+Params flatten `ContextCompactionRequest` and add `compactorId`:
+
+```json
+{
+  "compactorId": "example-context-compactor",
+  "runId": "run-1",
+  "turnId": 5,
+  "currentMessages": [],
+  "previousSummary": "older summary",
+  "messagesToSummarize": [],
+  "turnPrefixMessages": [],
+  "retainedMessages": [],
+  "tokenBudget": 2048,
+  "tokensBefore": 32000,
+  "estimatedRetainedTokens": 6000,
+  "isSplitTurn": false,
+  "metadata": {}
+}
+```
+
+Summary result:
+
+```json
+{
+  "type": "summary",
+  "result": {
+    "summary": "summary text",
+    "metadata": {}
+  }
+}
+```
+
+Replacement result:
+
+```json
+{
+  "type": "replacement",
+  "result": {
+    "replacementMessages": [
+      {
+        "id": "replacement-summary",
+        "role": "system",
+        "content": [{"type": "text", "text": "replacement summary"}],
+        "metadata": {}
+      }
+    ],
+    "metadata": {}
+  }
+}
+```
+
+No-op behavior: none. Summary output must contain non-empty `summary`; replacement output must contain at least one message.
+
+Failure behavior: malformed output or invalid replacement messages fail the `context.compact` phase.
+
+## HTTP Auth Provider Contract
+
+### `auth/headers`
+
+Called before a built-in HTTP model provider sends a request.
+
+Params:
+
+```json
+{
+  "authProviderId": "example-auth",
+  "context": {
+    "providerId": "responses",
+    "method": "POST",
+    "url": "https://example.test/v1/responses",
+    "attempt": 0,
+    "metadata": {}
+  }
+}
+```
+
+Result:
+
+```json
+{
+  "headers": [
+    {"name": "Authorization", "value": "Bearer token"}
+  ],
+  "metadata": {}
+}
+```
+
+### `auth/refresh`
+
+Called when the provider receives an authentication failure or requests proactive refresh.
+
+Params:
+
+```json
+{
+  "authProviderId": "example-auth",
+  "context": {
+    "providerId": "responses",
+    "method": "POST",
+    "url": "https://example.test/v1/responses",
+    "attempt": 0,
+    "metadata": {}
+  },
+  "reason": "unauthorized",
+  "status": 401,
+  "metadata": {}
+}
+```
+
+Result:
+
+```json
+{
+  "retry": true,
+  "headers": [
+    {"name": "Authorization", "value": "Bearer refreshed-token"}
+  ],
+  "metadata": {}
+}
+```
+
+If `retry` is `true` and `headers` is omitted, the host retries after calling `auth/headers` again. If `retry` is `false`, the provider error is returned.
+
+Failure behavior: invalid header names or values fail the model request before any retry.
+
 ## Common JSON Shapes
 
 ### `AgentState`
@@ -853,6 +989,19 @@ Tool call:
   }
 }
 ```
+
+Provider payload:
+
+```json
+{
+  "type": "provider_payload",
+  "provider": "openai.responses",
+  "kind": "response_item",
+  "value": {"type": "reasoning", "id": "rs-1"}
+}
+```
+
+Provider payload blocks are provider-owned replay data, not portable agent semantics. Built-in Responses replays `provider = "openai.responses"` and `kind = "response_item"` as raw input items. Chat Completions, Anthropic Messages, and unknown providers reject provider payload blocks with a clear provider error.
 
 Tool result:
 
@@ -1180,6 +1329,14 @@ The `compaction/summarize` params flatten `CompactionSummaryRequest` and add `su
 }
 ```
 
+### `ContextCompactionRequest` and `ContextCompactionOutput`
+
+The `compaction/compact` params flatten `ContextCompactionRequest` and add `compactorId`. The output is tagged with `type = "summary"` or `type = "replacement"`.
+
+### `HttpAuthContext`, `HttpAuthHeaders`, `HttpAuthRefreshContext`, and `HttpAuthRefreshResult`
+
+The auth methods use plain JSON data for headers instead of exposing `reqwest::HeaderMap`. Header validation happens in the host before the HTTP request is sent.
+
 ```json
 {
   "summary": "summary text",
@@ -1202,8 +1359,10 @@ Standard strict conformance ids:
 - `conformance-hook`
 - `conformance-tool-hook`
 - `conformance-compaction`
+- `conformance-context-compactor`
+- `conformance-auth`
 
-Strict behavior requires the extension to exercise model streaming, tool execution, context effects, phase effects, phase hooks, tool call hooks, and compaction summary.
+Strict behavior requires the extension to exercise model streaming, tool execution, context effects, phase effects, phase hooks, tool call hooks, compaction summary, replacement compaction, and HTTP auth headers/refresh.
 
 ## Minimal Handler Mapping
 

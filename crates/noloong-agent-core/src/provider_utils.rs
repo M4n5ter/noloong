@@ -1,8 +1,9 @@
 use crate::{
-    AgentCoreError, CancellationToken, EventSinkFuture, ModelProvider, ModelRequest,
+    AgentCoreError, CancellationToken, EventSinkFuture, HttpAuthContext, HttpAuthHeader,
+    HttpAuthProvider, HttpAuthRefreshContext, HttpAuthRefreshResult, ModelProvider, ModelRequest,
     ModelStreamEvent, ModelStreamSink, Result,
 };
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use std::{collections::BTreeMap, env, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -73,6 +74,55 @@ pub(crate) fn headers_from_map(headers: &BTreeMap<String, String>) -> Result<Hea
         rendered.insert(name, value);
     }
     Ok(rendered)
+}
+
+pub(crate) fn headers_from_http_auth(headers: &[HttpAuthHeader]) -> Result<HeaderMap> {
+    let mut rendered = HeaderMap::new();
+    for header in headers {
+        let name = HeaderName::from_bytes(header.name.as_bytes())
+            .map_err(|error| AgentCoreError::Provider(format!("invalid header name: {error}")))?;
+        let value = HeaderValue::from_str(&header.value)
+            .map_err(|error| AgentCoreError::Provider(format!("invalid header value: {error}")))?;
+        rendered.insert(name, value);
+    }
+    Ok(rendered)
+}
+
+pub(crate) async fn resolve_auth_headers(
+    auth_provider: Option<&Arc<dyn HttpAuthProvider>>,
+    api_key: &Option<String>,
+    api_key_env: &Option<String>,
+    context: HttpAuthContext,
+    refreshed_headers: Option<Vec<HttpAuthHeader>>,
+    cancellation: CancellationToken,
+) -> Result<HeaderMap> {
+    if let Some(refreshed_headers) = refreshed_headers {
+        return headers_from_http_auth(&refreshed_headers);
+    }
+    if let Some(auth_provider) = auth_provider {
+        let headers = auth_provider.headers(context, cancellation).await?;
+        return headers_from_http_auth(&headers.headers);
+    }
+
+    let mut headers = HeaderMap::new();
+    if let Some(api_key) = resolve_api_key(api_key, api_key_env)? {
+        let value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|error| {
+            AgentCoreError::Provider(format!("invalid bearer authorization header: {error}"))
+        })?;
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(headers)
+}
+
+pub(crate) async fn refresh_auth_provider(
+    auth_provider: Option<&Arc<dyn HttpAuthProvider>>,
+    context: HttpAuthRefreshContext,
+    cancellation: CancellationToken,
+) -> Result<Option<HttpAuthRefreshResult>> {
+    let Some(auth_provider) = auth_provider else {
+        return Ok(None);
+    };
+    Ok(Some(auth_provider.refresh(context, cancellation).await?))
 }
 
 pub(crate) fn resolve_api_key(

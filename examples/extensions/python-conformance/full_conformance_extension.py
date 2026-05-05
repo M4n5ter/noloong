@@ -11,6 +11,8 @@ PHASE_ID = "conformance.phase"
 PHASE_HOOK_ID = "conformance-hook"
 TOOL_HOOK_ID = "conformance-tool-hook"
 COMPACTION_ID = "conformance-compaction"
+CONTEXT_COMPACTOR_ID = "conformance-context-compactor"
+AUTH_PROVIDER_ID = "conformance-auth"
 
 
 def initialize(params: JsonDict, _context: ExtensionContext) -> JsonDict:
@@ -47,6 +49,8 @@ def list_capabilities(_params: JsonDict, _context: ExtensionContext) -> JsonDict
             {"type": "phase_hook", "id": PHASE_HOOK_ID},
             {"type": "tool_call_hook", "id": TOOL_HOOK_ID},
             {"type": "compaction_summarizer", "id": COMPACTION_ID},
+            {"type": "context_compactor", "id": CONTEXT_COMPACTOR_ID},
+            {"type": "http_auth_provider", "id": AUTH_PROVIDER_ID},
         ]
     }
 
@@ -146,6 +150,48 @@ def summarize_compaction(params: JsonDict, _context: ExtensionContext) -> JsonDi
     }
 
 
+def compact_context(params: JsonDict, _context: ExtensionContext) -> JsonDict:
+    messages = params.get("messagesToSummarize")
+    count = len(messages) if isinstance(messages, list) else 0
+    retained_messages = params.get("retainedMessages")
+    retained = retained_messages if isinstance(retained_messages, list) else []
+    return {
+        "type": "replacement",
+        "result": {
+            "replacementMessages": [
+                {
+                    "id": "python-replacement-summary",
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"conformance replacement summary: {count}",
+                        }
+                    ],
+                    "metadata": {},
+                },
+                *retained,
+            ],
+            "metadata": {"example": "python"},
+        },
+    }
+
+
+def auth_headers(_params: JsonDict, _context: ExtensionContext) -> JsonDict:
+    return {
+        "headers": [{"name": "Authorization", "value": "Bearer conformance-auth"}],
+        "metadata": {"example": "python"},
+    }
+
+
+def auth_refresh(_params: JsonDict, _context: ExtensionContext) -> JsonDict:
+    return {
+        "retry": True,
+        "headers": [{"name": "Authorization", "value": "Bearer conformance-refresh"}],
+        "metadata": {"example": "python"},
+    }
+
+
 def shutdown(_params: JsonDict, _context: ExtensionContext) -> JsonDict:
     return {}
 
@@ -210,6 +256,9 @@ if __name__ == "__main__":
             "phase_hook/run": run_phase_hook,
             "tool_hook/run": run_tool_hook,
             "compaction/summarize": summarize_compaction,
+            "compaction/compact": compact_context,
+            "auth/headers": auth_headers,
+            "auth/refresh": auth_refresh,
             "shutdown": shutdown,
         }
     )

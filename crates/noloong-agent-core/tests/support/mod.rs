@@ -1,8 +1,9 @@
 pub mod core;
 use noloong_agent_core::{
     AgentEventKind, AgentMessage, AgentState, BoxFuture, CancellationToken, ContentBlock,
-    MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig, StdioExtensionConfig,
-    ThinkingBlock, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    HttpAuthContext, HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, HttpAuthRefreshContext,
+    HttpAuthRefreshResult, MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig,
+    StdioExtensionConfig, ThinkingBlock, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
@@ -476,6 +477,78 @@ impl ToolProvider for LiveEchoTool {
                 updates: Vec::new(),
             })
         })
+    }
+}
+
+#[derive(Clone)]
+pub struct TestAuthProvider {
+    id: String,
+    headers: Vec<HttpAuthHeader>,
+    refresh_result: HttpAuthRefreshResult,
+    header_contexts: Arc<Mutex<Vec<HttpAuthContext>>>,
+    refresh_contexts: Arc<Mutex<Vec<HttpAuthRefreshContext>>>,
+}
+
+impl TestAuthProvider {
+    pub fn new(id: impl Into<String>, headers: Vec<HttpAuthHeader>) -> Self {
+        Self {
+            id: id.into(),
+            headers,
+            refresh_result: HttpAuthRefreshResult::deny(),
+            header_contexts: Arc::new(Mutex::new(Vec::new())),
+            refresh_contexts: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn refresh_result(mut self, refresh_result: HttpAuthRefreshResult) -> Self {
+        self.refresh_result = refresh_result;
+        self
+    }
+
+    pub fn header_contexts(&self) -> Vec<HttpAuthContext> {
+        self.header_contexts
+            .lock()
+            .expect("header contexts lock poisoned")
+            .clone()
+    }
+
+    pub fn refresh_contexts(&self) -> Vec<HttpAuthRefreshContext> {
+        self.refresh_contexts
+            .lock()
+            .expect("refresh contexts lock poisoned")
+            .clone()
+    }
+}
+
+impl HttpAuthProvider for TestAuthProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn headers<'a>(
+        &'a self,
+        context: HttpAuthContext,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, HttpAuthHeaders> {
+        let headers = self.headers.clone();
+        self.header_contexts
+            .lock()
+            .expect("header contexts lock poisoned")
+            .push(context);
+        Box::pin(async move { Ok(HttpAuthHeaders::new(headers)) })
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        context: HttpAuthRefreshContext,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, HttpAuthRefreshResult> {
+        let refresh_result = self.refresh_result.clone();
+        self.refresh_contexts
+            .lock()
+            .expect("refresh contexts lock poisoned")
+            .push(context);
+        Box::pin(async move { Ok(refresh_result) })
     }
 }
 

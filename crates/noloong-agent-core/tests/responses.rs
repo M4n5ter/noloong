@@ -1,9 +1,10 @@
 use noloong_agent_core::{
-    AgentEventKind, AgentMessage, AgentRuntime, CancellationToken, ContentBlock, MediaBlock,
-    MediaKind, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, ResponsesApiProvider,
-    ResponsesApiProviderConfig, ResponsesReasoningConfig, ResponsesReasoningEffort,
+    AgentEventKind, AgentMessage, AgentRuntime, CancellationToken, ContentBlock, HttpAuthHeader,
+    HttpAuthRefreshResult, MediaBlock, MediaKind, MessageRole, ModelProvider, ModelRequest,
+    ModelStreamEvent, ResponsesApiProvider, ResponsesApiProviderConfig,
+    ResponsesApiRequestRenderConfig, ResponsesReasoningConfig, ResponsesReasoningEffort,
     ResponsesReasoningSummary, Result, RunReport, SseReconnectConfig, StopReason, ThinkingBlock,
-    ThinkingKind, ToolCall, ToolPermissionRequirement, ToolSpec,
+    ThinkingKind, ToolCall, ToolPermissionRequirement, ToolSpec, render_responses_api_request,
 };
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex};
@@ -11,7 +12,10 @@ use tokio::time::Duration;
 
 pub mod support;
 
-use support::{HangingServer, LiveEchoTool, MockResponse, MockServer, fast_one_retry_reconnect};
+use support::{
+    HangingServer, LiveEchoTool, MockResponse, MockServer, TestAuthProvider,
+    fast_one_retry_reconnect,
+};
 
 #[test]
 fn reconnect_config_builder_sets_stream_reconnect() {
@@ -89,6 +93,68 @@ const RUNTIME_TOOL_SECOND_STREAM: &str = concat!(
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-runtime-final\",\"status\":\"completed\",\"output\":[]}}\n\n",
 );
 
+#[test]
+fn provider_payload_block_serde_round_trip() -> Result<()> {
+    let block = ContentBlock::ProviderPayload {
+        provider: "openai.responses".into(),
+        kind: "response_item".into(),
+        value: json!({
+            "type": "reasoning",
+            "id": "rs-1",
+            "encrypted_content": "ciphertext",
+        }),
+    };
+
+    let encoded = serde_json::to_value(&block)?;
+
+    assert_eq!(serde_json::from_value::<ContentBlock>(encoded)?, block);
+    Ok(())
+}
+
+#[test]
+fn request_renderer_maps_controls_and_provider_payload_without_http() -> Result<()> {
+    let raw_item = json!({
+        "type": "reasoning",
+        "id": "rs-render",
+        "encrypted_content": "ciphertext",
+    });
+    let payload = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model")
+            .max_output_tokens(512)
+            .temperature(0.1)
+            .text_controls(json!({"verbosity": "medium"}))
+            .reasoning(ResponsesReasoningConfig::new().summary(ResponsesReasoningSummary::Auto))
+            .include_encrypted_reasoning(true)
+            .function_tool_strict(true)
+            .native_tool(json!({"type": "web_search_preview"})),
+        &ModelRequest {
+            messages: vec![AgentMessage {
+                id: "assistant-raw-1".into(),
+                role: MessageRole::Assistant,
+                content: vec![ContentBlock::ProviderPayload {
+                    provider: "openai.responses".into(),
+                    kind: "response_item".into(),
+                    value: raw_item.clone(),
+                }],
+                metadata: Map::new(),
+            }],
+            tools: vec![lookup_tool()],
+            ..simple_request()
+        },
+    )?;
+
+    assert_eq!(payload["model"], "test-model");
+    assert_eq!(payload["max_output_tokens"], 512);
+    assert_eq!(payload["temperature"], 0.1);
+    assert_eq!(payload["text"]["verbosity"], "medium");
+    assert_eq!(payload["reasoning"]["summary"], "auto");
+    assert_eq!(payload["include"][0], "reasoning.encrypted_content");
+    assert_eq!(payload["input"][0], raw_item);
+    assert_eq!(payload["tools"][0]["strict"], true);
+    assert_eq!(payload["tools"][1]["type"], "web_search_preview");
+    Ok(())
+}
+
 #[tokio::test]
 async fn config_defaults_headers_and_request_body() -> Result<()> {
     let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
@@ -99,6 +165,7 @@ async fn config_defaults_headers_and_request_body() -> Result<()> {
             .header("X-Test", "yes")
             .max_output_tokens(256)
             .temperature(0.2)
+            .text_controls(json!({"verbosity": "low"}))
             .store(true)
             .reasoning(
                 ResponsesReasoningConfig::new()
@@ -129,12 +196,232 @@ async fn config_defaults_headers_and_request_body() -> Result<()> {
     assert_eq!(body["store"], true);
     assert_eq!(body["max_output_tokens"], 256);
     assert_eq!(body["temperature"], 0.2);
+    assert_eq!(body["text"]["verbosity"], "low");
     assert_eq!(body["reasoning"]["effort"], "high");
     assert_eq!(body["reasoning"]["summary"], "detailed");
     assert_eq!(body["include"][0], "reasoning.encrypted_content");
     assert_eq!(body["tools"][0]["strict"], true);
     assert_eq!(body["tools"][1]["type"], "web_search_preview");
     assert_eq!(body["metadata"]["suite"], "responses");
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_payload_response_items_are_replayed() -> Result<()> {
+    let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
+    let raw_item = json!({
+        "type": "reasoning",
+        "id": "rs-1",
+        "encrypted_content": "ciphertext",
+    });
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .api_key("secret"),
+    )?;
+
+    provider
+        .stream_model(
+            ModelRequest {
+                messages: vec![AgentMessage {
+                    id: "assistant-raw-1".into(),
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::ProviderPayload {
+                        provider: "openai.responses".into(),
+                        kind: "response_item".into(),
+                        value: raw_item.clone(),
+                    }],
+                    metadata: Map::new(),
+                }],
+                ..simple_request()
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(server.request().json["input"][0], raw_item);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_payload_response_items_reject_mixed_content() -> Result<()> {
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url("http://127.0.0.1:9")
+            .api_key("secret"),
+    )?;
+
+    let error = provider
+        .stream_model(
+            request_with_user_content(vec![
+                ContentBlock::ProviderPayload {
+                    provider: "openai.responses".into(),
+                    kind: "response_item".into(),
+                    value: json!({"type": "reasoning"}),
+                },
+                ContentBlock::Text {
+                    text: "normal text".into(),
+                },
+            ]),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("mixed provider payload should fail before request");
+
+    assert!(error.to_string().contains("cannot be mixed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_provider_headers_override_api_key() -> Result<()> {
+    let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
+    let auth = Arc::new(TestAuthProvider::new(
+        "test-auth",
+        vec![
+            HttpAuthHeader::new("Authorization", "Bearer dynamic"),
+            HttpAuthHeader::new("X-Auth-Provider", "yes"),
+        ],
+    ));
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .api_key("static-secret")
+            .auth_provider(auth.clone()),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let request = server.request();
+    assert_eq!(request.header("authorization"), Some("Bearer dynamic"));
+    assert_eq!(request.header("x-auth-provider"), Some("yes"));
+    assert_eq!(auth.header_contexts().len(), 1);
+    assert_eq!(auth.header_contexts()[0].provider_id, "test-responses");
+    assert_eq!(auth.header_contexts()[0].method, "POST");
+    assert_eq!(auth.header_contexts()[0].attempt, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_provider_refreshes_once_after_unauthorized() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::new(401, "text/plain", "expired"),
+        MockResponse::new(200, "text/event-stream", TEXT_STREAM),
+    ])
+    .await?;
+    let auth = Arc::new(
+        TestAuthProvider::new(
+            "test-auth",
+            vec![HttpAuthHeader::new("Authorization", "Bearer stale")],
+        )
+        .refresh_result(HttpAuthRefreshResult::retry_with_headers(vec![
+            HttpAuthHeader::new("Authorization", "Bearer fresh"),
+        ])),
+    );
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .auth_provider(auth.clone()),
+    )?;
+
+    let events = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ModelStreamEvent::TextDelta { text } if text == "hello"
+        )),
+        "expected retried stream to emit text"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("authorization"), Some("Bearer stale"));
+    assert_eq!(requests[1].header("authorization"), Some("Bearer fresh"));
+    let refresh_contexts = auth.refresh_contexts();
+    assert_eq!(refresh_contexts.len(), 1);
+    assert_eq!(
+        refresh_contexts[0].reason,
+        noloong_agent_core::HttpAuthRefreshReason::Unauthorized
+    );
+    assert_eq!(refresh_contexts[0].status, Some(401));
+    assert_eq!(refresh_contexts[0].context.attempt, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_provider_refresh_repeated_unauthorized_fails_without_second_refresh() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::new(401, "text/plain", "expired"),
+        MockResponse::new(401, "text/plain", "still expired"),
+    ])
+    .await?;
+    let auth = Arc::new(
+        TestAuthProvider::new(
+            "test-auth",
+            vec![HttpAuthHeader::new("Authorization", "Bearer stale")],
+        )
+        .refresh_result(HttpAuthRefreshResult::retry_with_headers(vec![
+            HttpAuthHeader::new("Authorization", "Bearer fresh"),
+        ])),
+    );
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .auth_provider(auth.clone()),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("second unauthorized response should fail");
+
+    assert!(error.to_string().contains("401"));
+    assert_eq!(auth.refresh_contexts().len(), 1);
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_provider_does_not_refresh_forbidden_response() -> Result<()> {
+    let server = MockServer::spawn(403, "text/plain", "forbidden").await?;
+    let auth = Arc::new(TestAuthProvider::new(
+        "test-auth",
+        vec![HttpAuthHeader::new("Authorization", "Bearer stale")],
+    ));
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .auth_provider(auth.clone()),
+    )?;
+
+    let error = provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("forbidden response should fail");
+
+    assert!(error.to_string().contains("403"));
+    assert!(auth.refresh_contexts().is_empty());
     Ok(())
 }
 
@@ -206,9 +493,41 @@ async fn payload_maps_user_and_assistant_history() -> Result<()> {
     assert_eq!(body["input"][0]["type"], "message");
     assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
     assert_eq!(body["input"][1]["role"], "assistant");
+    assert!(body["input"][1].get("id").is_none());
     assert_eq!(body["input"][1]["content"][0]["type"], "output_text");
     assert_eq!(body["input"][1]["content"][0]["text"], "visible");
     assert_eq!(body["input"][1]["content"][1]["text"], "{\"ok\":true}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_uses_fallback_instructions_only_without_system_message() -> Result<()> {
+    let fallback = "Use fallback instructions.";
+    let config = ResponsesApiProviderConfig::new("test-responses", "test-model")
+        .fallback_instructions(fallback);
+
+    let fallback_body = captured_request_body(simple_request(), config.clone()).await?;
+    assert_eq!(fallback_body["instructions"], fallback);
+
+    let system_body = captured_request_body(
+        ModelRequest {
+            messages: vec![
+                AgentMessage {
+                    id: "system-1".into(),
+                    role: MessageRole::System,
+                    content: vec![ContentBlock::Text {
+                        text: "Use system instructions.".into(),
+                    }],
+                    metadata: Map::new(),
+                },
+                AgentMessage::user("user-1", "hello"),
+            ],
+            ..simple_request()
+        },
+        config,
+    )
+    .await?;
+    assert_eq!(system_body["instructions"], "Use system instructions.");
     Ok(())
 }
 
@@ -253,6 +572,7 @@ async fn payload_maps_function_tools_and_tool_results() -> Result<()> {
     assert_eq!(body["tools"][0]["strict"], false);
     assert!(body["tools"][0].get("permissions").is_none());
     assert_eq!(body["input"][1]["type"], "function_call");
+    assert!(body["input"][1].get("id").is_none());
     assert_eq!(body["input"][1]["call_id"], "call-1");
     assert_eq!(body["input"][2]["type"], "function_call_output");
     assert_eq!(body["input"][2]["call_id"], "call-1");
@@ -834,16 +1154,8 @@ async fn captured_request_body(
     request: ModelRequest,
     config: ResponsesApiProviderConfig,
 ) -> Result<Value> {
-    let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
-    let provider = ResponsesApiProvider::new(config.base_url(server.url()).without_api_key())?;
-    provider
-        .stream_model(
-            request,
-            Arc::new(|_| Box::pin(async { Ok(()) })),
-            CancellationToken::new(),
-        )
-        .await?;
-    Ok(server.request_json())
+    let render_config = ResponsesApiRequestRenderConfig::from(&config);
+    render_responses_api_request(&render_config, &request)
 }
 
 async fn stream_request(

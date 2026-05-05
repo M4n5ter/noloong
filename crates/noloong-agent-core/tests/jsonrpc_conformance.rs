@@ -23,6 +23,8 @@ const MODE_ADAPTER_PAYLOADS: &str = "adapter-payloads";
 const MODE_DELAYED_STREAM: &str = "delayed-stream";
 const MODE_DUPLICATE_COMPACTION: &str = "duplicate-compaction";
 const MODE_DUPLICATE_CONTEXT: &str = "duplicate-context";
+const MODE_DUPLICATE_CONTEXT_COMPACTOR: &str = "duplicate-context-compactor";
+const MODE_DUPLICATE_HTTP_AUTH: &str = "duplicate-http-auth";
 const MODE_DUPLICATE_MODEL: &str = "duplicate-model";
 const MODE_DUPLICATE_PHASE: &str = "duplicate-phase";
 const MODE_DUPLICATE_PHASE_HOOK: &str = "duplicate-phase-hook";
@@ -83,6 +85,12 @@ async fn public_runner_strict_fixture_passes() -> Result<()> {
         case.name == "compaction_summarizer"
             && case.status == ExtensionConformanceCaseStatus::Passed
     }));
+    assert!(report.cases.iter().any(|case| {
+        case.name == "context_compactor" && case.status == ExtensionConformanceCaseStatus::Passed
+    }));
+    assert!(report.cases.iter().any(|case| {
+        case.name == "http_auth_provider" && case.status == ExtensionConformanceCaseStatus::Passed
+    }));
     Ok(())
 }
 
@@ -104,6 +112,8 @@ async fn capabilities_duplicate_ids_fail_registration() {
         MODE_DUPLICATE_PHASE_HOOK,
         MODE_DUPLICATE_TOOL_CALL_HOOK,
         MODE_DUPLICATE_COMPACTION,
+        MODE_DUPLICATE_CONTEXT_COMPACTOR,
+        MODE_DUPLICATE_HTTP_AUTH,
     ] {
         let error = builder_error(&[mode]).await;
         assert_contains(&error, "duplicate");

@@ -1,20 +1,22 @@
 use crate::provider_utils::{
-    ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
-    resolve_api_key,
+    ReplayScopeMatch, emit_model_stream_event, headers_from_map, refresh_auth_provider,
+    replay_scope_match, resolve_auth_headers,
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
 use crate::{
-    AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaDelta,
-    MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
-    ModelStreamEvent, ModelStreamSink, Result, StopReason, ThinkingBlock, ThinkingDelta,
-    ThinkingKind, ToolCall, ToolSpec,
+    AgentCoreError, AgentMessage, CancellationToken, ContentBlock, HttpAuthContext, HttpAuthHeader,
+    HttpAuthProvider, HttpAuthRefreshContext, MediaBlock, MediaDelta, MediaEncoding, MediaKind,
+    MediaSource, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
+    Result, StopReason, ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall, ToolSpec,
 };
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
     fmt::{Debug, Formatter},
+    sync::Arc,
     time::Duration,
 };
 
@@ -30,6 +32,7 @@ pub struct ChatCompletionsProviderConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
+    pub auth_provider: Option<Arc<dyn HttpAuthProvider>>,
     pub headers: BTreeMap<String, String>,
     pub extra_body: Map<String, Value>,
     pub max_completion_tokens: Option<u64>,
@@ -141,6 +144,10 @@ impl Debug for ChatCompletionsProviderConfig {
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("api_key_env", &self.api_key_env)
+            .field(
+                "auth_provider",
+                &self.auth_provider.as_ref().map(|provider| provider.id()),
+            )
             .field("headers", &self.headers)
             .field("extra_body", &self.extra_body)
             .field("max_completion_tokens", &self.max_completion_tokens)
@@ -168,6 +175,7 @@ impl ChatCompletionsProviderConfig {
             model: model.into(),
             api_key: None,
             api_key_env: Some(DEFAULT_OPENAI_API_KEY_ENV.into()),
+            auth_provider: None,
             headers: BTreeMap::new(),
             extra_body: Map::new(),
             max_completion_tokens: None,
@@ -201,6 +209,11 @@ impl ChatCompletionsProviderConfig {
     pub fn without_api_key(mut self) -> Self {
         self.api_key = None;
         self.api_key_env = None;
+        self
+    }
+
+    pub fn auth_provider(mut self, auth_provider: Arc<dyn HttpAuthProvider>) -> Self {
+        self.auth_provider = Some(auth_provider);
         self
     }
 
@@ -309,8 +322,30 @@ impl ChatCompletionsProvider {
         )
     }
 
-    fn api_key(&self) -> Result<Option<String>> {
-        resolve_api_key(&self.config.api_key, &self.config.api_key_env)
+    async fn request_headers(
+        &self,
+        url: &str,
+        attempt: u32,
+        refreshed_headers: Option<Vec<HttpAuthHeader>>,
+        cancellation: CancellationToken,
+    ) -> Result<HeaderMap> {
+        let mut headers = headers_from_map(&self.config.headers)?;
+        headers.extend(
+            resolve_auth_headers(
+                self.config.auth_provider.as_ref(),
+                &self.config.api_key,
+                &self.config.api_key_env,
+                self.auth_context("POST", url, attempt),
+                refreshed_headers,
+                cancellation,
+            )
+            .await?,
+        );
+        Ok(headers)
+    }
+
+    fn auth_context(&self, method: &str, url: &str, attempt: u32) -> HttpAuthContext {
+        HttpAuthContext::new(&self.config.id, method, url, attempt)
     }
 }
 
@@ -333,50 +368,82 @@ impl ModelProvider for ChatCompletionsProvider {
             cancellation.throw_if_cancelled()?;
             let payload = build_chat_payload(&self.config, &request)?;
             let stream_id = format!("chat-completions-{}-{}", request.run_id, request.turn_id);
-            let headers = headers_from_map(&self.config.headers)?;
-            let api_key = self.api_key()?;
 
             let mut events = Vec::new();
             let mut state = ChatStreamState::new(&self.config);
             let mut started = false;
-            run_sse_model_stream(
-                SseStreamOptions {
-                    provider_label: "chat completions",
-                    request_timeout: self.config.request_timeout,
-                    stream_idle_timeout: self.config.stream_idle_timeout,
-                    reconnect: &self.config.stream_reconnect,
-                    cancellation: &cancellation,
-                },
-                &stream,
-                &mut events,
-                || {
-                    let mut request_builder = self
-                        .client
-                        .post(self.endpoint())
-                        .headers(headers.clone())
-                        .json(&payload);
-                    if let Some(api_key) = &api_key {
-                        request_builder = request_builder.bearer_auth(api_key);
+            let endpoint = self.endpoint();
+            let mut attempt = 0_u32;
+            let mut refreshed_headers = None;
+            loop {
+                let headers = self
+                    .request_headers(
+                        &endpoint,
+                        attempt,
+                        refreshed_headers.take(),
+                        cancellation.clone(),
+                    )
+                    .await?;
+                let result = run_sse_model_stream(
+                    SseStreamOptions {
+                        provider_label: "chat completions",
+                        request_timeout: self.config.request_timeout,
+                        stream_idle_timeout: self.config.stream_idle_timeout,
+                        reconnect: &self.config.stream_reconnect,
+                        cancellation: &cancellation,
+                    },
+                    &stream,
+                    &mut events,
+                    || {
+                        Ok(self
+                            .client
+                            .post(&endpoint)
+                            .headers(headers.clone())
+                            .json(&payload))
+                    },
+                    |data| {
+                        let mut events = Vec::new();
+                        if !started {
+                            started = true;
+                            events.push(ModelStreamEvent::Started {
+                                stream_id: stream_id.clone(),
+                            });
+                        }
+                        if data == "[DONE]" {
+                            state.done = true;
+                            return Ok(SseFrameResult::new(events, true));
+                        }
+                        events.extend(state.apply_chunk(data)?);
+                        Ok(SseFrameResult::new(events, state.done))
+                    },
+                )
+                .await;
+                match result {
+                    Ok(()) => break,
+                    Err(error @ AgentCoreError::HttpStatus { status: 401, .. })
+                        if attempt == 0 && self.config.auth_provider.is_some() =>
+                    {
+                        let refresh_context = HttpAuthRefreshContext::unauthorized(
+                            self.auth_context("POST", &endpoint, attempt),
+                            401,
+                        );
+                        if let Some(refresh) = refresh_auth_provider(
+                            self.config.auth_provider.as_ref(),
+                            refresh_context,
+                            cancellation.clone(),
+                        )
+                        .await?
+                            && refresh.retry
+                        {
+                            refreshed_headers = refresh.headers;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(error);
                     }
-                    Ok(request_builder)
-                },
-                |data| {
-                    let mut events = Vec::new();
-                    if !started {
-                        started = true;
-                        events.push(ModelStreamEvent::Started {
-                            stream_id: stream_id.clone(),
-                        });
-                    }
-                    if data == "[DONE]" {
-                        state.done = true;
-                        return Ok(SseFrameResult::new(events, true));
-                    }
-                    events.extend(state.apply_chunk(data)?);
-                    Ok(SseFrameResult::new(events, state.done))
-                },
-            )
-            .await?;
+                    Err(error) => return Err(error),
+                }
+            }
             for event in state.finish_events() {
                 emit_model_stream_event(&stream, &mut events, event).await?;
             }
@@ -519,6 +586,11 @@ fn to_assistant_message(
                 }));
             }
             ContentBlock::ToolResult { .. } => {}
+            ContentBlock::ProviderPayload { .. } => {
+                return Err(AgentCoreError::Provider(
+                    "provider payload blocks cannot be rendered for chat completions".into(),
+                ));
+            }
         }
     }
 
@@ -791,6 +863,9 @@ fn render_text_block(block: &ContentBlock) -> Result<Option<String>> {
         ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => Err(
             AgentCoreError::Provider("tool blocks cannot be rendered as chat message text".into()),
         ),
+        ContentBlock::ProviderPayload { .. } => Err(AgentCoreError::Provider(
+            "provider payload blocks cannot be rendered as chat message text".into(),
+        )),
     }
 }
 

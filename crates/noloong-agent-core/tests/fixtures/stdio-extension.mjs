@@ -26,6 +26,14 @@ const compactionSummarizerMode =
   process.argv
     .find((arg) => arg.startsWith("--compaction-summarizer-mode="))
     ?.slice("--compaction-summarizer-mode=".length) ?? null;
+const contextCompactorMode =
+  process.argv
+    .find((arg) => arg.startsWith("--context-compactor-mode="))
+    ?.slice("--context-compactor-mode=".length) ?? null;
+const authProviderMode =
+  process.argv
+    .find((arg) => arg.startsWith("--auth-provider-mode="))
+    ?.slice("--auth-provider-mode=".length) ?? null;
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -95,6 +103,18 @@ for await (const line of rl) {
       capabilities.push({
         type: "compaction_summarizer",
         id: "fixture-compaction",
+      });
+    }
+    if (contextCompactorMode) {
+      capabilities.push({
+        type: "context_compactor",
+        id: "fixture-context-compactor",
+      });
+    }
+    if (authProviderMode) {
+      capabilities.push({
+        type: "http_auth_provider",
+        id: "fixture-auth",
       });
     }
     result(id, {
@@ -282,6 +302,72 @@ for await (const line of rl) {
     result(id, {
       summary: `fixture compaction summary: ${params.messagesToSummarize.length}`,
       metadata: { fixtureCompaction: true },
+    });
+    continue;
+  }
+
+  if (method === "compaction/compact") {
+    if (contextCompactorMode === "malformed") {
+      result(id, { type: "replacement", result: { replacementMessages: "not an array" } });
+      continue;
+    }
+    if (contextCompactorMode === "replacement") {
+      result(id, {
+        type: "replacement",
+        result: {
+          replacementMessages: [
+            {
+              id: "fixture-replacement-summary",
+              role: "system",
+              content: [
+                {
+                  type: "text",
+                  text: `fixture replacement summary: ${params.messagesToSummarize.length}`,
+                },
+              ],
+              metadata: {},
+            },
+            ...(params.retainedMessages ?? []),
+          ],
+          metadata: { fixtureCompactor: true },
+        },
+      });
+      continue;
+    }
+    result(id, {
+      type: "summary",
+      result: {
+        summary: `fixture context compactor summary: ${params.messagesToSummarize.length}`,
+        metadata: { fixtureCompactor: true },
+      },
+    });
+    continue;
+  }
+
+  if (method === "auth/headers") {
+    if (authProviderMode === "malformed") {
+      result(id, { headers: "not an array" });
+      continue;
+    }
+    result(id, {
+      headers: [
+        { name: "Authorization", value: "Bearer fixture-auth" },
+        { name: "X-Fixture-Auth", value: params.context.providerId },
+      ],
+      metadata: { fixtureAuth: true },
+    });
+    continue;
+  }
+
+  if (method === "auth/refresh") {
+    if (authProviderMode === "deny-refresh") {
+      result(id, { retry: false, metadata: { fixtureRefresh: "denied" } });
+      continue;
+    }
+    result(id, {
+      retry: true,
+      headers: [{ name: "Authorization", value: "Bearer fixture-refresh" }],
+      metadata: { fixtureRefresh: params.reason },
     });
     continue;
   }

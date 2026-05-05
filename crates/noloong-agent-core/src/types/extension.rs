@@ -11,6 +11,8 @@ pub enum ExtensionCapability {
     PhaseHook { id: String },
     ToolCallHook { id: String },
     CompactionSummarizer { id: String },
+    ContextCompactor { id: String },
+    HttpAuthProvider { id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

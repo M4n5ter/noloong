@@ -12,6 +12,8 @@ const PHASE_ID = "conformance.phase";
 const PHASE_HOOK_ID = "conformance-hook";
 const TOOL_HOOK_ID = "conformance-tool-hook";
 const COMPACTION_ID = "conformance-compaction";
+const CONTEXT_COMPACTOR_ID = "conformance-context-compactor";
+const AUTH_PROVIDER_ID = "conformance-auth";
 
 createStdioJsonRpcExtension({
   initialize(params) {
@@ -56,6 +58,8 @@ createStdioJsonRpcExtension({
         { type: "phase_hook", id: PHASE_HOOK_ID },
         { type: "tool_call_hook", id: TOOL_HOOK_ID },
         { type: "compaction_summarizer", id: COMPACTION_ID },
+        { type: "context_compactor", id: CONTEXT_COMPACTOR_ID },
+        { type: "http_auth_provider", id: AUTH_PROVIDER_ID },
       ],
     };
   },
@@ -152,6 +156,50 @@ createStdioJsonRpcExtension({
       : [];
     return {
       summary: `conformance compaction summary: ${messages.length}`,
+      metadata: { example: "typescript" },
+    };
+  },
+
+  "compaction/compact"(params) {
+    const messages = Array.isArray(params.messagesToSummarize)
+      ? params.messagesToSummarize
+      : [];
+    const retainedMessages = Array.isArray(params.retainedMessages)
+      ? params.retainedMessages
+      : [];
+    return {
+      type: "replacement",
+      result: {
+        replacementMessages: [
+          {
+            id: "typescript-replacement-summary",
+            role: "system",
+            content: [
+              {
+                type: "text",
+                text: `conformance replacement summary: ${messages.length}`,
+              },
+            ],
+            metadata: {},
+          },
+          ...retainedMessages,
+        ],
+        metadata: { example: "typescript" },
+      },
+    };
+  },
+
+  "auth/headers"() {
+    return {
+      headers: [{ name: "Authorization", value: "Bearer conformance-auth" }],
+      metadata: { example: "typescript" },
+    };
+  },
+
+  "auth/refresh"() {
+    return {
+      retry: true,
+      headers: [{ name: "Authorization", value: "Bearer conformance-refresh" }],
       metadata: { example: "typescript" },
     };
   },

@@ -5,9 +5,11 @@ use crate::{
     AgentEffect, AgentMessage, BeforeAssistantCommitHookContext, BeforeAssistantCommitHookResult,
     BeforeModelRequestHookContext, BeforeModelRequestHookResult, BeforeToolCallContext,
     BeforeToolCallResult, CompactionSummarizer, CompactionSummaryRequest, CompactionSummaryResult,
-    ContextProvider, ContextRequest, ModelProvider, ModelRequest, ModelStreamEvent, PhaseContext,
-    PhaseHook, PhaseNode, PhaseOutput, Result, ToolCallHook, ToolOutput, ToolProvider, ToolRequest,
-    ToolSpec,
+    ContextCompactionOutput, ContextCompactionRequest, ContextCompactor, ContextProvider,
+    ContextRequest, HttpAuthContext, HttpAuthHeaders, HttpAuthProvider, HttpAuthRefreshContext,
+    HttpAuthRefreshReason, HttpAuthRefreshResult, ModelProvider, ModelRequest, ModelStreamEvent,
+    PhaseContext, PhaseHook, PhaseNode, PhaseOutput, Result, ToolCallHook, ToolOutput,
+    ToolProvider, ToolRequest, ToolSpec,
 };
 use crate::{CancellationToken, ModelStreamSink};
 use serde::{Serialize, de::DeserializeOwned};
@@ -373,6 +375,94 @@ impl CompactionSummarizer for StdioCompactionSummarizer {
     }
 }
 
+pub struct StdioContextCompactor {
+    extension: Arc<StdioExtension>,
+    id: String,
+}
+
+impl StdioContextCompactor {
+    pub fn new(extension: Arc<StdioExtension>, id: String) -> Self {
+        Self { extension, id }
+    }
+}
+
+impl ContextCompactor for StdioContextCompactor {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn compact<'a>(
+        &'a self,
+        request: ContextCompactionRequest,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, ContextCompactionOutput> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let params = serde_json::to_value(ContextCompactionRequestPayload {
+                compactor_id: &self.id,
+                request: &request,
+            })?;
+            self.extension
+                .request("compaction/compact", params, Some(cancellation))
+                .await
+        })
+    }
+}
+
+pub struct StdioHttpAuthProvider {
+    extension: Arc<StdioExtension>,
+    id: String,
+}
+
+impl StdioHttpAuthProvider {
+    pub fn new(extension: Arc<StdioExtension>, id: String) -> Self {
+        Self { extension, id }
+    }
+}
+
+impl HttpAuthProvider for StdioHttpAuthProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn headers<'a>(
+        &'a self,
+        context: HttpAuthContext,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, HttpAuthHeaders> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let params = serde_json::to_value(HttpAuthHeadersRequest {
+                auth_provider_id: &self.id,
+                context: &context,
+            })?;
+            self.extension
+                .request("auth/headers", params, Some(cancellation))
+                .await
+        })
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        context: HttpAuthRefreshContext,
+        cancellation: CancellationToken,
+    ) -> crate::providers::BoxFuture<'a, HttpAuthRefreshResult> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let params = serde_json::to_value(HttpAuthRefreshRequest {
+                auth_provider_id: &self.id,
+                context: &context.context,
+                reason: &context.reason,
+                status: context.status,
+                metadata: &context.metadata,
+            })?;
+            self.extension
+                .request("auth/refresh", params, Some(cancellation))
+                .await
+        })
+    }
+}
+
 pub struct StdioPhaseNode {
     extension: Arc<StdioExtension>,
     id: String,
@@ -643,4 +733,30 @@ struct CompactionSummarizeRequest<'a> {
     summarizer_id: &'a str,
     #[serde(flatten)]
     request: &'a CompactionSummaryRequest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextCompactionRequestPayload<'a> {
+    compactor_id: &'a str,
+    #[serde(flatten)]
+    request: &'a ContextCompactionRequest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpAuthHeadersRequest<'a> {
+    auth_provider_id: &'a str,
+    context: &'a HttpAuthContext,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpAuthRefreshRequest<'a> {
+    auth_provider_id: &'a str,
+    context: &'a HttpAuthContext,
+    reason: &'a HttpAuthRefreshReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    metadata: &'a serde_json::Map<String, serde_json::Value>,
 }

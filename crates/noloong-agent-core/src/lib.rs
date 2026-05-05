@@ -7,6 +7,7 @@ mod clock;
 mod compaction;
 mod error;
 mod extension_conformance;
+mod http_auth;
 mod jsonrpc;
 mod phase;
 mod provider_utils;
@@ -29,21 +30,30 @@ pub use chat_completions::{
     ChatOutputAudioConfig, ChatOutputModality,
 };
 pub use compaction::{
-    COMPACTION_METADATA_KEY, CompactionDecision, CompactionPlan, CompactionSummarizer,
-    CompactionSummaryRequest, CompactionSummaryResult, ContextCompactionConfig,
-    ContextCompactionMode, HeuristicTokenEstimator, ModelBackedCompactionSummarizer,
-    ModelBackedCompactionSummarizerConfig, TokenEstimator, compacted_messages,
-    compaction_summary_message, plan_compaction, serialize_messages_for_summary,
+    COMPACTION_METADATA_KEY, CompactionDecision, CompactionPlan, CompactionReplacementResult,
+    CompactionSummarizer, CompactionSummaryRequest, CompactionSummaryResult,
+    ContextCompactionConfig, ContextCompactionMode, ContextCompactionOutput,
+    ContextCompactionRequest, ContextCompactor, HeuristicTokenEstimator,
+    ModelBackedCompactionSummarizer, ModelBackedCompactionSummarizerConfig,
+    SummaryContextCompactor, TokenEstimator, compacted_messages, compaction_summary_message,
+    plan_compaction, serialize_messages_for_summary,
 };
 pub use error::{AgentCoreError, Result};
 pub use extension_conformance::{
-    CONFORMANCE_COMPACTION_SUMMARIZER_ID, CONFORMANCE_CONTEXT_PROVIDER_ID,
+    CONFORMANCE_COMPACTION_SUMMARIZER_ID, CONFORMANCE_CONTEXT_COMPACTOR_ID,
+    CONFORMANCE_CONTEXT_PROVIDER_ID, CONFORMANCE_HTTP_AUTH_PROVIDER_ID,
     CONFORMANCE_MODEL_PROVIDER_ID, CONFORMANCE_PHASE_HOOK_ID, CONFORMANCE_PHASE_NODE_ID,
     CONFORMANCE_TOOL_CALL_HOOK_ID, CONFORMANCE_TOOL_NAME, ExtensionConformanceCaseReport,
     ExtensionConformanceCaseStatus, ExtensionConformanceConfig, ExtensionConformanceProfile,
     ExtensionConformanceReport, run_extension_conformance,
 };
-pub use jsonrpc::{StdioExtension, StdioExtensionConfig};
+pub use http_auth::{
+    HttpAuthContext, HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, HttpAuthRefreshContext,
+    HttpAuthRefreshReason, HttpAuthRefreshResult,
+};
+pub use jsonrpc::{
+    StdioContextCompactor, StdioExtension, StdioExtensionConfig, StdioHttpAuthProvider,
+};
 pub use phase::{
     PHASE_ASSISTANT_COMMIT, PHASE_CONTEXT_COMPACT, PHASE_CONTEXT_PREPARE, PHASE_INPUT_INGEST,
     PHASE_MODEL_REQUEST_PREPARE, PHASE_MODEL_STREAM, PHASE_TOOL_CALL_RESOLVE, PHASE_TOOL_EXECUTE,
@@ -58,8 +68,9 @@ pub use providers::{
 };
 pub use reducer::{apply_event, reduce_events};
 pub use responses::{
-    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesReasoningConfig,
-    ResponsesReasoningEffort, ResponsesReasoningSummary,
+    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesApiRequestRenderConfig,
+    ResponsesReasoningConfig, ResponsesReasoningEffort, ResponsesReasoningSummary,
+    render_responses_api_request,
 };
 pub use runtime::{
     AgentEventSink, AgentInput, AgentRuntime, AgentRuntimeBuilder, QueuedAgentMessage,

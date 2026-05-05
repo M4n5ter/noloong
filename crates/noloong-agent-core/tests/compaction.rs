@@ -2,7 +2,8 @@ use noloong_agent_core::{
     AgentCoreError, AgentEffect, AgentEventKind, AgentMessage, AgentRuntime, AgentState, BoxFuture,
     CancellationToken, CompactionDecision, CompactionSummarizer, CompactionSummaryRequest,
     CompactionSummaryResult, ContentBlock, ContextCompactionConfig, ContextCompactionMode,
-    HeuristicTokenEstimator, MediaBlock, MediaKind, MessageCompaction, MessageRole,
+    ContextCompactionOutput, ContextCompactionRequest, ContextCompactor, HeuristicTokenEstimator,
+    MediaBlock, MediaKind, MessageCompaction, MessageReplacement, MessageRole,
     ModelBackedCompactionSummarizer, ModelBackedCompactionSummarizerConfig, ModelProvider,
     ModelRequest, ModelStreamEvent, ModelStreamSink, PHASE_CONTEXT_COMPACT, Result, StopReason,
     TokenEstimator, ToolCall, ToolOutput, compacted_messages, compaction_summary_message,
@@ -112,6 +113,48 @@ fn compact_messages_effect_replays_to_compacted_state() -> Result<()> {
 }
 
 #[test]
+fn replace_messages_effect_replays_to_replacement_state() -> Result<()> {
+    let original = vec![
+        message("u1", MessageRole::User, "old"),
+        message("a1", MessageRole::Assistant, "old answer"),
+        message("u2", MessageRole::User, "recent"),
+    ];
+    let replacement_messages = vec![
+        message(
+            "replacement-summary",
+            MessageRole::System,
+            "replacement summary",
+        ),
+        message("u2", MessageRole::User, "recent"),
+    ];
+    let mut state = AgentState {
+        messages: original.clone(),
+        ..AgentState::default()
+    };
+    let effect = AgentEffect::ReplaceMessages {
+        replacement: MessageReplacement {
+            replacement_messages: replacement_messages.clone(),
+            replaced_message_ids: original.iter().map(|message| message.id.clone()).collect(),
+            tokens_before: 100,
+            tokens_after: 20,
+            metadata: Map::new(),
+        },
+    };
+    let event = noloong_agent_core::AgentEvent {
+        sequence: 1,
+        run_id: "run-1".into(),
+        turn_id: Some(1),
+        phase: Some(PHASE_CONTEXT_COMPACT.into()),
+        kind: AgentEventKind::EffectCommitted { effect },
+    };
+
+    noloong_agent_core::apply_event(&mut state, &event)?;
+
+    assert_eq!(state.messages, replacement_messages);
+    Ok(())
+}
+
+#[test]
 fn compact_messages_effect_rejects_invalid_ids() {
     let effect = AgentEffect::CompactMessages {
         compaction: MessageCompaction {
@@ -132,6 +175,35 @@ fn compact_messages_effect_rejects_invalid_ids() {
     };
     let mut state = AgentState {
         messages: vec![message("u1", MessageRole::User, "hello")],
+        ..AgentState::default()
+    };
+
+    assert!(noloong_agent_core::apply_event(&mut state, &event).is_err());
+}
+
+#[test]
+fn replace_messages_effect_rejects_partial_state_coverage() {
+    let effect = AgentEffect::ReplaceMessages {
+        replacement: MessageReplacement {
+            replacement_messages: vec![message("replacement", MessageRole::System, "summary")],
+            replaced_message_ids: vec!["u1".into()],
+            tokens_before: 10,
+            tokens_after: 5,
+            metadata: Map::new(),
+        },
+    };
+    let event = noloong_agent_core::AgentEvent {
+        sequence: 1,
+        run_id: "run-1".into(),
+        turn_id: Some(1),
+        phase: Some(PHASE_CONTEXT_COMPACT.into()),
+        kind: AgentEventKind::EffectCommitted { effect },
+    };
+    let mut state = AgentState {
+        messages: vec![
+            message("u1", MessageRole::User, "hello"),
+            message("a1", MessageRole::Assistant, "hi"),
+        ],
         ..AgentState::default()
     };
 
@@ -254,7 +326,7 @@ async fn persistent_compaction_updates_state_and_provider_request() -> Result<()
     let runtime = runtime_with_compaction(
         provider.clone(),
         ContextCompactionMode::PersistentState,
-        Arc::new(StaticSummarizer::new("summary")),
+        Arc::new(StaticSummarizer::new("summary").metadata("summary_source", json!("test"))),
     )?;
     let initial_state = long_state();
 
@@ -276,6 +348,19 @@ async fn persistent_compaction_updates_state_and_provider_request() -> Result<()
             }
         )
     }));
+    let compaction_metadata = report
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            AgentEventKind::EffectCommitted {
+                effect: AgentEffect::CompactMessages { compaction },
+            } => Some(&compaction.metadata),
+            _ => None,
+        })
+        .expect("compaction effect");
+    assert_eq!(compaction_metadata["summary_source"], json!("test"));
+    assert_eq!(compaction_metadata["mode"], json!("persistent_state"));
+    assert!(compaction_metadata["tokensBefore"].is_number());
     Ok(())
 }
 
@@ -302,6 +387,65 @@ async fn request_only_compaction_changes_request_without_changing_state_history(
             &event.kind,
             AgentEventKind::EffectCommitted {
                 effect: AgentEffect::CompactMessages { .. }
+            }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_replacement_compaction_updates_state_and_provider_request() -> Result<()> {
+    let provider = Arc::new(CaptureModel::text("visible"));
+    let runtime = runtime_with_compactor(
+        provider.clone(),
+        ContextCompactionMode::PersistentState,
+        Arc::new(ReplacementCompactor),
+    )?;
+    let initial_state = long_state();
+
+    let report = runtime
+        .continue_from_state(initial_state, None, CancellationToken::new())
+        .await?;
+
+    let requests = provider.requests.lock().expect("requests lock poisoned");
+    assert_text_present(&requests[0].messages, "replacement summary");
+    assert_text_absent(&requests[0].messages, "old old old");
+    assert_text_present(&report.state.messages, "replacement summary");
+    assert_text_absent(&report.state.messages, "old old old");
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::EffectCommitted {
+                effect: AgentEffect::ReplaceMessages { .. }
+            }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_only_replacement_compaction_changes_request_without_state_history() -> Result<()> {
+    let provider = Arc::new(CaptureModel::text("visible"));
+    let runtime = runtime_with_compactor(
+        provider.clone(),
+        ContextCompactionMode::RequestOnly,
+        Arc::new(ReplacementCompactor),
+    )?;
+    let initial_state = long_state();
+
+    let report = runtime
+        .continue_from_state(initial_state, None, CancellationToken::new())
+        .await?;
+
+    let requests = provider.requests.lock().expect("requests lock poisoned");
+    assert_text_present(&requests[0].messages, "replacement summary");
+    assert_text_absent(&requests[0].messages, "old old old");
+    assert_text_present(&report.state.messages, "old old old");
+    assert!(!report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::EffectCommitted {
+                effect: AgentEffect::ReplaceMessages { .. }
             }
         )
     }));
@@ -527,6 +671,24 @@ fn runtime_with_compaction(
         .build()
 }
 
+fn runtime_with_compactor(
+    provider: Arc<CaptureModel>,
+    mode: ContextCompactionMode,
+    compactor: Arc<dyn ContextCompactor>,
+) -> Result<AgentRuntime> {
+    AgentRuntime::builder()
+        .with_model_provider(provider)
+        .with_context_compactor(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10)
+                .mode(mode),
+            compactor,
+        )
+        .max_turns(1)
+        .build()
+}
+
 fn long_state() -> AgentState {
     AgentState {
         messages: vec![
@@ -593,6 +755,30 @@ struct CountingSummarizer {
     calls: AtomicUsize,
 }
 
+struct ReplacementCompactor;
+
+impl ContextCompactor for ReplacementCompactor {
+    fn id(&self) -> &str {
+        "replacement"
+    }
+
+    fn compact<'a>(
+        &'a self,
+        request: ContextCompactionRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ContextCompactionOutput> {
+        Box::pin(async move {
+            let mut replacement_messages = vec![message(
+                "replacement-summary",
+                MessageRole::System,
+                "replacement summary",
+            )];
+            replacement_messages.extend(request.retained_messages);
+            Ok(ContextCompactionOutput::replacement(replacement_messages))
+        })
+    }
+}
+
 impl CompactionSummarizer for CountingSummarizer {
     fn id(&self) -> &str {
         "counting"
@@ -615,13 +801,20 @@ impl CompactionSummarizer for CountingSummarizer {
 
 struct StaticSummarizer {
     summary: String,
+    metadata: Map<String, serde_json::Value>,
 }
 
 impl StaticSummarizer {
     fn new(summary: impl Into<String>) -> Self {
         Self {
             summary: summary.into(),
+            metadata: Map::new(),
         }
+    }
+
+    fn metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.metadata.insert(key.into(), value);
+        self
     }
 }
 
@@ -638,7 +831,7 @@ impl CompactionSummarizer for StaticSummarizer {
         Box::pin(async move {
             Ok(CompactionSummaryResult {
                 summary: self.summary.clone(),
-                metadata: Map::new(),
+                metadata: self.metadata.clone(),
             })
         })
     }

@@ -3,7 +3,7 @@ mod builder;
 mod run_loop;
 
 use crate::{
-    AgentEvent, AgentMessage, AgentState, CompactionSummarizer, ContextCompactionConfig,
+    AgentEvent, AgentMessage, AgentState, ContextCompactionConfig, ContextCompactor,
     ContextProvider, EventSinkFuture, EventStore, ModelProvider, PhaseHook, PhaseNode, PhaseOutput,
     PhaseScratch, StdioExtension, TokenEstimator, ToolCallHook, ToolExecutionMode, ToolProvider,
 };
@@ -71,7 +71,7 @@ pub(crate) struct ToolRuntimeHandles {
 #[derive(Clone)]
 pub(crate) struct ContextCompactionRuntime {
     pub config: ContextCompactionConfig,
-    pub summarizer: Arc<dyn CompactionSummarizer>,
+    pub compactor: Arc<dyn ContextCompactor>,
     pub estimator: Arc<dyn TokenEstimator>,
 }
 

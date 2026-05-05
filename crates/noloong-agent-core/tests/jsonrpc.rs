@@ -1,18 +1,22 @@
 use noloong_agent_core::{
     AfterAssistantCommitHookContext, AfterAssistantCommitHookResult, AgentEventKind, AgentRuntime,
     AgentRuntimeBuilder, BoxFuture, CancellationToken, ContentBlock, ContextCompactionConfig,
-    ContextPatch, EventStore, InMemoryEventStore, MediaEncoding, MediaKind, MediaSource,
-    MessageRole, ModelStreamEvent, PhaseHook, Result, RunStatus, StdioExtension,
-    StdioExtensionConfig, ToolApprovalResolution, ToolPermissionDecision, ToolPermissionOutcome,
-    reduce_events,
+    ContextPatch, EventStore, HttpAuthContext, HttpAuthProvider, HttpAuthRefreshContext,
+    InMemoryEventStore, MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider,
+    ModelStreamEvent, PhaseHook, ResponsesApiProvider, ResponsesApiProviderConfig, Result,
+    RunStatus, StdioExtension, StdioExtensionConfig, StdioHttpAuthProvider, ToolApprovalResolution,
+    ToolPermissionDecision, ToolPermissionOutcome, reduce_events,
 };
-use serde_json::json;
+use serde_json::{Map, json};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::timeout};
 
 pub mod support;
 
-use support::{assert_assistant_text_contains, compaction_trigger_state, fixture_path};
+use support::{
+    MockResponse, MockServer, assert_assistant_text_contains, compaction_trigger_state,
+    fixture_path,
+};
 
 #[tokio::test]
 async fn stdio_compaction_summarizer_compacts_persistent_state() -> Result<()> {
@@ -89,6 +93,294 @@ async fn malformed_stdio_compaction_summarizer_response_fails_phase() -> Result<
     assert!(
         error.to_string().contains("json"),
         "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_stdio_context_compactor_response_fails_phase() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_context_compactor_id(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10),
+            "fixture-context-compactor",
+        )
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--context-compactor-mode=malformed".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let result = runtime
+        .continue_from_state(compaction_trigger_state(), None, CancellationToken::new())
+        .await;
+
+    let error = result.expect_err("malformed context compactor response should fail");
+    assert!(
+        error.to_string().contains("json"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_context_compactor_replaces_persistent_state() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_context_compactor_id(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10),
+            "fixture-context-compactor",
+        )
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--context-compactor-mode=replacement".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let report = runtime
+        .continue_from_state(compaction_trigger_state(), None, CancellationToken::new())
+        .await?;
+
+    assert!(report.state.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Text { text } if text.contains("fixture replacement summary")
+            )
+        })
+    }));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::EffectCommitted {
+                effect: noloong_agent_core::AgentEffect::ReplaceMessages { .. }
+            }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_context_compactor_can_return_summary() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let builder = AgentRuntime::builder()
+        .with_context_compactor_id(
+            ContextCompactionConfig::new(64)
+                .reserve_tokens(8)
+                .keep_recent_tokens(10),
+            "fixture-context-compactor",
+        )
+        .with_stdio_extension(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--context-compactor-mode=summary".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?;
+    let runtime = builder.max_turns(1).build()?;
+
+    let report = runtime
+        .continue_from_state(compaction_trigger_state(), None, CancellationToken::new())
+        .await?;
+
+    assert!(report.state.messages.iter().any(|message| {
+        matches!(message.role, MessageRole::System)
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains("fixture context compactor summary")
+                )
+            })
+    }));
+    assert!(report.events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            AgentEventKind::EffectCommitted {
+                effect: noloong_agent_core::AgentEffect::CompactMessages { .. }
+            }
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_stdio_http_auth_provider_response_fails_request() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let extension = Arc::new(
+        StdioExtension::connect(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--auth-provider-mode=malformed".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?,
+    );
+    let auth = StdioHttpAuthProvider::new(extension, "fixture-auth".into());
+
+    let error = auth
+        .headers(
+            HttpAuthContext::new(
+                "test-responses",
+                "POST",
+                "https://example.test/responses",
+                0,
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("malformed auth headers should fail");
+
+    assert!(error.to_string().contains("json"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_http_auth_provider_can_deny_refresh() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let extension = Arc::new(
+        StdioExtension::connect(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--auth-provider-mode=deny-refresh".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?,
+    );
+    let auth = StdioHttpAuthProvider::new(extension, "fixture-auth".into());
+
+    let result = auth
+        .refresh(
+            HttpAuthRefreshContext::unauthorized(
+                HttpAuthContext::new(
+                    "test-responses",
+                    "POST",
+                    "https://example.test/responses",
+                    0,
+                ),
+                401,
+            ),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert!(!result.retry);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_http_auth_provider_supplies_headers() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let extension = Arc::new(
+        StdioExtension::connect(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--auth-provider-mode=headers".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?,
+    );
+    let auth = Arc::new(StdioHttpAuthProvider::new(extension, "fixture-auth".into()));
+    let server = MockServer::spawn(200, "text/event-stream", "data: [DONE]\n\n").await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .api_key("static-secret")
+            .auth_provider(auth),
+    )?;
+
+    provider
+        .stream_model(
+            noloong_agent_core::ModelRequest {
+                run_id: "run-1".into(),
+                turn_id: 1,
+                messages: vec![noloong_agent_core::AgentMessage::user("user-1", "hello")],
+                context: Map::new(),
+                tools: Vec::new(),
+                metadata: Map::new(),
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let request = server.request();
+    assert_eq!(request.header("authorization"), Some("Bearer fixture-auth"));
+    assert_eq!(request.header("x-fixture-auth"), Some("test-responses"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_http_auth_provider_refreshes_after_unauthorized() -> Result<()> {
+    let fixture = fixture_path("stdio-extension.mjs");
+    let extension = Arc::new(
+        StdioExtension::connect(
+            StdioExtensionConfig::new("node")
+                .args([
+                    fixture.to_string_lossy().to_string(),
+                    "--auth-provider-mode=headers".into(),
+                ])
+                .request_timeout(Duration::from_secs(2)),
+        )
+        .await?,
+    );
+    let auth = Arc::new(StdioHttpAuthProvider::new(extension, "fixture-auth".into()));
+    let server = MockServer::spawn_many(vec![
+        MockResponse::new(401, "application/json", "{\"error\":\"expired\"}"),
+        MockResponse::new(200, "text/event-stream", "data: [DONE]\n\n"),
+    ])
+    .await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .auth_provider(auth),
+    )?;
+
+    provider
+        .stream_model(
+            noloong_agent_core::ModelRequest {
+                run_id: "run-1".into(),
+                turn_id: 1,
+                messages: vec![noloong_agent_core::AgentMessage::user("user-1", "hello")],
+                context: Map::new(),
+                tools: Vec::new(),
+                metadata: Map::new(),
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let requests = server.requests();
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer fixture-auth")
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer fixture-refresh")
     );
     Ok(())
 }

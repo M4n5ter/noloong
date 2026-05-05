@@ -35,6 +35,9 @@ The extension implements the full standard conformance capability set and should
 | `phase_hook/run` | Receives `hookId`, `hookPoint`, common state fields, and hook-specific payload. |
 | `tool_hook/run` | Receives `hookId`, `hookPoint`, common state fields, and tool-specific payload. |
 | `compaction/summarize` | Receives flattened compaction request fields plus `summarizerId`; returns `summary`. |
+| `compaction/compact` | Receives flattened context compaction fields plus `compactorId`; returns summary or replacement history. |
+| `auth/headers` | Receives `authProviderId` and `HttpAuthContext`; returns HTTP headers. |
+| `auth/refresh` | Receives `authProviderId`, `HttpAuthContext`, refresh reason, and optional status; returns retry decision and optional headers. |
 | `shutdown` | Returns `{}`. |
 
 `tool_hook/run` demonstrates both permission decisions and human approval requests. The normal conformance path returns an allow `decision`; the approval conformance path returns `approval`, causing core to pause the run and later replay the human `ToolApprovalResolution` into the standard permission audit.

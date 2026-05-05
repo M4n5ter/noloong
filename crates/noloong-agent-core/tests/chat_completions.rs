@@ -1,9 +1,9 @@
 use noloong_agent_core::{
     AgentMessage, AgentRuntime, CancellationToken, ChatAudioFormat, ChatCompletionsProvider,
-    ChatCompletionsProviderConfig, ChatImageDetail, ChatOutputModality, ContentBlock, MediaBlock,
-    MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest,
-    ModelStreamEvent, Result, SseReconnectConfig, StopReason, ThinkingBlock, ToolCall,
-    ToolExecutionMode, ToolPermissionRequirement, ToolSpec,
+    ChatCompletionsProviderConfig, ChatImageDetail, ChatOutputModality, ContentBlock,
+    HttpAuthHeader, MediaBlock, MediaEncoding, MediaKind, MediaSource, MessageRole, ModelProvider,
+    ModelRequest, ModelStreamEvent, Result, SseReconnectConfig, StopReason, ThinkingBlock,
+    ToolCall, ToolExecutionMode, ToolPermissionRequirement, ToolSpec,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,9 @@ use tokio::time::{Duration, sleep};
 
 pub mod support;
 
-use support::{HangingServer, MockResponse, MockServer, fast_one_retry_reconnect};
+use support::{
+    HangingServer, MockResponse, MockServer, TestAuthProvider, fast_one_retry_reconnect,
+};
 
 #[test]
 fn reconnect_config_builder_sets_stream_reconnect() {
@@ -19,6 +21,31 @@ fn reconnect_config_builder_sets_stream_reconnect() {
         .stream_reconnect(SseReconnectConfig::disabled());
 
     assert_eq!(config.stream_reconnect, SseReconnectConfig::disabled());
+}
+
+#[tokio::test]
+async fn provider_payload_blocks_are_rejected() -> Result<()> {
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url("http://127.0.0.1:9")
+            .api_key("secret"),
+    )?;
+
+    let error = provider
+        .stream_model(
+            request_with_user_content(vec![ContentBlock::ProviderPayload {
+                provider: "openai.responses".into(),
+                kind: "response_item".into(),
+                value: json!({"type": "reasoning"}),
+            }]),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("provider payload should fail before request");
+
+    assert!(error.to_string().contains("provider payload"));
+    Ok(())
 }
 
 #[tokio::test]
@@ -65,6 +92,47 @@ async fn payload_maps_messages_tools_and_replay_descriptor() -> Result<()> {
     assert_eq!(body["messages"][3]["tool_call_id"], "call-1");
     assert_eq!(body["tools"][0]["function"]["name"], "lookup");
     assert!(body["tools"][0]["function"].get("permissions").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn auth_provider_headers_override_api_key() -> Result<()> {
+    let server = MockServer::spawn(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
+    .await?;
+    let auth = Arc::new(TestAuthProvider::new(
+        "test-auth",
+        vec![
+            HttpAuthHeader::new("Authorization", "Bearer dynamic"),
+            HttpAuthHeader::new("X-Auth-Provider", "yes"),
+        ],
+    ));
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .api_key("static-secret")
+            .auth_provider(auth.clone()),
+    )?;
+
+    provider
+        .stream_model(
+            simple_request(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let request = server.request();
+    assert_eq!(request.header("authorization"), Some("Bearer dynamic"));
+    assert_eq!(request.header("x-auth-provider"), Some("yes"));
+    let contexts = auth.header_contexts();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].provider_id, "test-chat");
+    assert_eq!(contexts[0].method, "POST");
+    assert_eq!(contexts[0].attempt, 0);
     Ok(())
 }
 

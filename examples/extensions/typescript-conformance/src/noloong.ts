@@ -16,6 +16,9 @@ const JSON_RPC_METHODS = [
   "phase_hook/run",
   "tool_hook/run",
   "compaction/summarize",
+  "compaction/compact",
+  "auth/headers",
+  "auth/refresh",
   "shutdown",
 ] as const;
 
