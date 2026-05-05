@@ -1,20 +1,25 @@
 use crate::{
-    AgentManifest, BuiltInApprovalHook, BuiltInToolName, BuiltInToolOutputOverflowHook, Catalog,
-    HostEnvironment, HostProcessCompletion, HostProcessEvent, HostProcessManager,
-    HostProcessSubscription, ManifestProposalStore, ToolOutputOverflowConfig,
+    AgentManifest, ApplyPatchTool, BuiltInApprovalHook, BuiltInToolName,
+    BuiltInToolOutputOverflowHook, Catalog, FileEditManager, FileEditToolPolicy, HostEnvironment,
+    HostProcessCompletion, HostProcessEvent, HostProcessManager, HostProcessSubscription,
+    ManifestProposalStore, ToolOutputOverflowConfig, WriteFileTool,
     approval::{ApprovalCache, cache_key_from_approval_resolution},
     text,
     tools::{
-        HostExecListTool, HostExecReadTool, HostExecStartTool, HostExecTerminateTool,
-        HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
+        APPLY_PATCH_TOOL_NAME, HostExecListTool, HostExecReadTool, HostExecStartTool,
+        HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
+        WRITE_FILE_TOOL_NAME,
     },
 };
 use noloong_agent_core::{
-    Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, Result, ToolApprovalRequest,
-    ToolPermissionDecision, ToolProvider,
+    Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, CompactionSummarizer,
+    ContextCompactionConfig, ContextProvider, EventStore, ModelProvider, PhaseHook, PhaseNode,
+    Result, StdioExtensionConfig, TokenEstimator, ToolApprovalRequest, ToolCallHook,
+    ToolExecutionMode, ToolPermissionDecision, ToolProvider,
 };
 use serde_json::{Map, json};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -30,6 +35,7 @@ struct AgentSessionInner {
     manifest: Mutex<AgentManifest>,
     environment: HostEnvironment,
     process_manager: HostProcessManager,
+    file_edit_manager: FileEditManager,
     proposal_store: ManifestProposalStore,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
@@ -43,6 +49,15 @@ pub struct AgentSessionBuilder {
     proposal_store: ManifestProposalStore,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
+}
+
+pub struct AgentSessionRuntimeBuilder {
+    core: AgentRuntimeBuilder,
+    inner: Arc<AgentSessionInner>,
+    manifest: AgentManifest,
+    catalog: Catalog,
+    model_names_by_id: BTreeMap<String, String>,
+    default_model_provider: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,7 +120,7 @@ impl AgentSession {
         Ok(applied)
     }
 
-    pub fn runtime_builder(&self) -> AgentRuntimeBuilder {
+    pub fn runtime_builder(&self) -> AgentSessionRuntimeBuilder {
         let manifest = self.manifest();
         let catalog = Catalog::new(manifest.locale);
         let mut builder = AgentRuntime::builder()
@@ -124,7 +139,14 @@ impl AgentSession {
         for tool in self.tools_for_manifest(&manifest, &catalog) {
             builder = builder.with_tool(tool);
         }
-        builder
+        AgentSessionRuntimeBuilder {
+            core: builder,
+            inner: Arc::clone(&self.inner),
+            manifest,
+            catalog,
+            model_names_by_id: BTreeMap::new(),
+            default_model_provider: None,
+        }
     }
 
     pub fn attach_background_completion_steering(
@@ -288,16 +310,222 @@ impl AgentSessionBuilder {
         let environment = self
             .environment
             .unwrap_or_else(|| HostEnvironment::detect(Some(self.manifest.locale)));
+        let file_edit_manager = FileEditManager::new(environment.cwd.clone());
         AgentSession {
             inner: Arc::new(AgentSessionInner {
                 manifest: Mutex::new(self.manifest),
                 environment,
                 process_manager: self.process_manager.unwrap_or_default(),
+                file_edit_manager,
                 proposal_store: self.proposal_store,
                 tool_output_overflow_config: self.tool_output_overflow_config,
                 approval_cache: self.approval_cache,
             }),
         }
+    }
+}
+
+impl AgentSessionRuntimeBuilder {
+    pub fn with_event_store(mut self, event_store: Arc<dyn EventStore>) -> Self {
+        self.core = self.core.with_event_store(event_store);
+        self
+    }
+
+    pub fn with_model_provider(mut self, provider: Arc<dyn ModelProvider>) -> Self {
+        let id = provider.id().to_string();
+        let model_name = provider.model_name().unwrap_or(provider.id()).to_string();
+        if self.default_model_provider.is_none() {
+            self.default_model_provider = Some(id.clone());
+        }
+        self.model_names_by_id.insert(id, model_name);
+        self.core = self.core.with_model_provider(provider);
+        self
+    }
+
+    pub fn default_model_provider(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        self.default_model_provider = Some(id.clone());
+        self.core = self.core.default_model_provider(id);
+        self
+    }
+
+    pub fn with_tool(mut self, tool: Arc<dyn ToolProvider>) -> Self {
+        self.core = self.core.with_tool(tool);
+        self
+    }
+
+    pub fn without_tool(mut self, name: &str) -> Self {
+        self.core = self.core.without_tool(name);
+        self
+    }
+
+    pub fn configure_core(
+        mut self,
+        configure: impl FnOnce(AgentRuntimeBuilder) -> AgentRuntimeBuilder,
+    ) -> Self {
+        self.core = configure(self.core);
+        self.sync_model_provider_metadata_from_core();
+        self
+    }
+
+    pub fn with_tool_execution_mode(mut self, mode: ToolExecutionMode) -> Self {
+        self.core = self.core.with_tool_execution_mode(mode);
+        self
+    }
+
+    pub fn with_tool_hook(mut self, hook: Arc<dyn ToolCallHook>) -> Self {
+        self.core = self.core.with_tool_hook(hook);
+        self
+    }
+
+    pub fn with_phase_hook(mut self, hook: Arc<dyn PhaseHook>) -> Self {
+        self.core = self.core.with_phase_hook(hook);
+        self
+    }
+
+    pub fn with_context_provider(mut self, provider: Arc<dyn ContextProvider>) -> Self {
+        self.core = self.core.with_context_provider(provider);
+        self
+    }
+
+    pub fn with_context_compaction(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+    ) -> Self {
+        self.core = self.core.with_context_compaction(config, summarizer);
+        self
+    }
+
+    pub fn with_context_compaction_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer: Arc<dyn CompactionSummarizer>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.core = self
+            .core
+            .with_context_compaction_estimator(config, summarizer, estimator);
+        self
+    }
+
+    pub fn with_context_compaction_summarizer_id(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer_id: impl Into<String>,
+    ) -> Self {
+        self.core = self
+            .core
+            .with_context_compaction_summarizer_id(config, summarizer_id);
+        self
+    }
+
+    pub fn with_context_compaction_summarizer_id_and_estimator(
+        mut self,
+        config: ContextCompactionConfig,
+        summarizer_id: impl Into<String>,
+        estimator: Arc<dyn TokenEstimator>,
+    ) -> Self {
+        self.core = self
+            .core
+            .with_context_compaction_summarizer_id_and_estimator(config, summarizer_id, estimator);
+        self
+    }
+
+    pub fn replace_phase(mut self, phase_id: &str, phase: Arc<dyn PhaseNode>) -> Self {
+        self.core = self.core.replace_phase(phase_id, phase);
+        self
+    }
+
+    pub fn insert_phase_after(mut self, after_phase_id: &str, phase: Arc<dyn PhaseNode>) -> Self {
+        self.core = self.core.insert_phase_after(after_phase_id, phase);
+        self
+    }
+
+    pub fn max_turns(mut self, max_turns: u64) -> Self {
+        self.core = self.core.max_turns(max_turns);
+        self
+    }
+
+    pub async fn with_stdio_extension(mut self, config: StdioExtensionConfig) -> Result<Self> {
+        self.core = self.core.with_stdio_extension(config).await?;
+        self.sync_model_provider_metadata_from_core();
+        Ok(self)
+    }
+
+    pub fn build(mut self) -> Result<AgentRuntime> {
+        self.core = self
+            .core
+            .without_tool(WRITE_FILE_TOOL_NAME)
+            .without_tool(APPLY_PATCH_TOOL_NAME);
+        if let Some(tool) = self.selected_file_edit_tool() {
+            self.core = self.core.with_tool(tool);
+        }
+        self.core.build()
+    }
+
+    fn selected_file_edit_tool(&self) -> Option<Arc<dyn ToolProvider>> {
+        match self.manifest.file_edit_tool_policy {
+            FileEditToolPolicy::AutoByModel => self.auto_file_edit_tool(),
+            FileEditToolPolicy::ApplyPatch => Some(self.apply_patch_tool()),
+            FileEditToolPolicy::WriteFile => Some(self.write_file_tool()),
+            FileEditToolPolicy::Disabled => None,
+        }
+    }
+
+    fn auto_file_edit_tool(&self) -> Option<Arc<dyn ToolProvider>> {
+        let model_name = self.default_model_name()?;
+        if model_name.to_ascii_lowercase().contains("gpt") {
+            Some(self.apply_patch_tool())
+        } else {
+            Some(self.write_file_tool())
+        }
+    }
+
+    fn default_model_name(&self) -> Option<&str> {
+        let provider_id = self
+            .default_model_provider
+            .as_deref()
+            .or_else(|| self.model_names_by_id.keys().next().map(String::as_str))?;
+        self.model_names_by_id
+            .get(provider_id)
+            .map(String::as_str)
+            .or(Some(provider_id))
+    }
+
+    fn sync_model_provider_metadata_from_core(&mut self) {
+        let providers = self
+            .core
+            .model_provider_metadata()
+            .map(|(id, model_name)| {
+                (
+                    id.to_owned(),
+                    model_name
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| id.to_owned()),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (id, model_name) in providers {
+            self.model_names_by_id.entry(id).or_insert(model_name);
+        }
+        if self.default_model_provider.is_none() {
+            self.default_model_provider = self.core.default_model_provider_id().map(str::to_owned);
+        }
+    }
+
+    fn apply_patch_tool(&self) -> Arc<dyn ToolProvider> {
+        Arc::new(ApplyPatchTool::new(
+            self.inner.file_edit_manager.clone(),
+            self.catalog.clone(),
+        ))
+    }
+
+    fn write_file_tool(&self) -> Arc<dyn ToolProvider> {
+        Arc::new(WriteFileTool::new(
+            self.inner.file_edit_manager.clone(),
+            self.catalog.clone(),
+        ))
     }
 }
 

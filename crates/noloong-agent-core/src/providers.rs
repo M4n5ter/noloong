@@ -20,6 +20,11 @@ pub type ModelStreamSink = Arc<dyn Fn(ModelStreamEvent) -> EventSinkFuture + Sen
 
 pub trait ModelProvider: Send + Sync {
     fn id(&self) -> &str;
+
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
+
     fn stream_model<'a>(
         &'a self,
         request: ModelRequest,

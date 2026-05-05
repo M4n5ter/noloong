@@ -15,6 +15,8 @@ pub struct AgentManifest {
     pub system_prompt: String,
     #[serde(default)]
     pub enabled_tools: BTreeSet<BuiltInToolName>,
+    #[serde(default)]
+    pub file_edit_tool_policy: FileEditToolPolicy,
     pub approval_policy: ApprovalPolicy,
     #[serde(default)]
     pub reserved_phase_profile: BTreeMap<String, serde_json::Value>,
@@ -26,6 +28,7 @@ impl AgentManifest {
             locale: Locale::En,
             system_prompt: system_prompt.into(),
             enabled_tools: BTreeSet::new(),
+            file_edit_tool_policy: FileEditToolPolicy::default(),
             approval_policy: ApprovalPolicy::RequireApproval,
             reserved_phase_profile: BTreeMap::new(),
         }
@@ -33,6 +36,11 @@ impl AgentManifest {
 
     pub fn with_enabled_tool(mut self, tool_name: BuiltInToolName) -> Self {
         self.enabled_tools.insert(tool_name);
+        self
+    }
+
+    pub fn with_file_edit_tool_policy(mut self, policy: FileEditToolPolicy) -> Self {
+        self.file_edit_tool_policy = policy;
         self
     }
 
@@ -53,6 +61,9 @@ impl AgentManifest {
             }
             ManifestPatch::UpdateApprovalPolicy { policy } => {
                 self.approval_policy = policy;
+            }
+            ManifestPatch::UpdateFileEditToolPolicy { policy } => {
+                self.file_edit_tool_policy = policy;
             }
             ManifestPatch::ReservedPhaseProfile { .. } => {
                 return Err(ManifestError::Unsupported(
@@ -88,6 +99,9 @@ pub enum ManifestPatch {
     UpdateApprovalPolicy {
         policy: ApprovalPolicy,
     },
+    UpdateFileEditToolPolicy {
+        policy: FileEditToolPolicy,
+    },
     ReservedPhaseProfile {
         description: String,
         #[serde(default)]
@@ -115,9 +129,33 @@ impl ManifestPatch {
             Self::EnableTool { tool_name } => format!("enable tool {}", tool_name.as_str()),
             Self::DisableTool { tool_name } => format!("disable tool {}", tool_name.as_str()),
             Self::UpdateApprovalPolicy { .. } => "update approval policy".into(),
+            Self::UpdateFileEditToolPolicy { policy } => {
+                format!("update file edit tool policy to {}", policy.as_str())
+            }
             Self::ReservedPhaseProfile { description, .. } => {
                 format!("reserved phase profile patch: {description}")
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileEditToolPolicy {
+    #[default]
+    AutoByModel,
+    ApplyPatch,
+    WriteFile,
+    Disabled,
+}
+
+impl FileEditToolPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoByModel => "auto_by_model",
+            Self::ApplyPatch => "apply_patch",
+            Self::WriteFile => "write_file",
+            Self::Disabled => "disabled",
         }
     }
 }

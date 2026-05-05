@@ -1,6 +1,6 @@
 use noloong_agent::{
     AgentManifest, AgentSession, ApprovalPolicy, BackgroundCompletionConfig, BuiltInToolName,
-    Locale, ManifestPatch, StartCommandRequest,
+    FileEditToolPolicy, Locale, ManifestPatch, StartCommandRequest,
     approval::{
         allow_decision as approval_allow_decision, deny_decision as approval_deny_decision,
     },
@@ -8,7 +8,8 @@ use noloong_agent::{
 use noloong_agent_core::{
     Agent, AgentEventKind, AgentMessage, BoxFuture, CancellationToken, ContentBlock, ModelProvider,
     ModelRequest, ModelStreamEvent, ModelStreamSink, RunStatus, StopReason, ToolApprovalRequest,
-    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall,
+    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolOutput, ToolProvider,
+    ToolRequest, ToolSpec,
 };
 use std::{
     collections::BTreeMap,
@@ -314,6 +315,113 @@ async fn background_completion_during_active_run_uses_steering_boundary() {
     assert!(message_text(&second_messages[completion_index]).contains("active"));
 }
 
+#[test]
+fn agent_session_selects_apply_patch_for_gpt_models() {
+    for model_name in ["gpt-5.5-mini", "GPT-5.5-mini"] {
+        let runtime = AgentSession::builder()
+            .build()
+            .runtime_builder()
+            .with_model_provider(Arc::new(NamedModelProvider::new("provider", model_name)))
+            .build()
+            .unwrap();
+
+        assert!(runtime.tool("apply_patch").is_ok(), "{model_name}");
+        assert!(runtime.tool("write_file").is_err(), "{model_name}");
+    }
+}
+
+#[test]
+fn agent_session_selects_write_file_for_non_gpt_models() {
+    for model_name in ["deepseek-v4-flash", "claude-sonnet-4.5"] {
+        let runtime = AgentSession::builder()
+            .build()
+            .runtime_builder()
+            .with_model_provider(Arc::new(NamedModelProvider::new("provider", model_name)))
+            .build()
+            .unwrap();
+
+        assert!(runtime.tool("write_file").is_ok(), "{model_name}");
+        assert!(runtime.tool("apply_patch").is_err(), "{model_name}");
+    }
+}
+
+#[test]
+fn agent_session_file_edit_policy_overrides_model_selection() {
+    let apply_patch = runtime_with_file_edit_policy(
+        FileEditToolPolicy::ApplyPatch,
+        NamedModelProvider::new("provider", "deepseek-v4-flash"),
+    );
+    assert!(apply_patch.tool("apply_patch").is_ok());
+    assert!(apply_patch.tool("write_file").is_err());
+
+    let write_file = runtime_with_file_edit_policy(
+        FileEditToolPolicy::WriteFile,
+        NamedModelProvider::new("provider", "gpt-5.5-mini"),
+    );
+    assert!(write_file.tool("write_file").is_ok());
+    assert!(write_file.tool("apply_patch").is_err());
+
+    let disabled = runtime_with_file_edit_policy(
+        FileEditToolPolicy::Disabled,
+        NamedModelProvider::new("provider", "gpt-5.5-mini"),
+    );
+    assert!(disabled.tool("write_file").is_err());
+    assert!(disabled.tool("apply_patch").is_err());
+}
+
+#[tokio::test]
+async fn agent_session_model_request_never_exposes_both_file_edit_tools() {
+    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.5-mini"));
+    let agent = Agent::builder()
+        .with_runtime(Arc::new(
+            AgentSession::builder()
+                .build()
+                .runtime_builder()
+                .with_model_provider(model.clone())
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap();
+
+    agent.prompt("capture tools").await.unwrap();
+
+    let requests = model.requests();
+    let tools = &requests.first().expect("first request exists").tools;
+    assert!(tools.iter().any(|tool| tool.name == "apply_patch"));
+    assert!(!tools.iter().any(|tool| tool.name == "write_file"));
+}
+
+#[test]
+fn agent_session_file_edit_tool_names_are_reserved() {
+    let runtime = AgentSession::builder()
+        .build()
+        .runtime_builder()
+        .with_tool(Arc::new(ReservedNameTool::new("write_file")))
+        .with_model_provider(Arc::new(NamedModelProvider::new(
+            "provider",
+            "gpt-5.5-mini",
+        )))
+        .build()
+        .unwrap();
+
+    assert!(runtime.tool("apply_patch").is_ok());
+    assert!(runtime.tool("write_file").is_err());
+}
+
+#[test]
+fn agent_session_runtime_builder_configure_core_keeps_escape_hatch() {
+    let runtime = AgentSession::builder()
+        .build()
+        .runtime_builder()
+        .configure_core(|core| core.with_tool(Arc::new(ReservedNameTool::new("custom.tool"))))
+        .with_model_provider(Arc::new(DummyModelProvider))
+        .build()
+        .unwrap();
+
+    assert!(runtime.tool("custom.tool").is_ok());
+}
+
 async fn wait_for_completion_queued(agent: &Agent, job_id: &str) {
     let message_id = format!("host-exec-completed-{job_id}");
     timeout(Duration::from_secs(1), async {
@@ -346,6 +454,20 @@ fn host_exec_agent(session: &AgentSession, command: &str) -> Agent {
                 .build()
                 .unwrap(),
         ))
+        .build()
+        .unwrap()
+}
+
+fn runtime_with_file_edit_policy(
+    policy: FileEditToolPolicy,
+    provider: NamedModelProvider,
+) -> noloong_agent_core::AgentRuntime {
+    let manifest = AgentManifest::default().with_file_edit_tool_policy(policy);
+    AgentSession::builder()
+        .with_manifest(manifest)
+        .build()
+        .runtime_builder()
+        .with_model_provider(Arc::new(provider))
         .build()
         .unwrap()
 }
@@ -540,12 +662,19 @@ impl ModelProvider for HostExecCommandModel {
     }
 }
 
-#[derive(Default)]
 struct CapturingModelProvider {
     requests: Mutex<Vec<ModelRequest>>,
+    model_name: Option<String>,
 }
 
 impl CapturingModelProvider {
+    fn with_model_name(model_name: impl Into<String>) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            model_name: Some(model_name.into()),
+        }
+    }
+
     fn requests(&self) -> Vec<ModelRequest> {
         self.requests
             .lock()
@@ -561,9 +690,22 @@ impl CapturingModelProvider {
     }
 }
 
+impl Default for CapturingModelProvider {
+    fn default() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            model_name: None,
+        }
+    }
+}
+
 impl ModelProvider for CapturingModelProvider {
     fn id(&self) -> &str {
         "capturing"
+    }
+
+    fn model_name(&self) -> Option<&str> {
+        self.model_name.as_deref()
     }
 
     fn stream_model<'a>(
@@ -581,6 +723,81 @@ impl ModelProvider for CapturingModelProvider {
             Ok(vec![ModelStreamEvent::Finished {
                 stop_reason: noloong_agent_core::StopReason::Stop,
             }])
+        })
+    }
+}
+
+struct NamedModelProvider {
+    id: String,
+    model_name: String,
+}
+
+impl NamedModelProvider {
+    fn new(id: impl Into<String>, model_name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            model_name: model_name.into(),
+        }
+    }
+}
+
+impl ModelProvider for NamedModelProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model_name)
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _stream: ModelStreamSink,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            Ok(vec![ModelStreamEvent::Finished {
+                stop_reason: noloong_agent_core::StopReason::Stop,
+            }])
+        })
+    }
+}
+
+struct ReservedNameTool {
+    name: String,
+}
+
+impl ReservedNameTool {
+    fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl ToolProvider for ReservedNameTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "reserved test tool".into(),
+            input_schema: serde_json::json!({}),
+            execution_mode: None,
+            permissions: Vec::new(),
+        }
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        _request: ToolRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ToolOutput> {
+        Box::pin(async {
+            Ok(ToolOutput {
+                content: Vec::new(),
+                details: serde_json::json!({}),
+                is_error: false,
+                updates: Vec::new(),
+            })
         })
     }
 }

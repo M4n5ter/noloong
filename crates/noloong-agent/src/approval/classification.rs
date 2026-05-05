@@ -1,6 +1,9 @@
-use crate::{BuiltInToolName, StartCommandRequest};
+use crate::{
+    APPLY_PATCH_TOOL_NAME, BuiltInToolName, FILE_EDIT_PERMISSION_CAPABILITY, StartCommandRequest,
+    WRITE_FILE_TOOL_NAME, tools::apply_patch_target_paths,
+};
 use noloong_agent_core::{ToolCall, ToolPermissionDecision};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{
     cache::ApprovalCacheKey,
@@ -26,6 +29,7 @@ pub(super) struct ApprovalClassification {
     source: &'static str,
     reason: &'static str,
     cache_key: Option<ApprovalCacheKey>,
+    extra_metadata: Map<String, Value>,
 }
 
 impl ApprovalClassification {
@@ -39,6 +43,7 @@ impl ApprovalClassification {
             source,
             reason,
             cache_key,
+            extra_metadata: Map::new(),
         }
     }
 
@@ -52,6 +57,7 @@ impl ApprovalClassification {
             source,
             reason,
             cache_key,
+            extra_metadata: Map::new(),
         }
     }
 
@@ -65,7 +71,13 @@ impl ApprovalClassification {
             source,
             reason,
             cache_key,
+            extra_metadata: Map::new(),
         }
+    }
+
+    pub(super) fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.extra_metadata.insert(key.into(), value);
+        self
     }
 
     pub(super) fn terminal_decision(
@@ -116,6 +128,9 @@ impl ApprovalClassification {
                 json!(cache_key.as_str()),
             );
         }
+        for (key, value) in &self.extra_metadata {
+            map.insert(key.clone(), value.clone());
+        }
         base
     }
 }
@@ -160,6 +175,21 @@ pub(super) fn classify_built_in_tool(
     }
 }
 
+pub(super) fn classify_file_edit_tool(tool_call: &ToolCall) -> Option<ApprovalClassification> {
+    if tool_call.name != WRITE_FILE_TOOL_NAME && tool_call.name != APPLY_PATCH_TOOL_NAME {
+        return None;
+    }
+    let mut classification =
+        ApprovalClassification::needs_approval("file_edit", "file edits require approval", None)
+            .with_metadata("capability", json!(FILE_EDIT_PERMISSION_CAPABILITY))
+            .with_metadata("builtIn", json!(true))
+            .with_metadata("tool", json!(tool_call.name));
+    if let Some(paths) = file_edit_target_paths(tool_call) {
+        classification = classification.with_metadata("targetPaths", json!(paths));
+    }
+    Some(classification)
+}
+
 pub(super) fn classify_host_exec_start(
     input: Option<&StartCommandRequest>,
     cache_key: Option<ApprovalCacheKey>,
@@ -190,5 +220,22 @@ pub(super) fn classify_host_exec_start(
             "unknown host command requires approval",
             cache_key,
         ),
+    }
+}
+
+fn file_edit_target_paths(tool_call: &ToolCall) -> Option<Vec<String>> {
+    match tool_call.name.as_str() {
+        WRITE_FILE_TOOL_NAME => tool_call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| vec![path.to_owned()]),
+        APPLY_PATCH_TOOL_NAME => tool_call
+            .arguments
+            .get("patch")
+            .and_then(Value::as_str)
+            .and_then(apply_patch_target_paths)
+            .filter(|paths| !paths.is_empty()),
+        _ => None,
     }
 }

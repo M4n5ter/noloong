@@ -86,8 +86,27 @@ impl AgentRuntimeBuilder {
         self
     }
 
+    pub fn default_model_provider_id(&self) -> Option<&str> {
+        self.default_model_provider.as_deref()
+    }
+
+    pub fn model_provider_ids(&self) -> impl Iterator<Item = &str> {
+        self.model_providers.keys().map(String::as_str)
+    }
+
+    pub fn model_provider_metadata(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.model_providers
+            .iter()
+            .map(|(id, provider)| (id.as_str(), provider.model_name()))
+    }
+
     pub fn with_tool(mut self, tool: Arc<dyn ToolProvider>) -> Self {
         self.tools.insert(tool.spec().name.clone(), tool);
+        self
+    }
+
+    pub fn without_tool(mut self, name: &str) -> Self {
+        self.tools.remove(name);
         self
     }
 

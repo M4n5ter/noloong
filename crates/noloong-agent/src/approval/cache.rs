@@ -104,11 +104,13 @@ pub(crate) fn cache_key_from_approval_resolution(
     {
         return None;
     }
-    approval
+    let metadata_key = approval
         .request
         .metadata
         .get(APPROVAL_CACHE_KEY_METADATA)
-        .and_then(ApprovalCacheKey::from_metadata)
+        .and_then(ApprovalCacheKey::from_metadata)?;
+    let tool_call_key = approval_cache_key_for_tool_call(&approval.tool_call)?;
+    (metadata_key == tool_call_key).then_some(metadata_key)
 }
 
 fn parse_start_command_request(value: &Value) -> Option<StartCommandRequest> {
@@ -242,6 +244,30 @@ mod tests {
             ..approval
         };
         assert!(cache_key_from_approval_resolution(&missing_metadata, &allow).is_none());
+
+        let mismatched_metadata = approval_request(
+            start_call(json!({
+                "command": "python -c 'print(1)'",
+                "shell": "sh"
+            })),
+            Some(BUILT_IN_APPROVAL_HOOK_ID),
+            "other-cache-key",
+        );
+        assert!(cache_key_from_approval_resolution(&mismatched_metadata, &allow).is_none());
+    }
+
+    #[test]
+    fn file_edit_tool_calls_do_not_have_cache_keys() {
+        let tool_call = ToolCall {
+            id: "tool-call-test".into(),
+            name: "write_file".into(),
+            arguments: json!({
+                "path": "src/lib.rs",
+                "content": "new"
+            }),
+        };
+
+        assert!(approval_cache_key_for_tool_call(&tool_call).is_none());
     }
 
     fn start_call(arguments: Value) -> ToolCall {

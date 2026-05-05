@@ -18,8 +18,11 @@ pub enum MessageKey {
     HostExecWriteDescription,
     HostExecTerminateDescription,
     HostExecListDescription,
+    FileWriteDescription,
+    FileApplyPatchDescription,
     ManifestPatchDescription,
     HostCommandPermissionDescription,
+    FileEditPermissionDescription,
     ManifestPatchPermissionDescription,
     ApprovalPrompt,
 }
@@ -34,8 +37,11 @@ impl MessageKey {
             Self::HostExecWriteDescription,
             Self::HostExecTerminateDescription,
             Self::HostExecListDescription,
+            Self::FileWriteDescription,
+            Self::FileApplyPatchDescription,
             Self::ManifestPatchDescription,
             Self::HostCommandPermissionDescription,
+            Self::FileEditPermissionDescription,
             Self::ManifestPatchPermissionDescription,
             Self::ApprovalPrompt,
         ]
@@ -403,6 +409,9 @@ impl Catalog {
                 format!("禁用工具 {}", tool_name.as_str())
             }
             (Locale::Zh, ManifestPatch::UpdateApprovalPolicy { .. }) => "更新审批策略".into(),
+            (Locale::Zh, ManifestPatch::UpdateFileEditToolPolicy { policy }) => {
+                format!("更新文件编辑工具策略为 {}", policy.as_str())
+            }
             (Locale::Zh, ManifestPatch::ReservedPhaseProfile { description, .. }) => {
                 format!("保留的阶段配置补丁：{description}")
             }
@@ -498,10 +507,17 @@ fn en_message(key: MessageKey) -> &'static str {
             "Terminate a background host command and return its latest status."
         }
         MessageKey::HostExecListDescription => "List background host command jobs in this session.",
+        MessageKey::FileWriteDescription => {
+            "Write or replace a complete text file under the current host filesystem."
+        }
+        MessageKey::FileApplyPatchDescription => {
+            "Apply a strict patch to add, update, delete, or move files on the current host filesystem."
+        }
         MessageKey::ManifestPatchDescription => {
             "Propose a manifest patch for the next turn; it does not apply until approved."
         }
         MessageKey::HostCommandPermissionDescription => "Execute or control host commands.",
+        MessageKey::FileEditPermissionDescription => "Write files on the host filesystem.",
         MessageKey::ManifestPatchPermissionDescription => "Propose changes to the agent manifest.",
         MessageKey::ApprovalPrompt => "Review whether this tool call should be allowed.",
     }
@@ -518,10 +534,15 @@ fn zh_message(key: MessageKey) -> &'static str {
         MessageKey::HostExecWriteDescription => "向已启用 stdin 的后台宿主机命令写入文本。",
         MessageKey::HostExecTerminateDescription => "终止后台宿主机命令，并返回其最新状态。",
         MessageKey::HostExecListDescription => "列出当前 session 中的后台宿主机命令 job。",
+        MessageKey::FileWriteDescription => "在当前宿主机文件系统中写入或替换完整文本文件。",
+        MessageKey::FileApplyPatchDescription => {
+            "在当前宿主机文件系统中应用严格 patch，以新增、更新、删除或移动文件。"
+        }
         MessageKey::ManifestPatchDescription => {
             "为下一轮提交 manifest patch 提案；审批前不会生效。"
         }
         MessageKey::HostCommandPermissionDescription => "执行或控制宿主机命令。",
+        MessageKey::FileEditPermissionDescription => "写入宿主机文件系统中的文件。",
         MessageKey::ManifestPatchPermissionDescription => "提交 agent manifest 变更提案。",
         MessageKey::ApprovalPrompt => "判断这个工具调用是否应该被允许。",
     }

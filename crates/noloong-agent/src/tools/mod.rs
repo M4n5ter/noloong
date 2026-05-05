@@ -1,3 +1,4 @@
+mod file_edit;
 mod host_exec;
 mod manifest;
 mod output_overflow;
@@ -7,6 +8,11 @@ use noloong_agent_core::{
 };
 use serde_json::{Value, json};
 
+pub(crate) use file_edit::apply_patch_target_paths;
+pub use file_edit::{
+    APPLY_PATCH_TOOL_NAME, ApplyPatchTool, FILE_EDIT_PERMISSION_CAPABILITY, FileEditManager,
+    WRITE_FILE_TOOL_NAME, WriteFileTool,
+};
 pub use host_exec::{
     HostExecListTool, HostExecReadTool, HostExecStartTool, HostExecTerminateTool, HostExecWaitTool,
     HostExecWriteTool,
@@ -24,6 +30,29 @@ pub(crate) fn json_tool_output(value: Value) -> ToolOutput {
         }],
         details: value,
         is_error: false,
+        updates: Vec::new(),
+    }
+}
+
+pub(crate) fn json_tool_error(
+    code: &str,
+    message: impl Into<String>,
+    details: Value,
+) -> ToolOutput {
+    let message = message.into();
+    let value = json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "details": details,
+        },
+    });
+    ToolOutput {
+        content: vec![ContentBlock::Json {
+            value: value.clone(),
+        }],
+        details: value,
+        is_error: true,
         updates: Vec::new(),
     }
 }

@@ -1,7 +1,8 @@
 use noloong_agent::{
-    ApprovalPolicy, ApprovalReviewer, BuiltInApprovalHook, BuiltInToolName, Catalog,
-    HostExecStartTool, HostProcessManager, Locale, ManifestPatchProposalTool,
-    ManifestProposalStore, approval::allow_decision as approval_allow_decision,
+    APPLY_PATCH_TOOL_NAME, ApprovalPolicy, ApprovalReviewer, BuiltInApprovalHook, BuiltInToolName,
+    Catalog, HostExecStartTool, HostProcessManager, Locale, ManifestPatchProposalTool,
+    ManifestProposalStore, WRITE_FILE_TOOL_NAME,
+    approval::allow_decision as approval_allow_decision,
 };
 use noloong_agent_core::{
     BeforeToolCallContext, BeforeToolCallResult, CancellationToken, ToolCall, ToolCallHook,
@@ -181,6 +182,66 @@ async fn require_approval_prompts_for_control_and_manifest_tools() {
 }
 
 #[tokio::test]
+async fn require_approval_prompts_for_file_edit_tools_with_metadata() {
+    for (tool_name, arguments, expected_paths) in [
+        (
+            WRITE_FILE_TOOL_NAME,
+            serde_json::json!({
+                "path": "src/lib.rs",
+                "content": "new content"
+            }),
+            vec!["src/lib.rs"],
+        ),
+        (
+            APPLY_PATCH_TOOL_NAME,
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** Add File: src/new.rs\n+new\n*** End Patch"
+            }),
+            vec!["src/lib.rs", "src/new.rs"],
+        ),
+    ] {
+        let result =
+            BuiltInApprovalHook::new(ApprovalPolicy::RequireApproval, Catalog::new(Locale::En))
+                .before_tool_call(raw_context(tool_name, arguments), CancellationToken::new())
+                .await
+                .unwrap()
+                .unwrap();
+
+        let BeforeToolCallResult::Approval { approval } = result else {
+            panic!("{tool_name} should require approval");
+        };
+        assert_eq!(approval.metadata["classificationSource"], "file_edit");
+        assert_eq!(
+            approval.metadata["classificationDecision"],
+            "needs_approval"
+        );
+        assert_eq!(approval.metadata["builtIn"], true);
+        assert_eq!(approval.metadata["capability"], "host.file.write");
+        assert_eq!(approval.metadata["tool"], tool_name);
+        assert_eq!(
+            approval.metadata["targetPaths"],
+            serde_json::json!(expected_paths)
+        );
+        assert!(approval.metadata.get("approvalCacheKey").is_none());
+    }
+}
+
+#[tokio::test]
+async fn malformed_file_edit_arguments_still_require_approval() {
+    let result =
+        BuiltInApprovalHook::new(ApprovalPolicy::RequireApproval, Catalog::new(Locale::En))
+            .before_tool_call(
+                raw_context(WRITE_FILE_TOOL_NAME, serde_json::json!({})),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+    assert!(matches!(result, BeforeToolCallResult::Approval { .. }));
+}
+
+#[tokio::test]
 async fn require_approval_classifies_host_exec_start_commands() {
     let hook = BuiltInApprovalHook::new(ApprovalPolicy::RequireApproval, Catalog::new(Locale::En));
 
@@ -341,6 +402,10 @@ impl ApprovalReviewer for CountingReviewer {
 
 fn context(tool_name: BuiltInToolName, arguments: serde_json::Value) -> BeforeToolCallContext {
     let tool_name = tool_name.as_str();
+    raw_context(tool_name, arguments)
+}
+
+fn raw_context(tool_name: &str, arguments: serde_json::Value) -> BeforeToolCallContext {
     BeforeToolCallContext {
         run_id: "run-test".into(),
         turn_id: 1,

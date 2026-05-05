@@ -21,8 +21,8 @@ noloong-agent-core
 应用层通过 core 已有扩展点接入：
 
 - `ContextProvider`：注入当前宿主机环境说明。内置 provider id 是 `noloong.builtin.host-context`。
-- `ToolProvider`：暴露后台命令 lifecycle tools 和 manifest patch proposal tool。
-- `ToolCallHook`：统一处理命令执行、stdin 写入、终止命令和 manifest patch 的 approval。内置 approval hook id 是 `noloong.builtin.approval`。
+- `ToolProvider`：暴露后台命令 lifecycle tools、模型感知文件编辑工具和 manifest patch proposal tool。
+- `ToolCallHook`：统一处理命令执行、stdin 写入、终止命令、文件编辑和 manifest patch 的 approval。内置 approval hook id 是 `noloong.builtin.approval`。
 
 ## Host-first Execution
 
@@ -72,6 +72,30 @@ completion message 使用 `MessageRole::User`，不是 `MessageRole::ToolResult`
 
 如果写入临时 JSON 失败，hook 不会静默截断数据；它会返回 `is_error = true` 的 auditable tool output，并说明 overflow persistence failed。应用集成方可以通过 `AgentSessionBuilder::with_max_inline_tool_output_bytes(...)`、`with_tool_output_temp_dir(...)` 或 `with_tool_output_overflow_config(...)` 覆盖默认策略。
 
+## Model-Aware File Editing
+
+文件编辑工具是 session capability，不属于普通 `enabled_tools`。原因是 `write_file` 和 `apply_patch` 面向模型的操作风格不同，同时暴露会让模型在同一轮里混用两套编辑协议，增加错误率和审批面。
+
+`write_file` 和 `apply_patch` 是 `AgentSession` 的保留工具名。`AgentSessionRuntimeBuilder::build()` 会先移除同名外部工具，再按 manifest policy 注入唯一内置工具，保证 provider request 里不会同时出现两套文件编辑协议。
+
+`AgentManifest::file_edit_tool_policy` 控制暴露策略：
+
+- `auto_by_model`：默认值。resolved model name 包含 `gpt`（大小写不敏感）时暴露 `apply_patch`；其它模型暴露 `write_file`。内置 Chat Completions、Responses API、Anthropic Messages provider 使用真实 config model；外部 provider 没有 `model_name()` 时回退到 provider id。
+- `apply_patch`：强制只暴露 `apply_patch`。
+- `write_file`：强制只暴露 `write_file`。
+- `disabled`：不暴露内置文件编辑工具。
+
+非 GPT 模型默认使用 `write_file`，因为很多模型对严格 patch grammar 的稳定性弱于直接写入/替换。`write_file` 不是只能做整文件覆盖：它支持两种互斥输入模式。
+
+- `path + content`：写入或完整替换文本文件，缺失 parent directories 会自动创建。
+- `path + oldString + newString`：对现有文本文件做严格字符串替换。默认要求 `oldString` 唯一命中；多处命中必须显式设置 `replaceAll = true`。
+
+GPT 类模型默认使用 `apply_patch`。v1 支持严格 V4A-style patch：`*** Begin Patch` / `*** End Patch`，以及 `*** Add File`、`*** Update File`、`*** Delete File`、`*** Move File: old -> new` 和 `*** Move to:`。更新 hunk 必须严格匹配当前文件内容；所有操作先验证，验证失败不写入任何文件。
+
+v1 明确不内置 Hermes fuzzy replace mode、read-file staleness tracking、read-dedup 或 auto-lint。后续如果需要这些能力，应作为额外阶段或 capability 接入，而不是让文件编辑工具隐式读写全局状态。
+
+文件编辑统一通过 `FileEditManager` 做路径解析、敏感路径拒绝、parent directory 创建和 per-session path lock。相对路径基于 `HostEnvironment.cwd` 解析；`/etc`、`/boot`、systemd 目录、Docker socket path、macOS private system dirs 等敏感路径会在写入前拒绝。多文件 patch 按 resolved path 排序加锁，避免交叉 patch 死锁。
+
 ## Manifest Evolution
 
 `AgentManifest` 描述 application session 的可变配置：
@@ -79,6 +103,7 @@ completion message 使用 `MessageRole::User`，不是 `MessageRole::ToolResult`
 - locale。
 - system prompt profile。
 - enabled tools。
+- file edit tool policy。
 - approval policy。
 - reserved phase profile。
 
@@ -90,6 +115,7 @@ v1 真正支持的 patch 范围：
 - set locale。
 - enable/disable tool。
 - update approval policy。
+- update file edit tool policy。
 
 phase profile patch 只保留为 reserved schema，不执行。
 
@@ -107,15 +133,15 @@ phase profile patch 只保留为 reserved schema，不执行。
 
 1. `AllowAll` 直接 bypass 内置检查。
 2. session approval cache 命中时直接 allow。cache 只记录当前 `AgentSession` 内由 `noloong.builtin.approval` 产生、带有内置 cache key，且 application 显式记录为 allow 的审批结果。
-3. 内置工具类别分类：`host.exec.read`、`host.exec.wait`、`host.exec.list` 直接 allow；`host.exec.write`、`host.exec.terminate`、`agent.manifest.propose_patch` 进入 approval；未知工具名进入 approval。
+3. 内置工具类别分类：`host.exec.read`、`host.exec.wait`、`host.exec.list` 直接 allow；`host.exec.write`、`host.exec.terminate`、`write_file`、`apply_patch`、`agent.manifest.propose_patch` 进入 approval；未知工具名进入 approval。
 4. `host.exec.start` 走命令安全分类器。已知只读命令允许；unsupported shell syntax、env assignment、redirection、command substitution、glob-heavy syntax 和未知命令都进入 approval；危险命令同样需要 approval。
 5. 对 `NeedsApproval` 结果，`RequireApproval` 产生 core pause/resume approval request；`AutoReview` 调用 reviewer 或按 fallback 策略处理。
 
-`AgentSession::record_tool_approval_resolution` 是 application 层接入 cache 的显式 API。调用方在用 core 的 `ToolApprovalResolution` resume 之前或之后，都可以把对应 `ToolApprovalRequest` 和 allow decision 传给 session；denial、外部 hook、缺少 built-in cache metadata 的 request 不会被记录。
+`AgentSession::record_tool_approval_resolution` 是 application 层接入 cache 的显式 API。调用方在用 core 的 `ToolApprovalResolution` resume 之前或之后，都可以把对应 `ToolApprovalRequest` 和 allow decision 传给 session；denial、外部 hook、缺少 built-in cache metadata 的 request 不会被记录。文件编辑工具没有 approval cache key，重复文件编辑不会因为上一次批准而自动放行。
 
 v1 没有完整 sandbox 边界，也没有持久化 execpolicy 文件；因此 unknown host command 默认需要 approval。后续可以在不改变 core approval 语义的前提下，加入持久化规则、host sandbox/VMM policy 或更细粒度的 capability policy。
 
-所有 approval decision 都进入 core 的 `ToolPermissionDecided` audit。进入 human approval 的请求也会保留 classification metadata 和 cache key，便于 application 层审计和记录 session cache。
+所有 approval decision 都进入 core 的 `ToolPermissionDecided` audit。进入 human approval 的请求也会保留 classification metadata；可缓存的请求还会保留 cache key，便于 application 层审计和记录 session cache。文件编辑 approval metadata 会包含 `host.file.write` capability 和可解析 target paths（如果参数可解析）。
 
 ## i18n
 

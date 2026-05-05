@@ -1,5 +1,6 @@
 use noloong_agent::{
-    AgentManifest, ApprovalPolicy, BuiltInToolName, Locale, ManifestPatch, ManifestProposalStore,
+    AgentManifest, ApprovalPolicy, BuiltInToolName, FileEditToolPolicy, Locale, ManifestPatch,
+    ManifestProposalStore,
 };
 
 #[test]
@@ -24,6 +25,11 @@ fn manifest_patch_applies_prompt_tools_policy() {
             policy: ApprovalPolicy::AllowAll,
         })
         .unwrap();
+    manifest
+        .apply_patch(ManifestPatch::UpdateFileEditToolPolicy {
+            policy: FileEditToolPolicy::ApplyPatch,
+        })
+        .unwrap();
 
     assert_eq!(manifest.system_prompt, "New prompt");
     assert_eq!(manifest.locale, Locale::Zh);
@@ -33,6 +39,43 @@ fn manifest_patch_applies_prompt_tools_policy() {
             .contains(&BuiltInToolName::HostExecStart)
     );
     assert_eq!(manifest.approval_policy, ApprovalPolicy::AllowAll);
+    assert_eq!(
+        manifest.file_edit_tool_policy,
+        FileEditToolPolicy::ApplyPatch
+    );
+}
+
+#[test]
+fn manifest_file_edit_policy_round_trips_as_snake_case() {
+    let manifest =
+        AgentManifest::default().with_file_edit_tool_policy(FileEditToolPolicy::WriteFile);
+    let value = serde_json::to_value(&manifest).unwrap();
+
+    assert_eq!(value["fileEditToolPolicy"], "write_file");
+
+    for (json_value, expected) in [
+        ("auto_by_model", FileEditToolPolicy::AutoByModel),
+        ("apply_patch", FileEditToolPolicy::ApplyPatch),
+        ("write_file", FileEditToolPolicy::WriteFile),
+        ("disabled", FileEditToolPolicy::Disabled),
+    ] {
+        let manifest: AgentManifest = serde_json::from_value(serde_json::json!({
+            "locale": "en",
+            "systemPrompt": "test",
+            "fileEditToolPolicy": json_value,
+            "approvalPolicy": {"mode": "require_approval"}
+        }))
+        .unwrap();
+        assert_eq!(manifest.file_edit_tool_policy, expected);
+    }
+}
+
+#[test]
+fn manifest_default_file_edit_policy_is_auto_by_model() {
+    assert_eq!(
+        AgentManifest::default().file_edit_tool_policy,
+        FileEditToolPolicy::AutoByModel
+    );
 }
 
 #[test]

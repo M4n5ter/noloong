@@ -292,6 +292,10 @@ impl ModelProvider for ResponsesApiProvider {
         &self.config.id
     }
 
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.config.model)
+    }
+
     fn stream_model<'a>(
         &'a self,
         request: ModelRequest,

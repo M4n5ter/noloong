@@ -11,7 +11,10 @@ use super::{
         ApprovalCache, ApprovalCacheKey, approval_cache_key_for_tool_call,
         host_exec_start_approval_input,
     },
-    classification::{ApprovalClassification, classify_built_in_tool, classify_host_exec_start},
+    classification::{
+        ApprovalClassification, classify_built_in_tool, classify_file_edit_tool,
+        classify_host_exec_start,
+    },
     constants::BUILT_IN_APPROVAL_HOOK_ID,
     decisions::{allow_decision, deny_decision},
     metadata::human_reviewer_tool_metadata,
@@ -93,6 +96,9 @@ impl ToolCallHook for BuiltInApprovalHook {
 
 impl BuiltInApprovalHook {
     fn classify(&self, context: &BeforeToolCallContext) -> ApprovalClassification {
+        if let Some(classification) = classify_file_edit_tool(&context.tool_call) {
+            return classification;
+        }
         match BuiltInToolName::parse(&context.tool_call.name) {
             Ok(BuiltInToolName::HostExecStart) => {
                 let input = host_exec_start_approval_input(&context.tool_call);
