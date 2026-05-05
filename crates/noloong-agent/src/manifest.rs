@@ -301,6 +301,16 @@ impl ManifestProposalStore {
             .len()
     }
 
+    pub fn pending_proposals(&self) -> Vec<ManifestPatchProposal> {
+        self.inner
+            .pending
+            .lock()
+            .expect("manifest proposal store lock poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
     pub fn drain_approved(&self) -> Vec<ManifestPatchProposal> {
         self.inner
             .approved

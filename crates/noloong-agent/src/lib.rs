@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod host;
 pub mod i18n;
+pub mod interaction;
 pub mod manifest;
 #[cfg(feature = "openai")]
 pub mod openai;

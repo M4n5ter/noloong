@@ -143,6 +143,28 @@ v1 没有完整 sandbox 边界，也没有持久化 execpolicy 文件；因此 u
 
 所有 approval decision 都进入 core 的 `ToolPermissionDecided` audit。进入 human approval 的请求也会保留 classification metadata；可缓存的请求还会保留 cache key，便于 application 层审计和记录 session cache。文件编辑 approval metadata 会包含 `host.file.write` capability 和可解析 target paths（如果参数可解析）。
 
+## Interaction Control Plane
+
+`noloong-agent` 内置 stdio JSON-RPC 2.0 control plane，用于让任意第三方语言实现用户交互 bridge。它属于应用层，不进入 `noloong-agent-core`：core 仍只暴露 providerless `Agent`、event log、queue、approval pause/resume 和 runtime traits。
+
+control plane 的核心对象是 `AgentSessionRegistry`。每个 registry entry 持有一个 `AgentSession`、一个 core `Agent`、runtime profile id、session metadata、可选 `parentSessionId` 和 `role`。subagent 在 v1 中也是独立 session，只额外记录 parent/role/metadata；它不改变 parent session 的 run 状态，也不引入模型可调用的 subagent tool。
+
+runtime 由 Rust host 注册 `AgentRuntimeProfile`。外部 bridge 只能选择 `profileId`，不能通过 JSON-RPC 传 provider credential 或任意模型配置。profile descriptor 可以携带默认 manifest patch；若创建 session 时没有传完整 manifest，registry 会先从 `AgentManifest::default()` 开始应用这些 patch。
+
+权限分为两层：
+
+- authority capabilities：控制敏感动作，例如 `agent.run`、`agent.queue`、`approval.resolve`、`manifest.apply`、`process.control`、`subagent.spawn`、`session.delete`。
+- UX capabilities：描述外部 bridge 的展示能力，例如 raw/display event、streaming text、message edit、Markdown 和 `maxMessageBytes`。
+
+事件也分两层：
+
+- raw event：直接发送 core `AgentEvent`，用于高级 bridge、审计或调试。
+- display event：从 raw event 派生 UI 友好的 `DisplayEvent`，包括 run lifecycle、assistant delta/final、tool lifecycle 和 approval card。`streamText = false` 的 bridge 只需要渲染 final message；`maxMessageBytes` 会触发 bounded head/tail text truncation。
+
+进程控制面不负责启动任意命令；后台命令仍由模型通过 `host.exec.start` 工具创建。bridge 只通过 `process/list`、`process/read`、`process/wait`、`process/write`、`process/terminate` 显示和控制已存在 job，并复用 `HostProcessManager` 的 cursor、spool、truncation 和 completion semantics。
+
+协议细节见 `crates/noloong-agent/docs/INTERACTION.md`，验证矩阵见 `crates/noloong-agent/docs/CONFORMANCE_MATRIX.md`。
+
 ## i18n
 
 所有给模型看的 application-generated natural-language text 都走 typed catalog，包括 host context、tool description、permission description、approval prompt/reason、tool input/process/manifest error、background completion steering message，以及 oversized tool output rewrite message。v1 默认支持 English 和 Chinese。
@@ -154,3 +176,12 @@ locale 解析顺序：
 3. English fallback。
 
 catalog key 必须完整；缺失 key 应在测试中失败，而不是运行时静默 fallback。
+
+## 后续演进方向
+
+- 为 `AgentSessionRegistryStore` 增加 SQLite/PostgreSQL/object-store backed implementation，并明确恢复 live session 时的 runtime profile 重建策略。
+- 在不改变 `InteractionControlHandler` 的前提下增加 WebSocket/HTTP transport；stdio JSON-RPC 继续作为最低依赖 conformance transport。
+- 将 display projection 拆成可插拔策略，使 Telegram、WeChat/iLink、TUI 和 Web UI 能各自定义消息合并、编辑和 truncation 策略。
+- 为 process control 增加可选 host sandbox/VMM policy，把当前 host-first tools 扩展到 SSH、Lima/QEMU 或其它隔离环境。
+- 增强 manifest apply lifecycle，让 approved patch 能自动触发下一次 session runtime rebuild，并在 control plane 中暴露 rebuild/audit 结果。
+- 为 interaction bridge 作者提供可复用 conformance runner，而不是只依赖 Rust 集成测试。
