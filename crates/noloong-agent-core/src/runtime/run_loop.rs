@@ -6,8 +6,8 @@ use crate::reducer::{apply_event, reduce_events, validate_effect_for_state};
 use crate::{
     AgentCoreError, AgentEffect, AgentEvent, AgentEventKind, AgentMessage, AgentState,
     CancellationToken, ContextProvider, ModelProvider, ModelStreamEvent, ModelStreamSink,
-    PhaseContext, PhaseHook, PhaseOutput, PhaseScratch, Result, ToolCallHook, ToolExecutionMode,
-    ToolProvider, TurnDecision,
+    PhaseContext, PhaseHook, PhaseOutput, PhaseScratch, QueuedAgentMessage, QueuedMessageIntent,
+    Result, ToolCallHook, ToolExecutionMode, ToolProvider, TurnDecision,
 };
 use std::{
     future::Future,
@@ -130,6 +130,20 @@ impl AgentRuntime {
             sink.as_ref(),
         )
         .await?;
+
+        if let Some(queues) = &queues {
+            let steering = queues.steering_messages().await?;
+            if !steering.is_empty() {
+                self.commit_queued_messages(
+                    &mut state,
+                    &run_id,
+                    None,
+                    queued_messages_into_messages(steering),
+                    sink.as_ref(),
+                )
+                .await?;
+            }
+        }
 
         let result = self
             .run_turns(
@@ -371,14 +385,39 @@ impl AgentRuntime {
             )
             .await?;
 
+            let mut committed_stop_steering = false;
             if let Some(queues) = &queues {
                 let steering = queues.steering_messages().await?;
                 if !steering.is_empty() {
-                    self.commit_queued_messages(state, run_id, turn_id, steering, sink)
+                    if decision == TurnDecision::Stop {
+                        let (steering, user_inputs) = split_user_input_messages(steering);
+                        if !steering.is_empty() {
+                            self.commit_queued_messages(
+                                state,
+                                run_id,
+                                Some(turn_id),
+                                queued_messages_into_messages(steering),
+                                sink,
+                            )
+                            .await?;
+                            committed_stop_steering = true;
+                        }
+                        if !user_inputs.is_empty() {
+                            queues.prepend_follow_up_messages(user_inputs).await?;
+                        }
+                    } else {
+                        self.commit_queued_messages(
+                            state,
+                            run_id,
+                            Some(turn_id),
+                            queued_messages_into_messages(steering),
+                            sink,
+                        )
                         .await?;
-                    turn_id += 1;
-                    scratch = PhaseScratch::default();
-                    continue;
+                        turn_id += 1;
+                        scratch = PhaseScratch::default();
+                        continue;
+                    }
                 }
             }
 
@@ -386,12 +425,23 @@ impl AgentRuntime {
                 if let Some(queues) = &queues {
                     let follow_up = queues.follow_up_messages().await?;
                     if !follow_up.is_empty() {
-                        self.commit_queued_messages(state, run_id, turn_id, follow_up, sink)
-                            .await?;
+                        self.commit_queued_messages(
+                            state,
+                            run_id,
+                            Some(turn_id),
+                            queued_messages_into_messages(follow_up),
+                            sink,
+                        )
+                        .await?;
                         turn_id += 1;
                         scratch = PhaseScratch::default();
                         continue;
                     }
+                }
+                if committed_stop_steering {
+                    turn_id += 1;
+                    scratch = PhaseScratch::default();
+                    continue;
                 }
                 break;
             }
@@ -579,7 +629,7 @@ impl AgentRuntime {
         &self,
         state: &mut AgentState,
         run_id: &str,
-        turn_id: u64,
+        turn_id: Option<u64>,
         messages: Vec<AgentMessage>,
         sink: Option<&AgentEventSink>,
     ) -> Result<()> {
@@ -587,7 +637,7 @@ impl AgentRuntime {
             self.commit_effect(
                 state,
                 run_id,
-                Some(turn_id),
+                turn_id,
                 None,
                 AgentEffect::AppendMessage { message },
                 sink,
@@ -796,4 +846,16 @@ impl AgentRuntime {
             AgentInput::Message(message) => message,
         }
     }
+}
+
+fn queued_messages_into_messages(messages: Vec<QueuedAgentMessage>) -> Vec<AgentMessage> {
+    messages.into_iter().map(|queued| queued.message).collect()
+}
+
+fn split_user_input_messages(
+    messages: Vec<QueuedAgentMessage>,
+) -> (Vec<QueuedAgentMessage>, Vec<QueuedAgentMessage>) {
+    messages
+        .into_iter()
+        .partition(|message| message.intent == QueuedMessageIntent::Observation)
 }

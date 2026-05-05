@@ -1,9 +1,9 @@
 use noloong_agent_core::{
     Agent, AgentCoreError, AgentEventKind, AgentMessage, BeforeToolCallContext,
     BeforeToolCallResult, BoxFuture, CancellationToken, ContentBlock, ModelProvider, ModelRequest,
-    ModelStreamEvent, ModelStreamSink, QueueMode, Result, RunStatus, StopReason,
-    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolCallHook, ToolOutput,
-    ToolPermissionDecision, ToolPermissionOutcome, ToolProvider, ToolRequest, ToolSpec,
+    ModelStreamEvent, ModelStreamSink, QueueMode, QueuedAgentMessage, QueuedMessageIntent, Result,
+    RunStatus, StopReason, ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolCallHook,
+    ToolOutput, ToolPermissionDecision, ToolPermissionOutcome, ToolProvider, ToolRequest, ToolSpec,
 };
 use serde_json::json;
 use std::sync::{
@@ -188,6 +188,119 @@ async fn queue_mode_all_drains_multiple_follow_ups_into_one_turn() -> Result<()>
 }
 
 #[tokio::test]
+async fn queued_steering_is_injected_before_first_model_request() -> Result<()> {
+    let model = Arc::new(CapturingModel::default());
+    let agent = Agent::builder()
+        .with_model_provider(model.clone())
+        .build()?;
+    agent.steer(AgentMessage::user(
+        "queued-steer",
+        "background job completed",
+    ));
+
+    agent.prompt("next user prompt").await?;
+
+    let requests = model
+        .requests
+        .lock()
+        .expect("captured requests lock poisoned");
+    let messages = &requests
+        .first()
+        .expect("first model request exists")
+        .messages;
+    let steering_index = message_index(messages, "queued-steer");
+    let prompt_index = message_index(messages, "user-run-1-1");
+
+    assert!(steering_index < prompt_index);
+    assert_eq!(messages[steering_index].role.as_str(), "user");
+    assert_eq!(messages[prompt_index].role.as_str(), "user");
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_messages_are_editable() -> Result<()> {
+    let agent = Agent::builder()
+        .with_model_provider(Arc::new(CapturingModel::default()))
+        .build()?;
+
+    agent.steer(AgentMessage::user("drop-me", "drop"));
+    agent.steer_user_input(AgentMessage::user("keep-me", "before edit"));
+    agent.edit_steering_queue(|messages| {
+        messages.retain(|message| message.message.id != "drop-me");
+        messages.push(QueuedAgentMessage::observation(AgentMessage::user(
+            "inserted",
+            "inserted observation",
+        )));
+        messages[0].message.content = vec![ContentBlock::Text {
+            text: "after edit".into(),
+        }];
+    });
+
+    let messages = agent.queued_steering_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].message.id, "keep-me");
+    assert_eq!(messages[0].intent, QueuedMessageIntent::UserInput);
+    assert!(matches!(
+        messages[0].message.content.first(),
+        Some(ContentBlock::Text { text }) if text == "after edit"
+    ));
+    assert_eq!(messages[1].message.id, "inserted");
+    assert_eq!(messages[1].intent, QueuedMessageIntent::Observation);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopped_turn_routes_user_input_steering_through_follow_up_mode() -> Result<()> {
+    let model = Arc::new(CapturingModel::default());
+    let agent = Agent::builder()
+        .with_model_provider(model.clone())
+        .build()?;
+    agent.set_steering_mode(QueueMode::All);
+    agent.set_follow_up_mode(QueueMode::OneAtATime);
+    let injected = Arc::new(AtomicBool::new(false));
+    let steering_agent = agent.clone();
+    agent.subscribe(move |event| {
+        let steering_agent = steering_agent.clone();
+        let injected = Arc::clone(&injected);
+        async move {
+            if matches!(event.kind, AgentEventKind::TurnCompleted { .. })
+                && !injected.swap(true, Ordering::SeqCst)
+            {
+                steering_agent.steer_user_input(AgentMessage::user("typed-1", "first typed"));
+                steering_agent.steer_user_input(AgentMessage::user("typed-2", "second typed"));
+            }
+            Ok(())
+        }
+    });
+
+    agent.prompt("initial").await?;
+
+    let requests = model
+        .requests
+        .lock()
+        .expect("captured requests lock poisoned");
+    assert_eq!(requests.len(), 3);
+    let second_messages = &requests[1].messages;
+    assert!(
+        second_messages
+            .iter()
+            .any(|message| message.id == "typed-1")
+    );
+    assert!(
+        !second_messages
+            .iter()
+            .any(|message| message.id == "typed-2")
+    );
+    let third_messages = &requests[2].messages;
+    assert!(third_messages.iter().any(|message| message.id == "typed-2"));
+    drop(requests);
+
+    let follow_up = agent.queued_follow_up_messages();
+    assert!(follow_up.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn steering_is_injected_after_tool_batch() -> Result<()> {
     let agent = Agent::builder()
         .with_model_provider(Arc::new(ToolCallingModel::default()))
@@ -272,6 +385,54 @@ impl ModelProvider for BlockingModel {
             Err(AgentCoreError::Aborted)
         })
     }
+}
+
+#[derive(Default)]
+struct CapturingModel {
+    requests: std::sync::Mutex<Vec<ModelRequest>>,
+}
+
+impl ModelProvider for CapturingModel {
+    fn id(&self) -> &str {
+        "capturing"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        request: ModelRequest,
+        stream: ModelStreamSink,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            self.requests
+                .lock()
+                .expect("captured requests lock poisoned")
+                .push(request);
+            let events = vec![
+                ModelStreamEvent::Started {
+                    stream_id: "capturing-1".into(),
+                },
+                ModelStreamEvent::TextDelta {
+                    text: "captured".into(),
+                },
+                ModelStreamEvent::Finished {
+                    stop_reason: StopReason::Stop,
+                },
+            ];
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+fn message_index(messages: &[AgentMessage], id: &str) -> usize {
+    messages
+        .iter()
+        .position(|message| message.id == id)
+        .expect("message exists")
 }
 
 #[derive(Default)]

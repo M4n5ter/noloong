@@ -2,8 +2,8 @@ use crate::{
     AgentCoreError, AgentEvent, AgentEventSink, AgentInput, AgentMessage, AgentRuntime,
     AgentRuntimeBuilder, AgentState, CancellationToken, CompactionSummarizer,
     ContextCompactionConfig, ContextProvider, EventSinkFuture, ModelProvider, PhaseHook, QueueMode,
-    Result, RunReport, RuntimeQueues, StdioExtensionConfig, TokenEstimator, ToolApprovalResolution,
-    ToolCallHook, ToolExecutionMode, ToolProvider, apply_event,
+    QueuedAgentMessage, Result, RunReport, RuntimeQueues, StdioExtensionConfig, TokenEstimator,
+    ToolApprovalResolution, ToolCallHook, ToolExecutionMode, ToolProvider, apply_event,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -35,7 +35,7 @@ struct AgentInner {
 
 struct PendingMessageQueue {
     mode: QueueMode,
-    messages: VecDeque<AgentMessage>,
+    messages: VecDeque<QueuedAgentMessage>,
 }
 
 impl PendingMessageQueue {
@@ -46,15 +46,34 @@ impl PendingMessageQueue {
         }
     }
 
-    fn enqueue(&mut self, message: AgentMessage) {
+    fn enqueue(&mut self, message: QueuedAgentMessage) {
         self.messages.push_back(message);
+    }
+
+    fn prepend(&mut self, messages: Vec<QueuedAgentMessage>) {
+        for message in messages.into_iter().rev() {
+            self.messages.push_front(message);
+        }
     }
 
     fn clear(&mut self) {
         self.messages.clear();
     }
 
-    fn drain(&mut self) -> Vec<AgentMessage> {
+    fn queued_messages(&self) -> Vec<QueuedAgentMessage> {
+        self.messages.iter().cloned().collect()
+    }
+
+    fn edit<F>(&mut self, edit: F)
+    where
+        F: FnOnce(&mut Vec<QueuedAgentMessage>),
+    {
+        let mut messages = self.messages.drain(..).collect::<Vec<_>>();
+        edit(&mut messages);
+        self.messages = messages.into();
+    }
+
+    fn drain(&mut self) -> Vec<QueuedAgentMessage> {
         match self.mode {
             QueueMode::All => self.messages.drain(..).collect(),
             QueueMode::OneAtATime => self.messages.pop_front().into_iter().collect(),
@@ -63,7 +82,7 @@ impl PendingMessageQueue {
 }
 
 impl RuntimeQueues for AgentInner {
-    fn steering_messages<'a>(&'a self) -> crate::BoxFuture<'a, Vec<AgentMessage>> {
+    fn steering_messages<'a>(&'a self) -> crate::BoxFuture<'a, Vec<QueuedAgentMessage>> {
         Box::pin(async move {
             Ok(self
                 .steering_queue
@@ -73,13 +92,26 @@ impl RuntimeQueues for AgentInner {
         })
     }
 
-    fn follow_up_messages<'a>(&'a self) -> crate::BoxFuture<'a, Vec<AgentMessage>> {
+    fn follow_up_messages<'a>(&'a self) -> crate::BoxFuture<'a, Vec<QueuedAgentMessage>> {
         Box::pin(async move {
             Ok(self
                 .follow_up_queue
                 .lock()
                 .expect("agent follow-up queue lock poisoned")
                 .drain())
+        })
+    }
+
+    fn prepend_follow_up_messages<'a>(
+        &'a self,
+        messages: Vec<QueuedAgentMessage>,
+    ) -> crate::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.follow_up_queue
+                .lock()
+                .expect("agent follow-up queue lock poisoned")
+                .prepend(messages);
+            Ok(())
         })
     }
 }
@@ -194,6 +226,14 @@ impl Agent {
     }
 
     pub fn steer(&self, message: AgentMessage) {
+        self.steer_queued(QueuedAgentMessage::observation(message));
+    }
+
+    pub fn steer_user_input(&self, message: AgentMessage) {
+        self.steer_queued(QueuedAgentMessage::user_input(message));
+    }
+
+    pub fn steer_queued(&self, message: QueuedAgentMessage) {
         self.inner
             .steering_queue
             .lock()
@@ -202,11 +242,53 @@ impl Agent {
     }
 
     pub fn follow_up(&self, message: AgentMessage) {
+        self.follow_up_queued(QueuedAgentMessage::user_input(message));
+    }
+
+    pub fn follow_up_queued(&self, message: QueuedAgentMessage) {
         self.inner
             .follow_up_queue
             .lock()
             .expect("agent follow-up queue lock poisoned")
             .enqueue(message);
+    }
+
+    pub fn queued_steering_messages(&self) -> Vec<QueuedAgentMessage> {
+        self.inner
+            .steering_queue
+            .lock()
+            .expect("agent steering queue lock poisoned")
+            .queued_messages()
+    }
+
+    pub fn queued_follow_up_messages(&self) -> Vec<QueuedAgentMessage> {
+        self.inner
+            .follow_up_queue
+            .lock()
+            .expect("agent follow-up queue lock poisoned")
+            .queued_messages()
+    }
+
+    pub fn edit_steering_queue<F>(&self, edit: F)
+    where
+        F: FnOnce(&mut Vec<QueuedAgentMessage>),
+    {
+        self.inner
+            .steering_queue
+            .lock()
+            .expect("agent steering queue lock poisoned")
+            .edit(edit);
+    }
+
+    pub fn edit_follow_up_queue<F>(&self, edit: F)
+    where
+        F: FnOnce(&mut Vec<QueuedAgentMessage>),
+    {
+        self.inner
+            .follow_up_queue
+            .lock()
+            .expect("agent follow-up queue lock poisoned")
+            .edit(edit);
     }
 
     pub fn set_steering_mode(&self, mode: QueueMode) {

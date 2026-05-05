@@ -1,5 +1,6 @@
 mod host_exec;
 mod manifest;
+mod output_overflow;
 
 use noloong_agent_core::{
     ContentBlock, ToolExecutionMode, ToolOutput, ToolPermissionRequirement, ToolSpec,
@@ -11,6 +12,10 @@ pub use host_exec::{
     HostExecWriteTool,
 };
 pub use manifest::ManifestPatchProposalTool;
+pub use output_overflow::{
+    DEFAULT_MAX_INLINE_TOOL_OUTPUT_BYTES, DEFAULT_TOOL_OUTPUT_PREVIEW_EDGE_BYTES,
+    ProductToolOutputOverflowHook, ToolOutputOverflowConfig,
+};
 
 pub(crate) fn json_tool_output(value: Value) -> ToolOutput {
     ToolOutput {

@@ -1,11 +1,11 @@
-use crate::host::default_shell;
+use crate::{host::default_shell, text};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -14,10 +14,15 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, Command},
     sync::{Mutex, Notify, mpsc},
+    task::JoinHandle,
     time::{Duration, timeout},
 };
 
 pub type JobId = String;
+pub(crate) const PROCESS_EMPTY_COMMAND_MESSAGE: &str = "command must not be empty";
+pub(crate) const PROCESS_STDIN_DISABLED_PREFIX: &str = "job ";
+pub(crate) const PROCESS_STDIN_DISABLED_SUFFIX: &str = " does not accept stdin";
+const DEFAULT_COMPLETION_TAIL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -113,16 +118,57 @@ pub struct WaitOutcome {
     pub timed_out: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HostProcessCompletion {
+    pub snapshot: JobSnapshot,
+    pub output: ProcessOutput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HostProcessEvent {
+    JobCompleted { completion: HostProcessCompletion },
+}
+
 #[derive(Clone, Debug)]
 pub struct HostProcessManager {
     inner: Arc<ManagerInner>,
 }
 
-#[derive(Debug)]
 struct ManagerInner {
     counter: AtomicU64,
+    listener_counter: AtomicU64,
     jobs: Mutex<BTreeMap<JobId, Arc<JobHandle>>>,
+    listeners: StdMutex<BTreeMap<u64, HostProcessListener>>,
     default_spool_bytes: usize,
+}
+
+type HostProcessListener = Arc<dyn Fn(HostProcessEvent) + Send + Sync + 'static>;
+
+impl std::fmt::Debug for ManagerInner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagerInner")
+            .field("default_spool_bytes", &self.default_spool_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct HostProcessSubscription {
+    inner: Arc<ManagerInner>,
+    id: u64,
+}
+
+impl Drop for HostProcessSubscription {
+    fn drop(&mut self) {
+        self.inner
+            .listeners
+            .lock()
+            .expect("host process listeners lock poisoned")
+            .remove(&self.id);
+    }
 }
 
 #[derive(Debug)]
@@ -165,15 +211,33 @@ impl HostProcessManager {
         Self {
             inner: Arc::new(ManagerInner {
                 counter: AtomicU64::new(0),
+                listener_counter: AtomicU64::new(0),
                 jobs: Mutex::new(BTreeMap::new()),
+                listeners: StdMutex::new(BTreeMap::new()),
                 default_spool_bytes: 1024 * 1024,
             }),
         }
     }
 
+    pub fn subscribe(
+        &self,
+        listener: impl Fn(HostProcessEvent) + Send + Sync + 'static,
+    ) -> HostProcessSubscription {
+        let id = self.inner.listener_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner
+            .listeners
+            .lock()
+            .expect("host process listeners lock poisoned")
+            .insert(id, Arc::new(listener));
+        HostProcessSubscription {
+            inner: Arc::clone(&self.inner),
+            id,
+        }
+    }
+
     pub async fn start(&self, request: StartCommandRequest) -> Result<JobSnapshot, ProcessError> {
         if request.command.trim().is_empty() {
-            return Err(ProcessError::Invalid("command must not be empty".into()));
+            return Err(ProcessError::Invalid(PROCESS_EMPTY_COMMAND_MESSAGE.into()));
         }
         let job_id = format!(
             "host-job-{}",
@@ -235,13 +299,28 @@ impl HostProcessManager {
             .lock()
             .await
             .insert(job_id.clone(), Arc::clone(&handle));
+        let mut output_readers = Vec::new();
         if let Some(stdout) = stdout {
-            spawn_output_reader(Arc::clone(&handle), ProcessOutputStream::Stdout, stdout);
+            output_readers.push(spawn_output_reader(
+                Arc::clone(&handle),
+                ProcessOutputStream::Stdout,
+                stdout,
+            ));
         }
         if let Some(stderr) = stderr {
-            spawn_output_reader(Arc::clone(&handle), ProcessOutputStream::Stderr, stderr);
+            output_readers.push(spawn_output_reader(
+                Arc::clone(&handle),
+                ProcessOutputStream::Stderr,
+                stderr,
+            ));
         }
-        spawn_process_watcher(Arc::clone(&handle), child, control_rx);
+        spawn_process_watcher(
+            Arc::clone(&self.inner),
+            Arc::clone(&handle),
+            child,
+            control_rx,
+            output_readers,
+        );
         if let Some(foreground_wait_ms) = foreground_wait_ms {
             let _ = self.wait(&job_id, Some(foreground_wait_ms)).await?;
         }
@@ -309,7 +388,7 @@ impl HostProcessManager {
         let mut stdin = handle.stdin.lock().await;
         let Some(stdin) = stdin.as_mut() else {
             return Err(ProcessError::Invalid(format!(
-                "job {job_id} does not accept stdin"
+                "{PROCESS_STDIN_DISABLED_PREFIX}{job_id}{PROCESS_STDIN_DISABLED_SUFFIX}"
             )));
         };
         stdin
@@ -395,20 +474,7 @@ impl HostProcessManager {
     }
 
     async fn snapshot_for_handle(&self, handle: &Arc<JobHandle>) -> JobSnapshot {
-        let status = handle.status.lock().await.clone();
-        let ended_at_ms = *handle.ended_at_ms.lock().await;
-        let output = handle.output.lock().await;
-        JobSnapshot {
-            job_id: handle.job_id.clone(),
-            command: handle.command.clone(),
-            shell: handle.shell.clone(),
-            cwd: handle.cwd.clone(),
-            status,
-            started_at_ms: handle.started_at_ms,
-            ended_at_ms,
-            next_cursor: output.next_seq.saturating_sub(1),
-            dropped_before_seq: output.dropped_before_seq,
-        }
+        snapshot_for_handle(handle).await
     }
 }
 
@@ -431,7 +497,7 @@ impl OutputBuffer {
     }
 
     fn push_chunk(&mut self, stream: ProcessOutputStream, bytes: &[u8]) {
-        let text = truncate_text_to_bytes(&String::from_utf8_lossy(bytes), self.max_bytes);
+        let text = text::prefix_to_bytes(&String::from_utf8_lossy(bytes), self.max_bytes);
         let chunk = OutputChunk {
             seq: self.next_seq,
             stream,
@@ -483,10 +549,39 @@ impl OutputBuffer {
             .unwrap_or(after_seq.max(self.dropped_before_seq));
         (chunks, next_cursor, self.dropped_before_seq, truncated)
     }
+
+    fn tail(&self, max_bytes: usize) -> (Vec<OutputChunk>, u64, u64, bool) {
+        let max_bytes = max_bytes.max(1);
+        let mut chunks = Vec::new();
+        let mut used_bytes = 0usize;
+        let mut truncated = self.dropped_before_seq > 0;
+        for chunk in self.chunks.iter().rev() {
+            let remaining = max_bytes.saturating_sub(used_bytes);
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            if chunk.byte_len > remaining {
+                chunks.push(truncate_chunk_tail(chunk, remaining));
+                truncated = true;
+                break;
+            }
+            used_bytes += chunk.byte_len;
+            chunks.push(chunk.clone());
+        }
+        chunks.reverse();
+        let next_cursor = self.next_seq.saturating_sub(1);
+        if let (Some(first_selected), Some(first_buffered)) = (chunks.first(), self.chunks.front())
+            && first_selected.seq > first_buffered.seq
+        {
+            truncated = true;
+        }
+        (chunks, next_cursor, self.dropped_before_seq, truncated)
+    }
 }
 
 fn truncate_chunk(chunk: &OutputChunk, max_bytes: usize) -> OutputChunk {
-    let text = truncate_text_to_bytes(&chunk.text, max_bytes);
+    let text = text::prefix_to_bytes(&chunk.text, max_bytes);
     OutputChunk {
         seq: chunk.seq,
         stream: chunk.stream,
@@ -495,18 +590,21 @@ fn truncate_chunk(chunk: &OutputChunk, max_bytes: usize) -> OutputChunk {
     }
 }
 
-fn truncate_text_to_bytes(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.into();
+fn truncate_chunk_tail(chunk: &OutputChunk, max_bytes: usize) -> OutputChunk {
+    let text = text::suffix_to_bytes(&chunk.text, max_bytes);
+    OutputChunk {
+        seq: chunk.seq,
+        stream: chunk.stream,
+        byte_len: text.len(),
+        text,
     }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].into()
 }
 
-fn spawn_output_reader<R>(handle: Arc<JobHandle>, stream: ProcessOutputStream, mut reader: R)
+fn spawn_output_reader<R>(
+    handle: Arc<JobHandle>,
+    stream: ProcessOutputStream,
+    mut reader: R,
+) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -529,13 +627,15 @@ where
                 }
             }
         }
-    });
+    })
 }
 
 fn spawn_process_watcher(
+    manager: Arc<ManagerInner>,
     handle: Arc<JobHandle>,
     mut child: Child,
     mut control_rx: mpsc::UnboundedReceiver<JobControl>,
+    output_readers: Vec<JoinHandle<()>>,
 ) {
     tokio::spawn(async move {
         let status = loop {
@@ -550,7 +650,16 @@ fn spawn_process_watcher(
             }
         };
         *handle.stdin.lock().await = None;
-        finish_handle(&handle, status).await;
+        for reader in output_readers {
+            let _ = reader.await;
+        }
+        let status = finish_handle(&handle, status).await;
+        publish_process_event(
+            &manager,
+            HostProcessEvent::JobCompleted {
+                completion: completion_for_handle(&handle, status).await,
+            },
+        );
     });
 }
 
@@ -588,10 +697,72 @@ fn status_from_wait_result(result: std::io::Result<std::process::ExitStatus>) ->
     }
 }
 
-async fn finish_handle(handle: &Arc<JobHandle>, status: JobStatus) {
-    *handle.status.lock().await = status;
-    *handle.ended_at_ms.lock().await = Some(now_ms());
+async fn finish_handle(handle: &Arc<JobHandle>, status: JobStatus) -> JobStatus {
+    let mut status_guard = handle.status.lock().await;
+    if status_guard.is_running() {
+        *status_guard = status;
+    }
+    let status = status_guard.clone();
+    drop(status_guard);
+    let mut ended_at_ms = handle.ended_at_ms.lock().await;
+    if ended_at_ms.is_none() {
+        *ended_at_ms = Some(now_ms());
+    }
     handle.notify.notify_waiters();
+    status
+}
+
+async fn snapshot_for_handle(handle: &Arc<JobHandle>) -> JobSnapshot {
+    let status = handle.status.lock().await.clone();
+    let ended_at_ms = *handle.ended_at_ms.lock().await;
+    let output = handle.output.lock().await;
+    JobSnapshot {
+        job_id: handle.job_id.clone(),
+        command: handle.command.clone(),
+        shell: handle.shell.clone(),
+        cwd: handle.cwd.clone(),
+        status,
+        started_at_ms: handle.started_at_ms,
+        ended_at_ms,
+        next_cursor: output.next_seq.saturating_sub(1),
+        dropped_before_seq: output.dropped_before_seq,
+    }
+}
+
+async fn completion_for_handle(
+    handle: &Arc<JobHandle>,
+    status: JobStatus,
+) -> HostProcessCompletion {
+    let snapshot = snapshot_for_handle(handle).await;
+    let (chunks, next_cursor, dropped_before_seq, truncated) = handle
+        .output
+        .lock()
+        .await
+        .tail(DEFAULT_COMPLETION_TAIL_BYTES);
+    HostProcessCompletion {
+        snapshot,
+        output: ProcessOutput {
+            job_id: handle.job_id.clone(),
+            chunks,
+            next_cursor,
+            dropped_before_seq,
+            truncated,
+            status,
+        },
+    }
+}
+
+fn publish_process_event(manager: &ManagerInner, event: HostProcessEvent) {
+    let listeners = manager
+        .listeners
+        .lock()
+        .expect("host process listeners lock poisoned")
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for listener in listeners {
+        listener(event.clone());
+    }
 }
 
 async fn has_new_output(handle: &Arc<JobHandle>, after_seq: u64) -> bool {

@@ -667,10 +667,17 @@ queue 分两类：
 - steering queue：每个 turn 结束后优先检查。如果有 steering message，会 append 后立即进入下一 turn。
 - follow-up queue：只有当前 turn decision 是 stop 时检查。适合自然完成后追加后续输入。
 
+queued message 带有 intent：
+
+- `Observation`：默认 steering intent，适合后台 completion、外部观察和 steering context。
+- `UserInput`：真实用户输入。若这类消息在 steering queue 中，且当前 turn decision 正好是 stop，runtime 会把它从 steering 路由到 follow-up 路径；这样它受 follow-up queue mode 约束，并作为自然 stop 后的下一轮用户输入，而不是普通 steering observation。
+
 queue mode：
 
 - `OneAtATime`：每次 drain 一条。
 - `All`：一次 drain 所有。
+
+`Agent` 暴露 queue edit API，允许 UX layer 在 drain 前重排、替换、删除或重新标记 queued messages。用户输入在 active run 中进入队列时，应使用 `steer_user_input` 或显式构造 `QueuedAgentMessage::user_input(...)`，不要依赖 `MessageRole::User` 推断；completion steering 仍然可以是 user-role message，但 intent 应保持 `Observation`。
 
 这个层的目标是提供长期交互体验，而不污染 kernel 的核心语义。
 

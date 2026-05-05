@@ -100,6 +100,8 @@ impl ToolProvider for HostExecStartTool {
                     "maxSpoolBytes": {"type": "integer", "minimum": 1024}
                 }
             }),
+            self.catalog
+                .message(MessageKey::HostCommandPermissionDescription),
         )
     }
 
@@ -111,13 +113,17 @@ impl ToolProvider for HostExecStartTool {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
             let input = serde_json::from_value::<StartCommandInput>(request.arguments).map_err(
-                |error| noloong_agent_core::AgentCoreError::InvalidEffect(error.to_string()),
+                |error| {
+                    noloong_agent_core::AgentCoreError::InvalidEffect(
+                        self.catalog.render_tool_input_error(error),
+                    )
+                },
             )?;
             let snapshot = self
                 .manager
                 .start(input.into_request())
                 .await
-                .map_err(process_error)?;
+                .map_err(|error| process_error(&self.catalog, error))?;
             Ok(output_json(json!({
                 "jobId": snapshot.job_id,
                 "command": snapshot.command,
@@ -148,6 +154,8 @@ impl ToolProvider for HostExecReadTool {
                     "waitMs": {"type": "integer", "minimum": 0}
                 }
             }),
+            self.catalog
+                .message(MessageKey::HostCommandPermissionDescription),
         )
     }
 
@@ -160,14 +168,16 @@ impl ToolProvider for HostExecReadTool {
             cancellation.throw_if_cancelled()?;
             let input =
                 serde_json::from_value::<ReadInput>(request.arguments).map_err(|error| {
-                    noloong_agent_core::AgentCoreError::InvalidEffect(error.to_string())
+                    noloong_agent_core::AgentCoreError::InvalidEffect(
+                        self.catalog.render_tool_input_error(error),
+                    )
                 })?;
             let job_id = input.job_id.clone();
             let output = self
                 .manager
                 .read(&job_id, input.into_request())
                 .await
-                .map_err(process_error)?;
+                .map_err(|error| process_error(&self.catalog, error))?;
             Ok(process_output(output))
         })
     }
@@ -186,6 +196,8 @@ impl ToolProvider for HostExecWaitTool {
                     "timeoutMs": {"type": "integer", "minimum": 0}
                 }
             }),
+            self.catalog
+                .message(MessageKey::HostCommandPermissionDescription),
         )
     }
 
@@ -198,13 +210,15 @@ impl ToolProvider for HostExecWaitTool {
             cancellation.throw_if_cancelled()?;
             let input =
                 serde_json::from_value::<WaitInput>(request.arguments).map_err(|error| {
-                    noloong_agent_core::AgentCoreError::InvalidEffect(error.to_string())
+                    noloong_agent_core::AgentCoreError::InvalidEffect(
+                        self.catalog.render_tool_input_error(error),
+                    )
                 })?;
             let outcome = self
                 .manager
                 .wait(&input.job_id, input.timeout_ms)
                 .await
-                .map_err(process_error)?;
+                .map_err(|error| process_error(&self.catalog, error))?;
             Ok(output_json(json!(outcome)))
         })
     }
@@ -223,6 +237,8 @@ impl ToolProvider for HostExecWriteTool {
                     "text": {"type": "string"}
                 }
             }),
+            self.catalog
+                .message(MessageKey::HostCommandPermissionDescription),
         )
     }
 
@@ -235,13 +251,15 @@ impl ToolProvider for HostExecWriteTool {
             cancellation.throw_if_cancelled()?;
             let input =
                 serde_json::from_value::<WriteInput>(request.arguments).map_err(|error| {
-                    noloong_agent_core::AgentCoreError::InvalidEffect(error.to_string())
+                    noloong_agent_core::AgentCoreError::InvalidEffect(
+                        self.catalog.render_tool_input_error(error),
+                    )
                 })?;
             let snapshot = self
                 .manager
                 .write(&input.job_id, &input.text)
                 .await
-                .map_err(process_error)?;
+                .map_err(|error| process_error(&self.catalog, error))?;
             Ok(output_json(json!(snapshot)))
         })
     }
@@ -258,6 +276,8 @@ impl ToolProvider for HostExecTerminateTool {
                 "required": ["jobId"],
                 "properties": {"jobId": {"type": "string"}}
             }),
+            self.catalog
+                .message(MessageKey::HostCommandPermissionDescription),
         )
     }
 
@@ -269,13 +289,15 @@ impl ToolProvider for HostExecTerminateTool {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
             let input = serde_json::from_value::<JobInput>(request.arguments).map_err(|error| {
-                noloong_agent_core::AgentCoreError::InvalidEffect(error.to_string())
+                noloong_agent_core::AgentCoreError::InvalidEffect(
+                    self.catalog.render_tool_input_error(error),
+                )
             })?;
             let snapshot = self
                 .manager
                 .terminate(&input.job_id)
                 .await
-                .map_err(process_error)?;
+                .map_err(|error| process_error(&self.catalog, error))?;
             Ok(output_json(json!(snapshot)))
         })
     }
@@ -287,6 +309,8 @@ impl ToolProvider for HostExecListTool {
             ProductToolName::HostExecList.as_str(),
             self.catalog.message(MessageKey::HostExecListDescription),
             json!({"type": "object", "properties": {}}),
+            self.catalog
+                .message(MessageKey::HostCommandPermissionDescription),
         )
     }
 
@@ -297,7 +321,11 @@ impl ToolProvider for HostExecListTool {
     ) -> BoxFuture<'a, ToolOutput> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
-            let jobs = self.manager.list().await.map_err(process_error)?;
+            let jobs = self
+                .manager
+                .list()
+                .await
+                .map_err(|error| process_error(&self.catalog, error))?;
             Ok(output_json(json!({ "jobs": jobs })))
         })
     }
@@ -370,13 +398,18 @@ struct JobInput {
     job_id: String,
 }
 
-fn tool_spec(name: &str, description: &str, input_schema: Value) -> ToolSpec {
+fn tool_spec(
+    name: &str,
+    description: &str,
+    input_schema: Value,
+    permission_description: &str,
+) -> ToolSpec {
     sequential_tool_spec(
         name,
         description,
         input_schema,
         "host.command",
-        "Execute or control host commands",
+        permission_description,
     )
 }
 
@@ -412,6 +445,6 @@ fn process_output(output: ProcessOutput) -> ToolOutput {
     }
 }
 
-fn process_error(error: ProcessError) -> noloong_agent_core::AgentCoreError {
-    noloong_agent_core::AgentCoreError::Provider(error.to_string())
+fn process_error(catalog: &Catalog, error: ProcessError) -> noloong_agent_core::AgentCoreError {
+    noloong_agent_core::AgentCoreError::Provider(catalog.render_process_error(&error))
 }

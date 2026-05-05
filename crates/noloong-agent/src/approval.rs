@@ -1,4 +1,4 @@
-use crate::{Catalog, MessageKey};
+use crate::Catalog;
 use noloong_agent_core::{
     BeforeToolCallContext, BeforeToolCallResult, BoxFuture, CancellationToken,
     ToolApprovalRequestSpec, ToolCallHook, ToolPermissionDecision, ToolPermissionOutcome,
@@ -61,12 +61,12 @@ impl ToolCallHook for ProductApprovalHook {
         Box::pin(async move {
             let result = match &self.policy {
                 ApprovalPolicy::AllowAll => BeforeToolCallResult::decision(allow_decision(
-                    "allowed by product approval policy",
+                    self.catalog.approval_allow_reason(),
                     "policy",
                     json!({"policy": "allow_all"}),
                 )),
                 ApprovalPolicy::RequireApproval => BeforeToolCallResult::approval(
-                    self.approval_request(&context, "human approval required"),
+                    self.approval_request(&context, self.catalog.approval_human_required_reason()),
                 ),
                 ApprovalPolicy::AutoReview { fallback_to_human } => {
                     if let Some(reviewer) = &self.reviewer {
@@ -78,11 +78,11 @@ impl ToolCallHook for ProductApprovalHook {
                     } else if *fallback_to_human {
                         BeforeToolCallResult::approval(self.approval_request(
                             &context,
-                            "auto-review is disabled; human approval required",
+                            self.catalog.approval_auto_review_human_fallback_reason(),
                         ))
                     } else {
                         BeforeToolCallResult::decision(deny_decision(
-                            "auto-review is disabled and human fallback is disabled",
+                            self.catalog.approval_auto_review_denied_reason(),
                             "policy",
                             json!({"policy": "auto_review", "fallbackToHuman": false}),
                         ))
@@ -101,12 +101,7 @@ impl ProductApprovalHook {
         reason: &str,
     ) -> ToolApprovalRequestSpec {
         ToolApprovalRequestSpec {
-            prompt: Some(format!(
-                "{} Tool: `{}`. Arguments: {}",
-                self.catalog.message(MessageKey::ApprovalPrompt),
-                context.tool_call.name,
-                context.tool_call.arguments
-            )),
+            prompt: Some(self.catalog.render_approval_prompt(&context.tool_call)),
             reason: Some(reason.into()),
             expires_at_ms: None,
             metadata: json!({

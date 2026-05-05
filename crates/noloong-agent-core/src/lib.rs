@@ -62,7 +62,8 @@ pub use responses::{
     ResponsesReasoningEffort, ResponsesReasoningSummary,
 };
 pub use runtime::{
-    AgentEventSink, AgentInput, AgentRuntime, AgentRuntimeBuilder, RunReport, RuntimeQueues,
+    AgentEventSink, AgentInput, AgentRuntime, AgentRuntimeBuilder, QueuedAgentMessage,
+    QueuedMessageIntent, RunReport, RuntimeQueues,
 };
 pub use sse::SseReconnectConfig;
 pub use store::{EventStore, InMemoryEventStore};

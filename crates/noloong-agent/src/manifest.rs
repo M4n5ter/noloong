@@ -210,6 +210,14 @@ impl ManifestProposalStore {
         &self,
         patch: ManifestPatch,
     ) -> Result<ManifestPatchProposal, ManifestError> {
+        self.record_pending_proposal_with_summary(patch, None)
+    }
+
+    pub fn record_pending_proposal_with_summary(
+        &self,
+        patch: ManifestPatch,
+        summary: Option<String>,
+    ) -> Result<ManifestPatchProposal, ManifestError> {
         patch.validate()?;
         let proposal_id = format!(
             "manifest-proposal-{}",
@@ -217,7 +225,7 @@ impl ManifestProposalStore {
         );
         let proposal = ManifestPatchProposal {
             proposal_id,
-            summary: patch.summary(),
+            summary: summary.unwrap_or_else(|| patch.summary()),
             patch,
         };
         self.inner

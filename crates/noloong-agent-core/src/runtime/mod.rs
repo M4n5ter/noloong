@@ -16,9 +16,50 @@ pub use builder::AgentRuntimeBuilder;
 
 pub type AgentEventSink = Arc<dyn Fn(AgentEvent) -> EventSinkFuture + Send + Sync>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedAgentMessage {
+    pub message: AgentMessage,
+    pub intent: QueuedMessageIntent,
+}
+
+impl QueuedAgentMessage {
+    pub fn observation(message: AgentMessage) -> Self {
+        Self {
+            message,
+            intent: QueuedMessageIntent::Observation,
+        }
+    }
+
+    pub fn user_input(message: AgentMessage) -> Self {
+        Self {
+            message,
+            intent: QueuedMessageIntent::UserInput,
+        }
+    }
+}
+
+impl From<AgentMessage> for QueuedAgentMessage {
+    fn from(message: AgentMessage) -> Self {
+        Self::observation(message)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueuedMessageIntent {
+    Observation,
+    UserInput,
+}
+
 pub trait RuntimeQueues: Send + Sync {
-    fn steering_messages<'a>(&'a self) -> crate::providers::BoxFuture<'a, Vec<AgentMessage>>;
-    fn follow_up_messages<'a>(&'a self) -> crate::providers::BoxFuture<'a, Vec<AgentMessage>>;
+    fn steering_messages<'a>(&'a self) -> crate::providers::BoxFuture<'a, Vec<QueuedAgentMessage>>;
+
+    fn follow_up_messages<'a>(&'a self)
+    -> crate::providers::BoxFuture<'a, Vec<QueuedAgentMessage>>;
+
+    fn prepend_follow_up_messages<'a>(
+        &'a self,
+        messages: Vec<QueuedAgentMessage>,
+    ) -> crate::providers::BoxFuture<'a, ()>;
 }
 
 #[derive(Clone)]

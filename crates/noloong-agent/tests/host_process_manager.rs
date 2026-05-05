@@ -1,7 +1,12 @@
 use noloong_agent::{
-    HostProcessManager, JobStatus, ProcessOutputStream, ReadOutputRequest, StartCommandRequest,
+    HostProcessEvent, HostProcessManager, HostProcessSubscription, JobStatus, ProcessOutputStream,
+    ReadOutputRequest, StartCommandRequest,
 };
 use std::{collections::BTreeMap, path::PathBuf};
+use tokio::{
+    sync::mpsc,
+    time::{Duration, timeout},
+};
 
 #[tokio::test]
 async fn host_process_manager_start_returns_completed_when_fast() {
@@ -241,6 +246,81 @@ async fn host_process_manager_session_cleanup() {
     assert!(matches!(job.status, JobStatus::Terminated));
 }
 
+#[tokio::test]
+async fn host_process_completion_event_exited() {
+    let manager = HostProcessManager::new();
+    let mut events = subscribe_events(&manager);
+    let snapshot = manager
+        .start(StartCommandRequest {
+            command: "printf done".into(),
+            foreground_wait_ms: Some(1000),
+            ..start_defaults()
+        })
+        .await
+        .unwrap();
+
+    let completion = events.next_completion().await;
+
+    assert_eq!(completion.snapshot.job_id, snapshot.job_id);
+    assert!(matches!(
+        completion.snapshot.status,
+        JobStatus::Exited { code: Some(0) }
+    ));
+    assert_eq!(joined_output(&completion.output.chunks), "done");
+}
+
+#[tokio::test]
+async fn host_process_completion_event_terminated() {
+    let manager = HostProcessManager::new();
+    let mut events = subscribe_events(&manager);
+    let snapshot = manager
+        .start(StartCommandRequest {
+            command: "sleep 5".into(),
+            foreground_wait_ms: Some(10),
+            ..start_defaults()
+        })
+        .await
+        .unwrap();
+
+    manager.terminate(&snapshot.job_id).await.unwrap();
+    let completion = events.next_completion().await;
+
+    assert_eq!(completion.snapshot.job_id, snapshot.job_id);
+    assert!(matches!(completion.snapshot.status, JobStatus::Terminated));
+}
+
+#[tokio::test]
+async fn host_process_completion_event_is_single_delivery() {
+    let manager = HostProcessManager::new();
+    let mut events = subscribe_events(&manager);
+    let snapshot = manager
+        .start(StartCommandRequest {
+            command: "printf once".into(),
+            foreground_wait_ms: Some(1000),
+            ..start_defaults()
+        })
+        .await
+        .unwrap();
+
+    let completion = events.next_completion().await;
+    assert_eq!(completion.snapshot.job_id, snapshot.job_id);
+    manager.wait(&snapshot.job_id, Some(100)).await.unwrap();
+    let _ = manager.list().await.unwrap();
+    let _ = manager
+        .read(
+            &snapshot.job_id,
+            ReadOutputRequest {
+                after_seq: Some(0),
+                max_bytes: None,
+                wait_ms: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(events.receiver.try_recv().is_err());
+}
+
 fn start_defaults() -> StartCommandRequest {
     StartCommandRequest {
         command: String::new(),
@@ -255,4 +335,32 @@ fn start_defaults() -> StartCommandRequest {
 
 fn joined_output(chunks: &[noloong_agent::OutputChunk]) -> String {
     chunks.iter().map(|chunk| chunk.text.as_str()).collect()
+}
+
+struct EventProbe {
+    _subscription: HostProcessSubscription,
+    receiver: mpsc::UnboundedReceiver<HostProcessEvent>,
+}
+
+impl EventProbe {
+    async fn next_completion(&mut self) -> noloong_agent::HostProcessCompletion {
+        let event = timeout(Duration::from_secs(2), self.receiver.recv())
+            .await
+            .expect("completion event arrives before timeout")
+            .expect("completion event channel remains open");
+        match event {
+            HostProcessEvent::JobCompleted { completion } => completion,
+        }
+    }
+}
+
+fn subscribe_events(manager: &HostProcessManager) -> EventProbe {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let subscription = manager.subscribe(move |event| {
+        let _ = sender.send(event);
+    });
+    EventProbe {
+        _subscription: subscription,
+        receiver,
+    }
 }

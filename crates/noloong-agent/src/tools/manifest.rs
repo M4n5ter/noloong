@@ -31,7 +31,8 @@ impl ToolProvider for ManifestPatchProposalTool {
                 }
             }),
             "agent.manifest.patch",
-            "Propose changes to the product agent manifest",
+            self.catalog
+                .message(MessageKey::ManifestPatchPermissionDescription),
         )
     }
 
@@ -43,15 +44,24 @@ impl ToolProvider for ManifestPatchProposalTool {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
             let patch_value = request.arguments.get("patch").cloned().ok_or_else(|| {
-                noloong_agent_core::AgentCoreError::InvalidEffect("missing patch".into())
+                noloong_agent_core::AgentCoreError::InvalidEffect(
+                    self.catalog.missing_manifest_patch_argument().into(),
+                )
             })?;
             let patch = serde_json::from_value::<ManifestPatch>(patch_value).map_err(|error| {
-                noloong_agent_core::AgentCoreError::InvalidEffect(error.to_string())
+                noloong_agent_core::AgentCoreError::InvalidEffect(
+                    self.catalog.render_tool_input_error(error),
+                )
             })?;
+            let summary = self.catalog.render_manifest_patch_summary(&patch);
             let proposal = self
                 .store
-                .record_pending_proposal(patch)
-                .map_err(|error| noloong_agent_core::AgentCoreError::Provider(error.to_string()))?;
+                .record_pending_proposal_with_summary(patch, Some(summary))
+                .map_err(|error| {
+                    noloong_agent_core::AgentCoreError::Provider(
+                        self.catalog.render_manifest_error(&error),
+                    )
+                })?;
             let value = json!(proposal);
             Ok(json_tool_output(value))
         })

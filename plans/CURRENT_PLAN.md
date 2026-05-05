@@ -1,390 +1,225 @@
-# Implementation Plan: Host-first Evolvable Agent
+# Implementation Plan: Background Completion Injection
 
 ## Overview
 
-新增 `noloong-agent` 产品层，基于 `noloong-agent-core` 构建宿主机优先的自进化 Agent。v1 的主路径是后台命令工具：命令启动后不阻塞，Agent 可以跨 product turn 读取、等待、写入或终止进程；system prompt、tools、approval policy 通过 manifest patch 在审批后于下一 product turn 生效。
+让 `noloong-agent` 的后台命令 job 在完成后主动排队注入结果，但不自动启动 continuation。完成事件进入现有 steering 语义：如果 Agent 正在运行，则在当前安全 turn 边界注入；如果 Agent 空闲，则在下一次 `prompt` / `continue_run` 开始时、第一轮模型请求前注入。
 
-当前 `noloong-agent-core` 已提供：
-
-- event-sourced runtime、phase graph、provider traits、tool permission/approval hooks。
-- JSON-RPC extension bridge、context compaction、built-in model providers、SQLite event store。
-- `AgentEffect::SetAvailableTools`、`ContextProvider`、`ToolProvider`、`ToolCallHook` 等产品层可复用扩展点。
-
-本轮不把 host、shell、SSH、VMM、process manager 概念放进 `noloong-agent-core`。SSH/VMM 暂时是宿主机命令能力：Agent 可以通过 `host.exec.start` 启动 `ssh`、`lima`、`qemu`、`clone` 等命令自行操作。
-
-参考资料：
-
-- OpenAI Codex repository: <https://github.com/openai/codex>
-- Codex exec server process lifecycle: <https://github.com/openai/codex/tree/main/codex-rs/exec-server>
-- Linux `clone` future sandbox candidate: <https://github.com/unixshells/clone>
+同时增加 product-level 通用工具输出溢出处理：任意工具返回结果过长时，通过 `after_tool_call` hook 将完整 `ToolOutput` 写入临时 JSON 文件，并把 inline tool result 改写为短提示，告诉 Agent 完整结果路径和读取方式。
 
 ## Architecture Decisions
 
-- 新 crate 命名为 `noloong-agent`，作为 product runtime；`noloong-agent-core` 继续保持 providerless kernel 边界。
-- 后台命令采用 lifecycle tool group，而不是一个阻塞式 `exec`：`host.exec.start`、`host.exec.read`、`host.exec.wait`、`host.exec.write`、`host.exec.terminate`、`host.exec.list`。
-- `host.exec.start` 使用 optimistic foreground window：命令若在配置的短等待窗口内完成，则直接返回完整结果；超过窗口才返回 running job handle，供后续 `read/wait/write/terminate` 使用。
-- `host.exec.start` 接收 shell command string，并显式记录 shell；默认 shell 从宿主机推断，也允许显式选择 `sh`、`bash`、`zsh`、`powershell`、`cmd` 或 custom shell。
-- 进程生命周期绑定 product session，不绑定单个 core run；session close 默认清理仍在运行的 job。
-- 输出写 product spool/ring buffer；core event log 只记录 tool result、job lifecycle 摘要、cursor、truncation metadata，避免大输出污染 event store。
-- 自进化采用 proposal + approval + next-turn rebuild：Agent 提交 manifest patch，审批通过后 supervisor 重建 core runtime，下一 product turn 生效。
-- v1 manifest patch 支持 system prompt、enabled tools、approval policy；phase node 替换只保留 schema/documentation，不实际执行。
-- 所有给模型看的 host context、tool description、approval prompt 使用 typed i18n catalog，默认支持 English 和 Chinese。
-- locale 解析顺序：显式配置优先，其次宿主机 `LC_ALL` / `LC_MESSAGES` / `LANG`，最后 fallback 到 English。
-- `crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md` 是 core 能力验证矩阵；product crate 后续如需独立矩阵，应放在 `crates/noloong-agent/docs/`，不再放入 `plans/`。
+- 不自动 continuation：后台任务完成只调用 `agent.steer(...)` 排队，不主动调用 `prompt`、`continue_run` 或模型 provider。
+- completion message 使用 `MessageRole::User`，不是 `ToolResult`。原因是后台 completion 是异步外部观察，不再对应当前 provider transcript 中合法成对的 `ToolCall`。
+- idle queued steering 必须在下一次 run 的第一轮模型请求前注入，并且排在新的用户 prompt 之前，确保真实用户输入仍是最新消息。
+- completion preview 默认只注入 bounded tail output，默认上限 `16 KiB`；完整历史仍通过 `host.exec.read` 按 cursor 读取。
+- 通用工具输出外置放在 `noloong-agent`，不放进 `noloong-agent-core`，避免 core 默认绑定宿主机文件系统策略。
+- tool output inline 默认上限 `64 KiB`；超限时完整输出写入 `${TMPDIR}/noloong-agent/tool-output/{runId}-{turnId}-{toolCallId}.json`。
 
 ## Task List
 
-### Phase 1: Product Crate Foundation
+### Phase 1: Core Steering Semantics
 
-#### Task 1: Create product crate skeleton
+#### Task 1: Drain queued steering before the first turn
 
-**Description:** 新增 `crates/noloong-agent`，建立 product runtime 的模块边界，依赖 `noloong-agent-core`，并导出后续任务需要的最小 public API。
+**Description:** 调整 `noloong-agent-core` run loop，使 run 开始前已存在的 steering messages 在第一轮 `model_request` 前进入 state。该逻辑只改变 queued steering 的注入时机，不改变 follow-up 语义，也不触发自动 run。
 
 **Acceptance criteria:**
 
-- [ ] workspace 包含 `crates/noloong-agent` member。
-- [ ] crate 暴露 `AgentSession`、`AgentManifest`、`HostEnvironment` 的初始 public API。
-- [ ] `noloong-agent-core` public API 不因 product crate 增加 host/process/VMM 概念。
+- [ ] `agent.steer(message)` 在 `agent.prompt(...)` 前调用时，模型第一轮请求能看到该 steering message。
+- [ ] 预先排队的 steering message 顺序在新的 user prompt 之前。
+- [ ] active run 中途排队的 steering 仍在当前 turn 完成后的安全边界注入。
 
 **Verification:**
 
-- [ ] `cargo check -p noloong-agent`
-- [ ] `cargo check -p noloong-agent-core`
-- [ ] `rg -n "HostEnvironment|host.exec|process manager|VMM|shell" crates/noloong-agent-core/src crates/noloong-agent-core/docs/ARCHITECTURE.md` only returns intentional architecture text if any.
+- [ ] Add core test: idle steering is injected before first model request.
+- [ ] Existing tests still pass: `steering_is_injected_after_tool_batch` and `steering_waits_until_tool_batch_completes`.
+- [ ] `cargo test -p noloong-agent-core agent`
 
 **Dependencies:** None
 
 **Files likely touched:**
 
-- `Cargo.toml`
-- `crates/noloong-agent/Cargo.toml`
-- `crates/noloong-agent/src/lib.rs`
-
-**Estimated scope:** Small
-
-#### Task 2: Add host environment detection and typed i18n catalog
-
-**Description:** 实现宿主机环境采集和 typed i18n catalog，为模型生成稳定的 host context、tool descriptions 和 approval prompts。
-
-**Acceptance criteria:**
-
-- [ ] `HostEnvironment` 包含 OS、arch、cwd、default shell、available shell hints、path style、locale。
-- [ ] locale 支持 explicit override、host inference、English fallback。
-- [ ] English/Chinese catalog key 完整性由测试保证，缺失 key 必须失败而不是静默 fallback。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent host_environment`
-- [ ] `cargo test -p noloong-agent i18n_catalog`
-- [ ] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-
-**Dependencies:** Task 1
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/host.rs`
-- `crates/noloong-agent/src/i18n.rs`
-- `crates/noloong-agent/tests/host_environment.rs`
-- `crates/noloong-agent/tests/i18n.rs`
+- `crates/noloong-agent-core/src/runtime/run_loop.rs`
+- `crates/noloong-agent-core/tests/agent.rs`
 
 **Estimated scope:** Medium
 
-### Checkpoint: Foundation
+### Checkpoint: Core Queue Behavior
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo check -p noloong-agent`
-- [ ] `cargo check -p noloong-agent-core`
-- [ ] `cargo test -p noloong-agent host_environment i18n_catalog`
+- [ ] `cargo test -p noloong-agent-core agent`
+- [ ] `cargo test -p noloong-agent-core conformance`
+- [ ] `cargo clippy -p noloong-agent-core --all-targets --all-features -- -D warnings`
 
-### Phase 2: Background Command Runtime
+### Phase 2: Process Completion Events
 
-#### Task 3: Implement `HostProcessManager`
+#### Task 2: Add terminal process event subscription
 
-**Description:** 实现 session 级后台进程管理器，负责 job id、process lifecycle、status、exit code、output cursor、spool/ring buffer、optimistic foreground window 和 session cleanup。
+**Description:** 为 `HostProcessManager` 增加轻量 subscription API，在 job 进入终态后发布 `HostProcessEvent::JobCompleted`。事件必须只发布一次，并在 stdout/stderr reader drain 后生成，保证 completion preview 能包含最终输出。
 
 **Acceptance criteria:**
 
-- [ ] `start` 支持 configurable foreground wait；窗口内完成时返回 completed snapshot，超时才返回 running job handle。
-- [ ] `read`、`wait`、`list` 可在同一个 product session 内跨 turn 使用。
-- [ ] session close 默认清理仍在运行的进程，并保留已完成 job 的摘要状态。
+- [ ] `Exited`、`Terminated`、`Failed` 都会发布一次 `JobCompleted`。
+- [ ] 同一 job 不会重复发布 completion event。
+- [ ] completion snapshot 包含 job id、command、shell、cwd、status、started/ended time、cursor、dropped cursor 和 bounded tail chunks。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent host_process_manager_start_returns_completed_when_fast`
-- [ ] `cargo test -p noloong-agent host_process_manager_start_returns_running_when_slow`
-- [ ] `cargo test -p noloong-agent host_process_manager_read_wait_list`
-- [ ] `cargo test -p noloong-agent host_process_manager_session_cleanup`
+- [ ] `cargo test -p noloong-agent host_process_completion_event_exited`
+- [ ] `cargo test -p noloong-agent host_process_completion_event_terminated`
+- [ ] `cargo test -p noloong-agent host_process_completion_event_is_single_delivery`
 
-**Dependencies:** Task 1
+**Dependencies:** None
 
 **Files likely touched:**
 
-- `crates/noloong-agent/src/process/mod.rs`
 - `crates/noloong-agent/src/process/manager.rs`
 - `crates/noloong-agent/tests/host_process_manager.rs`
 
 **Estimated scope:** Medium
 
-#### Task 4: Add process I/O and interactive command support
+#### Task 3: Render completion events as steering messages
 
-**Description:** 在 process manager 中加入 stdout/stderr/pty output buffering、stdin write、timeout 和 graceful terminate 行为，为交互式命令做基础。
+**Description:** 在 product layer 中把 `HostProcessEvent::JobCompleted` 渲染为 model-readable `AgentMessage`，并提供 `AgentSession::attach_background_completion_steering(...)` 将 process manager completion events 连接到 core `Agent::steer(...)`。
 
 **Acceptance criteria:**
 
-- [ ] 支持 stdout/stderr 增量读取，cursor 顺序稳定。
-- [ ] 支持 PTY 或 pipe stdin 写入；不支持的平台必须 fail fast 并给出结构化错误。
-- [ ] `wait` timeout 不杀进程；`terminate` graceful timeout 后 kill。
+- [ ] 空闲时 job 完成只排队 steering，不自动启动模型。
+- [ ] 下一次 `prompt` 或 `continue_run` 的第一轮模型请求能看到 completion message。
+- [ ] active run 中 job 完成时，completion message 在安全 turn 边界注入。
+- [ ] message id 使用 `host-exec-completed-{jobId}`，metadata 包含 `noloong.kind = "host.exec.completed"` 和 `jobId`。
+- [ ] message content 是 bounded text，不使用 `ToolResult` role，不伪造 `tool_call_id`。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent host_process_output_cursor_order`
-- [ ] `cargo test -p noloong-agent host_process_interactive_write`
-- [ ] `cargo test -p noloong-agent host_process_wait_timeout_does_not_kill`
-- [ ] `cargo test -p noloong-agent host_process_terminate`
+- [ ] Product integration test: idle completion is visible in the next prompt's first model request.
+- [ ] Product integration test: idle completion does not auto-run the model.
+- [ ] Product integration test: active-run completion uses steering boundary behavior.
+- [ ] Product integration test: completion preview respects the `16 KiB` default limit.
 
-**Dependencies:** Task 3
+**Dependencies:** Task 1, Task 2
 
 **Files likely touched:**
 
+- `crates/noloong-agent/src/session.rs`
 - `crates/noloong-agent/src/process/manager.rs`
-- `crates/noloong-agent/src/process/io.rs`
-- `crates/noloong-agent/tests/host_process_manager.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
 
 **Estimated scope:** Medium
 
-### Checkpoint: Process Runtime
+### Checkpoint: Background Completion Flow
 
-- [ ] `cargo test -p noloong-agent host_process_manager`
-- [ ] Manual smoke: start a long command, read partial output, wait, then inspect final status.
-- [ ] Manual smoke: start an interactive command, write stdin, read response, terminate if still running.
+- [ ] `cargo test -p noloong-agent host_process_completion`
+- [ ] `cargo test -p noloong-agent agent_session`
+- [ ] Manual smoke: start `sleep 0.1; printf done`, wait until idle, then send next prompt and confirm model receives completion context.
 
-### Phase 3: Command Lifecycle Tools
+### Phase 3: Generic Tool Output Overflow
 
-#### Task 5: Implement host command ToolProviders
+#### Task 4: Add product tool output overflow hook
 
-**Description:** 将 `HostProcessManager` 暴露为 core `ToolProvider` 组，使模型通过工具调用启动、读取、等待、写入、终止和列出后台命令。
+**Description:** 新增 `ProductToolOutputOverflowHook`，实现 `ToolCallHook::after_tool_call`。hook 检查完整 `ToolOutput` 的 serialized byte size；超过默认 `64 KiB` 时，将原始 output 写入临时 JSON 文件，并把 inline output 改写为短提示和 metadata。
 
 **Acceptance criteria:**
 
-- [ ] 提供 `host.exec.start`、`host.exec.read`、`host.exec.wait`、`host.exec.write`、`host.exec.terminate`、`host.exec.list`。
-- [ ] `host.exec.start` 在 foreground window 内完成时返回 completed output；超时返回 `jobId`、shell、cwd、status、initial output snapshot。
-- [ ] 所有 tool output 使用稳定 structured `details`，包含 status、cursor、exit code、truncated/error metadata。
+- [ ] 未超限 output 不被修改。
+- [ ] 超限 output 写入 `${TMPDIR}/noloong-agent/tool-output/{runId}-{turnId}-{toolCallId}.json`。
+- [ ] 改写后的 inline output 包含 path、original byte size、inline byte limit、tool name、tool call id。
+- [ ] 写文件失败时不静默丢数据；返回 `is_error = true` 的 auditable output，说明 overflow persistence failed。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent host_exec_tools_start_and_read`
-- [ ] `cargo test -p noloong-agent host_exec_tools_start_fast_path_returns_result`
-- [ ] `cargo test -p noloong-agent host_exec_tools_wait_timeout`
-- [ ] `cargo test -p noloong-agent host_exec_tools_write_and_terminate`
+- [ ] Unit test: small output passes through unchanged.
+- [ ] Unit test: large output is persisted and inline output is bounded.
+- [ ] Unit test: persisted JSON can deserialize back to original `ToolOutput`.
+
+**Dependencies:** None
+
+**Files likely touched:**
+
+- `crates/noloong-agent/src/tools/output_overflow.rs`
+- `crates/noloong-agent/src/tools/mod.rs`
+- `crates/noloong-agent/tests/tool_output_overflow.rs`
+
+**Estimated scope:** Medium
+
+#### Task 5: Register overflow hook in product runtime
+
+**Description:** 让 `AgentSession::runtime_builder()` 默认注册 `ProductToolOutputOverflowHook`，并通过 `AgentSessionBuilder` 暴露可配置 limit 和 temp root。默认配置应能直接工作，测试可注入临时目录。
+
+**Acceptance criteria:**
+
+- [ ] 默认 product runtime 自动应用 overflow hook。
+- [ ] `AgentSessionBuilder` 支持覆盖 `max_inline_tool_output_bytes` 和 `tool_output_temp_dir`。
+- [ ] rewritten output 明确告诉 Agent：完整工具结果因太长已外置，需要用路径读取完整 JSON。
+
+**Verification:**
+
+- [ ] Integration test: runtime tool result over limit becomes short path prompt.
+- [ ] Integration test: custom temp dir is respected.
+- [ ] `cargo test -p noloong-agent tool_output_overflow`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
 
-- `crates/noloong-agent/src/tools/host_exec.rs`
-- `crates/noloong-agent/src/tools/mod.rs`
-- `crates/noloong-agent/tests/host_exec_tools.rs`
-
-**Estimated scope:** Medium
-
-#### Task 6: Add command output audit summaries
-
-**Description:** 确保大输出留在 product spool/ring buffer，core tool result 只提交摘要、cursor、cap 和 truncation metadata。
-
-**Acceptance criteria:**
-
-- [ ] 大 stdout/stderr 不作为完整 chunk 写入 core event log。
-- [ ] `read` 支持 output cap，并明确返回 `truncated` 和 `nextCursor`。
-- [ ] non-zero exit、stderr-only output、timeout、unknown job 都有稳定错误或状态表达。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent host_exec_large_output_is_spooled`
-- [ ] `cargo test -p noloong-agent host_exec_output_cap_and_cursor`
-- [ ] `cargo test -p noloong-agent host_exec_non_zero_and_unknown_job_details`
-
-**Dependencies:** Task 5
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/process/spool.rs`
-- `crates/noloong-agent/src/tools/host_exec.rs`
-- `crates/noloong-agent/tests/host_exec_tools.rs`
-
-**Estimated scope:** Medium
-
-### Checkpoint: Command Tools
-
-- [ ] `cargo test -p noloong-agent host_exec_tools`
-- [ ] Integration smoke: Agent starts long-running command, proceeds to another turn, then reads/waits result.
-- [ ] Confirm `noloong-agent-core` event store does not contain unbounded command output.
-
-### Phase 4: Manifest Evolution
-
-#### Task 7: Implement `AgentManifest` and patch validation
-
-**Description:** 定义 product manifest 和 manifest patch，支持 prompt、enabled tools、approval policy 的受控变更，并预留 phase profile schema。
-
-**Acceptance criteria:**
-
-- [ ] manifest 包含 locale、system prompt profile、enabled tools、approval policy、reserved phase profile。
-- [ ] patch 支持 replace system prompt、enable/disable tool、update approval policy。
-- [ ] invalid patch 被拒绝且不改变 manifest；phase patch v1 只能被记录为 unsupported/reserved。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent manifest_patch_applies_prompt_tools_policy`
-- [ ] `cargo test -p noloong-agent manifest_patch_rejects_invalid_changes`
-- [ ] `cargo test -p noloong-agent manifest_phase_patch_is_reserved`
-
-**Dependencies:** Task 2
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/manifest.rs`
-- `crates/noloong-agent/tests/manifest.rs`
-
-**Estimated scope:** Medium
-
-#### Task 8: Add manifest patch proposal tool
-
-**Description:** 将自进化入口实现为 tool：Agent 只能提交 manifest patch proposal，不能直接修改 live manifest。
-
-**Acceptance criteria:**
-
-- [ ] `agent.manifest.propose_patch` 返回 proposal id 和 patch summary。
-- [ ] proposal 进入 approval path 前不会改变 manifest。
-- [ ] proposal details 可审计，并能被 human 或 auto-review agent 使用。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent manifest_proposal_does_not_apply_without_approval`
-- [ ] `cargo test -p noloong-agent manifest_proposal_tool_returns_auditable_details`
-
-**Dependencies:** Task 7
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/evolution.rs`
-- `crates/noloong-agent/src/tools/manifest.rs`
-- `crates/noloong-agent/tests/manifest_evolution.rs`
-
-**Estimated scope:** Medium
-
-### Checkpoint: Manifest Evolution
-
-- [ ] `cargo test -p noloong-agent manifest`
-- [ ] Manual check: a proposed manifest patch is visible, auditable, and not applied until approved.
-
-### Phase 5: Product Session Supervisor and Approval
-
-#### Task 9: Implement `AgentSession` next-turn rebuild
-
-**Description:** 实现 product supervisor：每个 product turn 使用当前 manifest 构造 core runtime；approved patch 在下一 product turn 前应用并重建 runtime，同时保留 session process manager。
-
-**Acceptance criteria:**
-
-- [ ] approved prompt/tool/policy patch 下一 product turn 生效。
-- [ ] rejected patch 不影响下一 product turn。
-- [ ] runtime rebuild 不丢失 `HostProcessManager` 中的后台 jobs。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent agent_session_prompt_patch_takes_effect_next_turn`
-- [ ] `cargo test -p noloong-agent agent_session_tool_patch_takes_effect_next_turn`
-- [ ] `cargo test -p noloong-agent agent_session_rebuild_preserves_background_jobs`
-
-**Dependencies:** Task 6, Task 8
-
-**Files likely touched:**
-
 - `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/src/runtime_factory.rs`
-- `crates/noloong-agent/tests/agent_session.rs`
+- `crates/noloong-agent/src/tools/output_overflow.rs`
+- `crates/noloong-agent/tests/tool_output_overflow.rs`
 
-**Estimated scope:** Medium
+**Estimated scope:** Small
 
-#### Task 10: Add approval reviewer integration
+### Checkpoint: Tool Output Safety
 
-**Description:** 通过 `ToolCallHook` 统一处理 host command 和 manifest patch approval，并支持 human fallback 与可关闭的 auto-review agent。
+- [ ] `cargo test -p noloong-agent tool_output_overflow`
+- [ ] Manual smoke: dummy tool returns large JSON, Agent sees path prompt, temp file contains full output.
+- [ ] Confirm core event log stores only bounded rewritten output for oversized tool results.
 
-**Acceptance criteria:**
+### Phase 4: Documentation and Full Verification
 
-- [ ] `host.exec.start`、`host.exec.write`、`host.exec.terminate` 和 manifest patch proposal 都进入 permission audit。
-- [ ] human reviewer 可使用现有 pause/resume path。
-- [ ] auto-review agent 可插拔、可关闭；关闭后需要 human decision。
+#### Task 6: Update architecture documentation
 
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent approval_host_exec_start_allow_deny`
-- [ ] `cargo test -p noloong-agent approval_manifest_patch_allow_deny`
-- [ ] `cargo test -p noloong-agent approval_auto_review_can_be_disabled`
-
-**Dependencies:** Task 9
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/approval.rs`
-- `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/tests/approval.rs`
-
-**Estimated scope:** Medium
-
-### Checkpoint: Evolvable Session
-
-- [ ] `cargo test -p noloong-agent agent_session approval`
-- [ ] End-to-end smoke: start background command, propose tool/policy change, approve it, observe next-turn runtime change while job remains readable.
-
-### Phase 6: Documentation and Final Verification
-
-#### Task 11: Document product architecture and examples
-
-**Description:** 为 product crate 编写架构文档和 examples，解释 host-first execution、background command lifecycle、自进化 manifest、approval reviewer 和 i18n。
+**Description:** 更新 product architecture docs，明确后台 completion injection 语义、非自动 continuation 策略、completion preview limit、tool output overflow policy 和 `MessageRole::User` 的原因。
 
 **Acceptance criteria:**
 
-- [ ] docs 明确哪些能力在 `noloong-agent`，哪些能力留在 `noloong-agent-core`。
-- [ ] example 展示 start long-running command、继续做别的事、再 read/wait。
-- [ ] docs 明确 SSH/VMM v1 是宿主命令能力，不是 target abstraction。
+- [ ] Docs state that background completion queues steering and never starts a run by itself.
+- [ ] Docs state queued completion is injected before the next run's first model request.
+- [ ] Docs state default limits: completion preview `16 KiB`, tool output inline `64 KiB`.
+- [ ] Docs explain why completion messages are user-role observations instead of tool results.
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent --examples`
-- [ ] Manual check: docs mention lifecycle tool group and next-turn manifest rebuild.
+- [ ] Review `crates/noloong-agent/docs/ARCHITECTURE.md`.
+- [ ] `rg -n "auto continuation|MessageRole::ToolResult" crates/noloong-agent/docs/ARCHITECTURE.md` confirms the intended semantics are documented.
 
-**Dependencies:** Task 10
+**Dependencies:** Tasks 1-5
 
 **Files likely touched:**
 
 - `crates/noloong-agent/docs/ARCHITECTURE.md`
-- `crates/noloong-agent/examples/background_command.rs`
-- `README.md`
+- `plans/CURRENT_PLAN.md`
 
 **Estimated scope:** Small
 
 ### Final Checkpoint
 
 - [ ] `cargo fmt --check`
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo nextest run --workspace --all-features`
+- [ ] `cargo test -p noloong-agent`
 - [ ] `cargo test -p noloong-agent --examples`
-- [ ] `cargo test -p noloong-agent-core --test extension_docs_contract`
+- [ ] `cargo test -p noloong-agent-core agent`
+- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- [ ] `cargo nextest run --workspace --all-features -j 1`
 - [ ] `git diff --check`
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
-|------|--------|------------|
-| PTY behavior differs across platforms | High | Keep PTY behind process I/O abstraction; Unix path first, unsupported platform fail fast with structured error |
-| Background output grows without bound | High | Use spool/ring buffer, output cap, truncation metadata, and lifecycle summaries |
-| Runtime rebuild loses session state | High | Keep process manager, manifest store, and approval reviewer in `AgentSession`, not in core runtime |
-| Approval auto-review makes unsafe decisions | High | Default to proposal + approval; auto-review can be disabled; every decision enters existing permission audit |
-| Shell command strings are injection-prone | Medium | Treat command string as the user's explicit shell program, always record shell/cwd/env, and route through approval policy |
-| Product crate accidentally leaks host concepts into core | Medium | Add regression audit and keep all host/process modules outside `noloong-agent-core` |
-| Long-running jobs survive unexpectedly | Medium | Session close cleanup is default; docs must make lifecycle explicit |
+| --- | --- | --- |
+| Completion event fires before stdout/stderr drain | Medium | Emit `JobCompleted` only after child exit and output readers reach EOF or terminal error. |
+| Queued steering changes first-turn ordering | Medium | Add core tests that lock ordering: queued completion before new user prompt, active steering unchanged. |
+| Large tool output still enters event log | High | Register overflow hook before product tools are used; integration test against event/state size and persisted file. |
+| Temp file path leaks sensitive data location | Medium | Store under a predictable product temp root and include only required path metadata in model-visible output. |
+| `ToolResult` temptation breaks provider contracts | High | Use `MessageRole::User` for async observations and document the rationale. |
 
-## Parallelization Opportunities
+## Open Questions
 
-- Task 2 and Task 3 can run in parallel after Task 1.
-- Task 7 can run in parallel with Tasks 3-6 after Task 2 because manifest validation does not depend on process execution.
-- Task 11 documentation can start after Task 5, but final examples should wait until Task 10 is complete.
+None. Defaults are: no auto continuation, next-run queued steering injection, product-level overflow hook, `16 KiB` completion preview, `64 KiB` inline tool output limit.
