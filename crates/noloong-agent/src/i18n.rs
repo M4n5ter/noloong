@@ -492,33 +492,51 @@ fn en_message(key: MessageKey) -> &'static str {
     match key {
         MessageKey::HostEnvironmentContext => "Current host execution environment:",
         MessageKey::HostExecStartDescription => {
-            "Start a host shell command in the background and return a job handle immediately."
+            "Start a host shell command as a background job. Set foregroundWaitMs to return quick results inline; otherwise use the returned jobId with host.exec.read, host.exec.wait, host.exec.write, or host.exec.terminate."
         }
         MessageKey::HostExecReadDescription => {
-            "Read buffered output from a background host command by cursor."
+            "Read buffered stdout/stderr from a background host command without consuming it. Use jobId with afterSeq as the cursor and maxBytes to bound the returned output."
         }
         MessageKey::HostExecWaitDescription => {
-            "Wait for a background host command to finish without killing it on timeout."
+            "Wait for a background host command to finish and return its current outcome. A timeout only returns the latest state; it does not kill the job."
         }
         MessageKey::HostExecWriteDescription => {
-            "Write text to a background host command stdin when stdin is enabled."
+            "Write text to a background host command stdin. This only works for jobs started with pipeStdin enabled."
         }
         MessageKey::HostExecTerminateDescription => {
-            "Terminate a background host command and return its latest status."
+            "Request termination of a background host command by jobId and return the latest job status."
         }
-        MessageKey::HostExecListDescription => "List background host command jobs in this session.",
+        MessageKey::HostExecListDescription => {
+            "List background host command jobs for the current session with their latest status."
+        }
         MessageKey::FileWriteDescription => {
-            "Write or replace a complete text file under the current host filesystem."
+            "Edit a text file on the host filesystem. Provide content for a complete file write, or provide oldString and newString for an exact replacement; replaceAll controls whether every match is replaced."
         }
         MessageKey::FileApplyPatchDescription => {
-            "Apply a strict patch to add, update, delete, or move files on the current host filesystem."
+            "Apply a strict V4A patch format on the host filesystem. The patch can add, update, delete, or move files and must use the required Begin/End Patch markers. Minimal example:\n\
+*** Begin Patch\n\
+*** Add File: notes.txt\n\
++hello\n\
+*** Update File: src/lib.rs\n\
+@@\n\
+-old\n\
++new\n\
+*** Delete File: old.txt\n\
+*** Move File: draft.txt -> final.txt\n\
+*** End Patch"
         }
         MessageKey::ManifestPatchDescription => {
-            "Propose a manifest patch for the next turn; it does not apply until approved."
+            "Propose a manifest patch that may change future agent session behavior. The proposal is recorded for a future turn and does not apply until approved."
         }
-        MessageKey::HostCommandPermissionDescription => "Execute or control host commands.",
-        MessageKey::FileEditPermissionDescription => "Write files on the host filesystem.",
-        MessageKey::ManifestPatchPermissionDescription => "Propose changes to the agent manifest.",
+        MessageKey::HostCommandPermissionDescription => {
+            "Start and control host processes, including reading output, writing stdin, waiting, listing, or terminating jobs."
+        }
+        MessageKey::FileEditPermissionDescription => {
+            "Modify the host filesystem through file editing tools, including writing, replacing, moving, or deleting paths."
+        }
+        MessageKey::ManifestPatchPermissionDescription => {
+            "Propose agent manifest changes that can alter future session behavior after approval."
+        }
         MessageKey::ApprovalPrompt => "Review whether this tool call should be allowed.",
     }
 }
@@ -527,23 +545,51 @@ fn zh_message(key: MessageKey) -> &'static str {
     match key {
         MessageKey::HostEnvironmentContext => "当前宿主机执行环境：",
         MessageKey::HostExecStartDescription => {
-            "在宿主机后台启动 shell 命令，并立即返回 job handle。"
+            "将宿主机 shell 命令作为后台 job 启动。设置 foregroundWaitMs 可让快速结果直接内联返回；否则请使用返回的 jobId 继续调用 host.exec.read、host.exec.wait、host.exec.write 或 host.exec.terminate。"
         }
-        MessageKey::HostExecReadDescription => "按 cursor 读取后台宿主机命令的缓冲输出。",
-        MessageKey::HostExecWaitDescription => "等待后台宿主机命令结束；超时时不会杀死该命令。",
-        MessageKey::HostExecWriteDescription => "向已启用 stdin 的后台宿主机命令写入文本。",
-        MessageKey::HostExecTerminateDescription => "终止后台宿主机命令，并返回其最新状态。",
-        MessageKey::HostExecListDescription => "列出当前 session 中的后台宿主机命令 job。",
-        MessageKey::FileWriteDescription => "在当前宿主机文件系统中写入或替换完整文本文件。",
+        MessageKey::HostExecReadDescription => {
+            "非破坏性读取后台宿主机命令的 stdout/stderr 缓冲输出。使用 jobId 和 afterSeq 作为 cursor，并用 maxBytes 限制返回输出大小。"
+        }
+        MessageKey::HostExecWaitDescription => {
+            "等待后台宿主机命令结束并返回当前结果。超时只会返回最新状态，不会杀死该 job。"
+        }
+        MessageKey::HostExecWriteDescription => {
+            "向后台宿主机命令的 stdin 写入文本。只有启动时启用了 pipeStdin 的 job 才支持该操作。"
+        }
+        MessageKey::HostExecTerminateDescription => {
+            "通过 jobId 请求终止后台宿主机命令，并返回该 job 的最新状态。"
+        }
+        MessageKey::HostExecListDescription => {
+            "列出当前 session 中的后台宿主机命令 job 及其最新状态。"
+        }
+        MessageKey::FileWriteDescription => {
+            "编辑宿主机文件系统中的文本文件。提供 content 表示完整写入文件；或提供 oldString 和 newString 表示精确替换，replaceAll 控制是否替换所有匹配项。"
+        }
         MessageKey::FileApplyPatchDescription => {
-            "在当前宿主机文件系统中应用严格 patch，以新增、更新、删除或移动文件。"
+            "在宿主机文件系统中应用严格 V4A patch 格式。patch 可以新增、更新、删除或移动文件，并且必须使用 Begin/End Patch 标记。最小示例：\n\
+*** Begin Patch\n\
+*** Add File: notes.txt\n\
++hello\n\
+*** Update File: src/lib.rs\n\
+@@\n\
+-old\n\
++new\n\
+*** Delete File: old.txt\n\
+*** Move File: draft.txt -> final.txt\n\
+*** End Patch"
         }
         MessageKey::ManifestPatchDescription => {
-            "为下一轮提交 manifest patch 提案；审批前不会生效。"
+            "提交可能改变未来 agent session 行为的 manifest patch 提案。该提案会记录到后续轮次，审批通过前不会生效。"
         }
-        MessageKey::HostCommandPermissionDescription => "执行或控制宿主机命令。",
-        MessageKey::FileEditPermissionDescription => "写入宿主机文件系统中的文件。",
-        MessageKey::ManifestPatchPermissionDescription => "提交 agent manifest 变更提案。",
+        MessageKey::HostCommandPermissionDescription => {
+            "启动和控制宿主机进程，包括读取输出、写入 stdin、等待、列出或终止 job。"
+        }
+        MessageKey::FileEditPermissionDescription => {
+            "通过文件编辑工具修改宿主机文件系统，包括写入、替换、移动或删除路径。"
+        }
+        MessageKey::ManifestPatchPermissionDescription => {
+            "提交 agent manifest 变更提案；审批后可改变未来 session 行为。"
+        }
         MessageKey::ApprovalPrompt => "判断这个工具调用是否应该被允许。",
     }
 }
