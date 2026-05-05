@@ -14,7 +14,7 @@ pub struct AgentManifest {
     pub locale: Locale,
     pub system_prompt: String,
     #[serde(default)]
-    pub enabled_tools: BTreeSet<ProductToolName>,
+    pub enabled_tools: BTreeSet<BuiltInToolName>,
     pub approval_policy: ApprovalPolicy,
     #[serde(default)]
     pub reserved_phase_profile: BTreeMap<String, serde_json::Value>,
@@ -31,7 +31,7 @@ impl AgentManifest {
         }
     }
 
-    pub fn with_enabled_tool(mut self, tool_name: ProductToolName) -> Self {
+    pub fn with_enabled_tool(mut self, tool_name: BuiltInToolName) -> Self {
         self.enabled_tools.insert(tool_name);
         self
     }
@@ -80,10 +80,10 @@ pub enum ManifestPatch {
         locale: Locale,
     },
     EnableTool {
-        tool_name: ProductToolName,
+        tool_name: BuiltInToolName,
     },
     DisableTool {
-        tool_name: ProductToolName,
+        tool_name: BuiltInToolName,
     },
     UpdateApprovalPolicy {
         policy: ApprovalPolicy,
@@ -123,7 +123,7 @@ impl ManifestPatch {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ProductToolName {
+pub enum BuiltInToolName {
     HostExecStart,
     HostExecRead,
     HostExecWait,
@@ -133,7 +133,7 @@ pub enum ProductToolName {
     ManifestProposePatch,
 }
 
-impl ProductToolName {
+impl BuiltInToolName {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::HostExecStart => "host.exec.start",
@@ -160,13 +160,13 @@ impl ProductToolName {
     }
 }
 
-impl std::fmt::Display for ProductToolName {
+impl std::fmt::Display for BuiltInToolName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl Serialize for ProductToolName {
+impl Serialize for BuiltInToolName {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -175,7 +175,7 @@ impl Serialize for ProductToolName {
     }
 }
 
-impl<'de> Deserialize<'de> for ProductToolName {
+impl<'de> Deserialize<'de> for BuiltInToolName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -293,7 +293,7 @@ impl std::fmt::Display for ManifestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(message) => write!(formatter, "invalid manifest patch: {message}"),
-            Self::UnknownTool(tool_name) => write!(formatter, "unknown product tool: {tool_name}"),
+            Self::UnknownTool(tool_name) => write!(formatter, "unknown built-in tool: {tool_name}"),
             Self::UnknownProposal(proposal_id) => {
                 write!(formatter, "unknown manifest proposal: {proposal_id}")
             }

@@ -13,8 +13,8 @@ pub use host_exec::{
 };
 pub use manifest::ManifestPatchProposalTool;
 pub use output_overflow::{
-    DEFAULT_MAX_INLINE_TOOL_OUTPUT_BYTES, DEFAULT_TOOL_OUTPUT_PREVIEW_EDGE_BYTES,
-    ProductToolOutputOverflowHook, ToolOutputOverflowConfig,
+    BuiltInToolOutputOverflowHook, DEFAULT_MAX_INLINE_TOOL_OUTPUT_BYTES,
+    DEFAULT_TOOL_OUTPUT_PREVIEW_EDGE_BYTES, ToolOutputOverflowConfig,
 };
 
 pub(crate) fn json_tool_output(value: Value) -> ToolOutput {

@@ -1,4 +1,4 @@
-use noloong_agent::{ApprovalPolicy, Catalog, Locale, ProductApprovalHook};
+use noloong_agent::{ApprovalPolicy, BuiltInApprovalHook, BuiltInToolName, Catalog, Locale};
 use noloong_agent_core::{
     BeforeToolCallContext, BeforeToolCallResult, CancellationToken, ToolCall, ToolCallHook,
     ToolPermissionOutcome, ToolSpec,
@@ -6,18 +6,24 @@ use noloong_agent_core::{
 
 #[tokio::test]
 async fn approval_host_exec_start_allow_deny() {
-    let allow = ProductApprovalHook::new(ApprovalPolicy::AllowAll, Catalog::new(Locale::En))
-        .before_tool_call(context("host.exec.start"), CancellationToken::new())
+    let allow = BuiltInApprovalHook::new(ApprovalPolicy::AllowAll, Catalog::new(Locale::En))
+        .before_tool_call(
+            context(BuiltInToolName::HostExecStart),
+            CancellationToken::new(),
+        )
         .await
         .unwrap()
         .unwrap();
-    let deny = ProductApprovalHook::new(
+    let deny = BuiltInApprovalHook::new(
         ApprovalPolicy::AutoReview {
             fallback_to_human: false,
         },
         Catalog::new(Locale::En),
     )
-    .before_tool_call(context("host.exec.start"), CancellationToken::new())
+    .before_tool_call(
+        context(BuiltInToolName::HostExecStart),
+        CancellationToken::new(),
+    )
     .await
     .unwrap()
     .unwrap();
@@ -38,13 +44,16 @@ async fn approval_host_exec_start_allow_deny() {
 
 #[tokio::test]
 async fn approval_auto_review_can_be_disabled_with_human_fallback() {
-    let result = ProductApprovalHook::new(
+    let result = BuiltInApprovalHook::new(
         ApprovalPolicy::AutoReview {
             fallback_to_human: true,
         },
         Catalog::new(Locale::En),
     )
-    .before_tool_call(context("host.exec.terminate"), CancellationToken::new())
+    .before_tool_call(
+        context(BuiltInToolName::HostExecTerminate),
+        CancellationToken::new(),
+    )
     .await
     .unwrap()
     .unwrap();
@@ -52,7 +61,8 @@ async fn approval_auto_review_can_be_disabled_with_human_fallback() {
     assert!(matches!(result, BeforeToolCallResult::Approval { .. }));
 }
 
-fn context(tool_name: &str) -> BeforeToolCallContext {
+fn context(tool_name: BuiltInToolName) -> BeforeToolCallContext {
+    let tool_name = tool_name.as_str();
     BeforeToolCallContext {
         run_id: "run-test".into(),
         turn_id: 1,

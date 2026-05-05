@@ -1,5 +1,5 @@
 use noloong_agent::{
-    AgentManifest, ApprovalPolicy, Locale, ManifestPatch, ManifestProposalStore, ProductToolName,
+    AgentManifest, ApprovalPolicy, BuiltInToolName, Locale, ManifestPatch, ManifestProposalStore,
 };
 
 #[test]
@@ -16,7 +16,7 @@ fn manifest_patch_applies_prompt_tools_policy() {
         .unwrap();
     manifest
         .apply_patch(ManifestPatch::EnableTool {
-            tool_name: ProductToolName::HostExecStart,
+            tool_name: BuiltInToolName::HostExecStart,
         })
         .unwrap();
     manifest
@@ -30,7 +30,7 @@ fn manifest_patch_applies_prompt_tools_policy() {
     assert!(
         manifest
             .enabled_tools
-            .contains(&ProductToolName::HostExecStart)
+            .contains(&BuiltInToolName::HostExecStart)
     );
     assert_eq!(manifest.approval_policy, ApprovalPolicy::AllowAll);
 }
@@ -56,7 +56,7 @@ fn manifest_patch_rejects_unknown_tool_names() {
     }))
     .unwrap_err();
 
-    assert!(error.to_string().contains("unknown product tool"));
+    assert!(error.to_string().contains("unknown built-in tool"));
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn manifest_proposal_store_records_without_applying() {
 
     let proposal = store
         .record_pending_proposal(ManifestPatch::EnableTool {
-            tool_name: ProductToolName::HostExecStart,
+            tool_name: BuiltInToolName::HostExecStart,
         })
         .unwrap();
 
@@ -90,7 +90,7 @@ fn manifest_proposal_store_records_without_applying() {
     assert!(
         !manifest
             .enabled_tools
-            .contains(&ProductToolName::HostExecStart)
+            .contains(&BuiltInToolName::HostExecStart)
     );
 }
 
@@ -99,7 +99,7 @@ fn manifest_proposal_store_approves_pending_proposals() {
     let store = ManifestProposalStore::default();
     let proposal = store
         .record_pending_proposal(ManifestPatch::EnableTool {
-            tool_name: ProductToolName::HostExecStart,
+            tool_name: BuiltInToolName::HostExecStart,
         })
         .unwrap();
 

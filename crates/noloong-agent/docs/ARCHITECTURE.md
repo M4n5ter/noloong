@@ -1,6 +1,6 @@
 # noloong-agent 架构说明
 
-`noloong-agent` 是基于 `noloong-agent-core` 的产品层 runtime。它负责宿主机环境认知、后台命令工具、自进化 manifest、approval reviewer 和面向模型的 i18n 文案；`noloong-agent-core` 继续作为不可自变异的 providerless kernel，不引入 host、shell、SSH、VMM 或 process manager 概念。
+`noloong-agent` 是基于 `noloong-agent-core` 的应用层 runtime。它负责宿主机环境认知、后台命令工具、自进化 manifest、approval reviewer 和面向模型的 i18n 文案；`noloong-agent-core` 继续作为不可自变异的 providerless kernel，不引入 host、shell、SSH、VMM 或 process manager 概念。
 
 ## 分层边界
 
@@ -9,8 +9,8 @@ noloong-agent
   owns AgentSession
   owns AgentManifest
   owns HostProcessManager
-  owns product approval reviewer
-  builds AgentRuntime per product turn
+  owns built-in approval reviewer
+  builds AgentRuntime per application turn
 
 noloong-agent-core
   owns event-sourced kernel
@@ -18,11 +18,11 @@ noloong-agent-core
   owns provider traits and tool approval events
 ```
 
-产品层通过 core 已有扩展点接入：
+应用层通过 core 已有扩展点接入：
 
-- `ContextProvider`：注入当前宿主机环境说明。
+- `ContextProvider`：注入当前宿主机环境说明。内置 provider id 是 `noloong.builtin.host-context`。
 - `ToolProvider`：暴露后台命令 lifecycle tools 和 manifest patch proposal tool。
-- `ToolCallHook`：统一处理命令执行、stdin 写入、终止命令和 manifest patch 的 approval。
+- `ToolCallHook`：统一处理命令执行、stdin 写入、终止命令和 manifest patch 的 approval。内置 approval hook id 是 `noloong.builtin.approval`。
 
 ## Host-first Execution
 
@@ -52,7 +52,7 @@ v1 默认在宿主机执行。SSH、VMM、`clone`、Lima、QEMU 等不是统一 
 
 `host.exec.start` 使用 optimistic foreground window。命令若在 `foregroundWaitMs` 内完成，tool result 直接返回 completed status；超过窗口则返回 running job handle，Agent 可以继续做其它事，并在后续 turn 中调用 `read`、`wait`、`write` 或 `terminate`。
 
-输出由 product 层 spool/ring buffer 保存。core event log 只记录 tool result 中的摘要、cursor、cap 和 truncation metadata，不把大 stdout/stderr chunk 全量写入 event store。
+输出由应用层 spool/ring buffer 保存。core event log 只记录 tool result 中的摘要、cursor、cap 和 truncation metadata，不把大 stdout/stderr chunk 全量写入 event store。
 
 ## Background Completion Steering
 
@@ -66,15 +66,15 @@ completion message 使用 `MessageRole::User`，不是 `MessageRole::ToolResult`
 
 ## Tool Output Overflow
 
-`AgentSession::runtime_builder()` 默认注册 `ProductToolOutputOverflowHook`。该 hook 位于 product 层，通过 core 的 `ToolCallHook::after_tool_call` 检查完整 `ToolOutput` 的 serialized byte size。
+`AgentSession::runtime_builder()` 默认注册 `BuiltInToolOutputOverflowHook`。该 hook 位于应用层，通过 core 的 `ToolCallHook::after_tool_call` 检查完整 `ToolOutput` 的 serialized byte size，hook id 是 `noloong.builtin.tool-output-overflow`。
 
 默认 inline 上限是 `64 KiB`。未超限的 tool output 保持不变；超限时，hook 会把原始 `ToolOutput` 写入 `${TMPDIR}/noloong-agent/tool-output/{runId}-{turnId}-{toolCallId}.json`，并把 inline tool result 改写成短提示，包含文件路径、原始字节数、inline limit、tool name、tool call id，以及按模型可读 output content 生成的 head/tail preview。这样 core event log、模型上下文和后续 provider request 都只携带 bounded output，而完整结果仍可由 Agent 通过 host command tooling 读取。
 
-如果写入临时 JSON 失败，hook 不会静默截断数据；它会返回 `is_error = true` 的 auditable tool output，并说明 overflow persistence failed。产品集成方可以通过 `AgentSessionBuilder::with_max_inline_tool_output_bytes(...)`、`with_tool_output_temp_dir(...)` 或 `with_tool_output_overflow_config(...)` 覆盖默认策略。
+如果写入临时 JSON 失败，hook 不会静默截断数据；它会返回 `is_error = true` 的 auditable tool output，并说明 overflow persistence failed。应用集成方可以通过 `AgentSessionBuilder::with_max_inline_tool_output_bytes(...)`、`with_tool_output_temp_dir(...)` 或 `with_tool_output_overflow_config(...)` 覆盖默认策略。
 
 ## Manifest Evolution
 
-`AgentManifest` 描述 product session 的可变配置：
+`AgentManifest` 描述 application session 的可变配置：
 
 - locale。
 - system prompt profile。
@@ -82,7 +82,7 @@ completion message 使用 `MessageRole::User`，不是 `MessageRole::ToolResult`
 - approval policy。
 - reserved phase profile。
 
-Agent 不能直接修改 live manifest，只能通过 `agent.manifest.propose_patch` 提交 proposal。proposal 进入 approval path；审批通过后，由 `AgentSession` 在下一 product turn 前应用 patch 并重建 core runtime。
+Agent 不能直接修改 live manifest，只能通过 `agent.manifest.propose_patch` 提交 proposal。proposal 进入 approval path；审批通过后，由 `AgentSession` 在下一 application turn 前应用 patch 并重建 core runtime。
 
 v1 真正支持的 patch 范围：
 
@@ -95,7 +95,7 @@ phase profile patch 只保留为 reserved schema，不执行。
 
 ## Approval Reviewer
 
-产品层 approval 通过 `ToolCallHook` 实现，复用 core 的 permission audit 和 pause/resume 事件路径。
+应用层 approval 通过 `ToolCallHook` 实现，复用 core 的 permission audit 和 pause/resume 事件路径。
 
 当前 policy：
 
@@ -107,7 +107,7 @@ phase profile patch 只保留为 reserved schema，不执行。
 
 ## i18n
 
-所有给模型看的 product-generated natural-language text 都走 typed catalog，包括 host context、tool description、permission description、approval prompt/reason、tool input/process/manifest error、background completion steering message，以及 oversized tool output rewrite message。v1 默认支持 English 和 Chinese。
+所有给模型看的 application-generated natural-language text 都走 typed catalog，包括 host context、tool description、permission description、approval prompt/reason、tool input/process/manifest error、background completion steering message，以及 oversized tool output rewrite message。v1 默认支持 English 和 Chinese。
 
 locale 解析顺序：
 

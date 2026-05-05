@@ -1,5 +1,5 @@
 use crate::{
-    Catalog, HostProcessManager, MessageKey, ProcessError, ProcessOutput, ProductToolName,
+    BuiltInToolName, Catalog, HostProcessManager, MessageKey, ProcessError, ProcessOutput,
     ReadOutputRequest, StartCommandRequest,
 };
 use noloong_agent_core::{
@@ -85,7 +85,7 @@ impl HostExecListTool {
 impl ToolProvider for HostExecStartTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
-            ProductToolName::HostExecStart.as_str(),
+            BuiltInToolName::HostExecStart.as_str(),
             self.catalog.message(MessageKey::HostExecStartDescription),
             json!({
                 "type": "object",
@@ -142,7 +142,7 @@ impl ToolProvider for HostExecStartTool {
 impl ToolProvider for HostExecReadTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
-            ProductToolName::HostExecRead.as_str(),
+            BuiltInToolName::HostExecRead.as_str(),
             self.catalog.message(MessageKey::HostExecReadDescription),
             json!({
                 "type": "object",
@@ -186,7 +186,7 @@ impl ToolProvider for HostExecReadTool {
 impl ToolProvider for HostExecWaitTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
-            ProductToolName::HostExecWait.as_str(),
+            BuiltInToolName::HostExecWait.as_str(),
             self.catalog.message(MessageKey::HostExecWaitDescription),
             json!({
                 "type": "object",
@@ -227,7 +227,7 @@ impl ToolProvider for HostExecWaitTool {
 impl ToolProvider for HostExecWriteTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
-            ProductToolName::HostExecWrite.as_str(),
+            BuiltInToolName::HostExecWrite.as_str(),
             self.catalog.message(MessageKey::HostExecWriteDescription),
             json!({
                 "type": "object",
@@ -268,7 +268,7 @@ impl ToolProvider for HostExecWriteTool {
 impl ToolProvider for HostExecTerminateTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
-            ProductToolName::HostExecTerminate.as_str(),
+            BuiltInToolName::HostExecTerminate.as_str(),
             self.catalog
                 .message(MessageKey::HostExecTerminateDescription),
             json!({
@@ -306,7 +306,7 @@ impl ToolProvider for HostExecTerminateTool {
 impl ToolProvider for HostExecListTool {
     fn spec(&self) -> ToolSpec {
         tool_spec(
-            ProductToolName::HostExecList.as_str(),
+            BuiltInToolName::HostExecList.as_str(),
             self.catalog.message(MessageKey::HostExecListDescription),
             json!({"type": "object", "properties": {}}),
             self.catalog

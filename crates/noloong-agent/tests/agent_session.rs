@@ -1,6 +1,6 @@
 use noloong_agent::{
-    AgentManifest, AgentSession, ApprovalPolicy, BackgroundCompletionConfig, Locale, ManifestPatch,
-    ProductToolName, StartCommandRequest,
+    AgentManifest, AgentSession, ApprovalPolicy, BackgroundCompletionConfig, BuiltInToolName,
+    Locale, ManifestPatch, StartCommandRequest,
 };
 use noloong_agent_core::{
     Agent, AgentMessage, BoxFuture, CancellationToken, ContentBlock, ModelProvider, ModelRequest,
@@ -34,7 +34,7 @@ fn agent_session_tool_patch_takes_effect_next_turn() {
     let proposal = session
         .proposal_store()
         .record_pending_proposal(ManifestPatch::EnableTool {
-            tool_name: ProductToolName::HostExecStart,
+            tool_name: BuiltInToolName::HostExecStart,
         })
         .unwrap();
     let applied = session.apply_approved_manifest_patches().unwrap();
@@ -57,7 +57,7 @@ fn agent_session_tool_patch_takes_effect_next_turn() {
 
 #[tokio::test]
 async fn agent_session_rebuild_preserves_background_jobs() {
-    let manifest = AgentManifest::default().with_enabled_tool(ProductToolName::HostExecStart);
+    let manifest = AgentManifest::default().with_enabled_tool(BuiltInToolName::HostExecStart);
     let session = AgentSession::builder().with_manifest(manifest).build();
     let manager = session.process_manager();
     let snapshot = manager

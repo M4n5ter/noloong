@@ -1,6 +1,6 @@
 use noloong_agent::{
-    Catalog, HostEnvironment, HostProcessCompletion, HostProcessManager, JobSnapshot, JobStatus,
-    Locale, MessageKey, ProcessOutput, ProductToolName, i18n::ToolOutputOverflowRender,
+    BuiltInToolName, Catalog, HostEnvironment, HostProcessCompletion, HostProcessManager,
+    JobSnapshot, JobStatus, Locale, MessageKey, ProcessOutput, i18n::ToolOutputOverflowRender,
 };
 use noloong_agent_core::ToolCall;
 use serde_json::json;
@@ -66,7 +66,7 @@ fn renders_agent_visible_dynamic_messages_in_chinese() {
     });
     let approval_prompt = catalog.render_approval_prompt(&ToolCall {
         id: "call-1".into(),
-        name: ProductToolName::HostExecStart.as_str().into(),
+        name: BuiltInToolName::HostExecStart.as_str().into(),
         arguments: json!({"command": "pwd"}),
     });
 
@@ -88,7 +88,7 @@ async fn host_tool_errors_use_catalog_locale() {
             run_id: "run-1".into(),
             turn_id: 1,
             tool_call_id: "call-1".into(),
-            tool_name: ProductToolName::HostExecStart.as_str().into(),
+            tool_name: BuiltInToolName::HostExecStart.as_str().into(),
             arguments: json!({"command": ""}),
             state: noloong_agent_core::AgentState::default(),
         },

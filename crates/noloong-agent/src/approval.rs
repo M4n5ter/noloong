@@ -27,13 +27,13 @@ pub trait ApprovalReviewer: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct ProductApprovalHook {
+pub struct BuiltInApprovalHook {
     policy: ApprovalPolicy,
     catalog: Catalog,
     reviewer: Option<Arc<dyn ApprovalReviewer>>,
 }
 
-impl ProductApprovalHook {
+impl BuiltInApprovalHook {
     pub fn new(policy: ApprovalPolicy, catalog: Catalog) -> Self {
         Self {
             policy,
@@ -48,9 +48,9 @@ impl ProductApprovalHook {
     }
 }
 
-impl ToolCallHook for ProductApprovalHook {
+impl ToolCallHook for BuiltInApprovalHook {
     fn id(&self) -> Option<&str> {
-        Some("noloong.product.approval")
+        Some("noloong.builtin.approval")
     }
 
     fn before_tool_call<'a>(
@@ -94,7 +94,7 @@ impl ToolCallHook for ProductApprovalHook {
     }
 }
 
-impl ProductApprovalHook {
+impl BuiltInApprovalHook {
     fn approval_request(
         &self,
         context: &BeforeToolCallContext,

@@ -1,225 +1,213 @@
-# Implementation Plan: Background Completion Injection
+# Implementation Plan: Remove Legacy Terminology from `noloong-agent`
 
 ## Overview
 
-让 `noloong-agent` 的后台命令 job 在完成后主动排队注入结果，但不自动启动 continuation。完成事件进入现有 steering 语义：如果 Agent 正在运行，则在当前安全 turn 边界注入；如果 Agent 空闲，则在下一次 `prompt` / `continue_run` 开始时、第一轮模型请求前注入。
+`crates/noloong-agent` previously used a legacy wording family for crate-provided runtime, hooks, tools, and model-visible text. That wording was not a good long-term abstraction because it made application-layer responsibilities sound like a business-domain layer, and it had already entered public Rust APIs, hook/context ids, i18n text, errors, tests, and docs.
 
-同时增加 product-level 通用工具输出溢出处理：任意工具返回结果过长时，通过 `after_tool_call` hook 将完整 `ToolOutput` 写入临时 JSON 文件，并把 inline tool result 改写为短提示，告诉 Agent 完整结果路径和读取方式。
+This plan performs a full rename. There are no compatibility aliases and no legacy hook id prefixes. Rust APIs use `BuiltIn*` for crate-provided capabilities; architecture prose uses `application layer` / `应用层` for the integration layer above core.
 
 ## Architecture Decisions
 
-- 不自动 continuation：后台任务完成只调用 `agent.steer(...)` 排队，不主动调用 `prompt`、`continue_run` 或模型 provider。
-- completion message 使用 `MessageRole::User`，不是 `ToolResult`。原因是后台 completion 是异步外部观察，不再对应当前 provider transcript 中合法成对的 `ToolCall`。
-- idle queued steering 必须在下一次 run 的第一轮模型请求前注入，并且排在新的用户 prompt 之前，确保真实用户输入仍是最新消息。
-- completion preview 默认只注入 bounded tail output，默认上限 `16 KiB`；完整历史仍通过 `host.exec.read` 按 cursor 读取。
-- 通用工具输出外置放在 `noloong-agent`，不放进 `noloong-agent-core`，避免 core 默认绑定宿主机文件系统策略。
-- tool output inline 默认上限 `64 KiB`；超限时完整输出写入 `${TMPDIR}/noloong-agent/tool-output/{runId}-{turnId}-{toolCallId}.json`。
+- No compatibility burden: remove old Rust type names and old hook id prefixes without deprecated aliases.
+- Rust public API uses `BuiltIn*`: `BuiltInApprovalHook`, `BuiltInToolName`, and `BuiltInToolOutputOverflowHook`.
+- Documentation uses application layer / 应用层 for architecture prose; `built-in` only describes crate-provided tools, hooks, and enums.
+- Tool names stay unchanged: `host.exec.*` and `agent.manifest.propose_patch` are protocol names, not terminology labels.
+- `noloong-agent-core` is only updated if it has stale references to the `noloong-agent` API; core behavior and public API stay unchanged.
 
 ## Task List
 
-### Phase 1: Core Steering Semantics
+### Phase 1: Rust API Rename
 
-#### Task 1: Drain queued steering before the first turn
+#### Task 1: Rename public built-in types
 
-**Description:** 调整 `noloong-agent-core` run loop，使 run 开始前已存在的 steering messages 在第一轮 `model_request` 前进入 state。该逻辑只改变 queued steering 的注入时机，不改变 follow-up 语义，也不触发自动 run。
+**Description:** Rename the `noloong-agent` public Rust API to `BuiltIn*` names and update all internal references, re-exports, and test imports. This task handles Rust symbols only.
 
 **Acceptance criteria:**
 
-- [ ] `agent.steer(message)` 在 `agent.prompt(...)` 前调用时，模型第一轮请求能看到该 steering message。
-- [ ] 预先排队的 steering message 顺序在新的 user prompt 之前。
-- [ ] active run 中途排队的 steering 仍在当前 turn 完成后的安全边界注入。
+- [x] Approval hook type is `BuiltInApprovalHook`.
+- [x] Built-in tool enum is `BuiltInToolName`.
+- [x] Tool output overflow hook type is `BuiltInToolOutputOverflowHook`.
+- [x] Private host context provider is `BuiltInHostContextProvider`.
 
 **Verification:**
 
-- [ ] Add core test: idle steering is injected before first model request.
-- [ ] Existing tests still pass: `steering_is_injected_after_tool_batch` and `steering_waits_until_tool_batch_completes`.
-- [ ] `cargo test -p noloong-agent-core agent`
+- [x] Rust symbol audit has no legacy type-name hits in `crates/noloong-agent/src` or `crates/noloong-agent/tests`.
+- [x] `cargo test -p noloong-agent`
 
 **Dependencies:** None
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/runtime/run_loop.rs`
-- `crates/noloong-agent-core/tests/agent.rs`
-
-**Estimated scope:** Medium
-
-### Checkpoint: Core Queue Behavior
-
-- [ ] `cargo test -p noloong-agent-core agent`
-- [ ] `cargo test -p noloong-agent-core conformance`
-- [ ] `cargo clippy -p noloong-agent-core --all-targets --all-features -- -D warnings`
-
-### Phase 2: Process Completion Events
-
-#### Task 2: Add terminal process event subscription
-
-**Description:** 为 `HostProcessManager` 增加轻量 subscription API，在 job 进入终态后发布 `HostProcessEvent::JobCompleted`。事件必须只发布一次，并在 stdout/stderr reader drain 后生成，保证 completion preview 能包含最终输出。
-
-**Acceptance criteria:**
-
-- [ ] `Exited`、`Terminated`、`Failed` 都会发布一次 `JobCompleted`。
-- [ ] 同一 job 不会重复发布 completion event。
-- [ ] completion snapshot 包含 job id、command、shell、cwd、status、started/ended time、cursor、dropped cursor 和 bounded tail chunks。
-
-**Verification:**
-
-- [ ] `cargo test -p noloong-agent host_process_completion_event_exited`
-- [ ] `cargo test -p noloong-agent host_process_completion_event_terminated`
-- [ ] `cargo test -p noloong-agent host_process_completion_event_is_single_delivery`
-
-**Dependencies:** None
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/process/manager.rs`
-- `crates/noloong-agent/tests/host_process_manager.rs`
-
-**Estimated scope:** Medium
-
-#### Task 3: Render completion events as steering messages
-
-**Description:** 在 product layer 中把 `HostProcessEvent::JobCompleted` 渲染为 model-readable `AgentMessage`，并提供 `AgentSession::attach_background_completion_steering(...)` 将 process manager completion events 连接到 core `Agent::steer(...)`。
-
-**Acceptance criteria:**
-
-- [ ] 空闲时 job 完成只排队 steering，不自动启动模型。
-- [ ] 下一次 `prompt` 或 `continue_run` 的第一轮模型请求能看到 completion message。
-- [ ] active run 中 job 完成时，completion message 在安全 turn 边界注入。
-- [ ] message id 使用 `host-exec-completed-{jobId}`，metadata 包含 `noloong.kind = "host.exec.completed"` 和 `jobId`。
-- [ ] message content 是 bounded text，不使用 `ToolResult` role，不伪造 `tool_call_id`。
-
-**Verification:**
-
-- [ ] Product integration test: idle completion is visible in the next prompt's first model request.
-- [ ] Product integration test: idle completion does not auto-run the model.
-- [ ] Product integration test: active-run completion uses steering boundary behavior.
-- [ ] Product integration test: completion preview respects the `16 KiB` default limit.
-
-**Dependencies:** Task 1, Task 2
-
-**Files likely touched:**
-
+- `crates/noloong-agent/src/approval.rs`
+- `crates/noloong-agent/src/manifest.rs`
 - `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/src/process/manager.rs`
-- `crates/noloong-agent/tests/agent_session.rs`
+- `crates/noloong-agent/src/tools/`
+- `crates/noloong-agent/tests/`
 
 **Estimated scope:** Medium
 
-### Checkpoint: Background Completion Flow
+#### Task 2: Rename built-in hook and context ids
 
-- [ ] `cargo test -p noloong-agent host_process_completion`
-- [ ] `cargo test -p noloong-agent agent_session`
-- [ ] Manual smoke: start `sleep 0.1; printf done`, wait until idle, then send next prompt and confirm model receives completion context.
-
-### Phase 3: Generic Tool Output Overflow
-
-#### Task 4: Add product tool output overflow hook
-
-**Description:** 新增 `ProductToolOutputOverflowHook`，实现 `ToolCallHook::after_tool_call`。hook 检查完整 `ToolOutput` 的 serialized byte size；超过默认 `64 KiB` 时，将原始 output 写入临时 JSON 文件，并把 inline output 改写为短提示和 metadata。
+**Description:** Rename runtime-facing ids to the `noloong.builtin.*` prefix and update tests. Old ids are not retained.
 
 **Acceptance criteria:**
 
-- [ ] 未超限 output 不被修改。
-- [ ] 超限 output 写入 `${TMPDIR}/noloong-agent/tool-output/{runId}-{turnId}-{toolCallId}.json`。
-- [ ] 改写后的 inline output 包含 path、original byte size、inline byte limit、tool name、tool call id。
-- [ ] 写文件失败时不静默丢数据；返回 `is_error = true` 的 auditable output，说明 overflow persistence failed。
+- [x] Approval hook id is `noloong.builtin.approval`.
+- [x] Host context provider id is `noloong.builtin.host-context`.
+- [x] Tool output overflow hook id is `noloong.builtin.tool-output-overflow`.
 
 **Verification:**
 
-- [ ] Unit test: small output passes through unchanged.
-- [ ] Unit test: large output is persisted and inline output is bounded.
-- [ ] Unit test: persisted JSON can deserialize back to original `ToolOutput`.
+- [x] Hook id audit has no legacy prefix hits in `crates/noloong-agent`.
+- [x] `cargo test -p noloong-agent approval tool_output_overflow`
 
-**Dependencies:** None
-
-**Files likely touched:**
-
-- `crates/noloong-agent/src/tools/output_overflow.rs`
-- `crates/noloong-agent/src/tools/mod.rs`
-- `crates/noloong-agent/tests/tool_output_overflow.rs`
-
-**Estimated scope:** Medium
-
-#### Task 5: Register overflow hook in product runtime
-
-**Description:** 让 `AgentSession::runtime_builder()` 默认注册 `ProductToolOutputOverflowHook`，并通过 `AgentSessionBuilder` 暴露可配置 limit 和 temp root。默认配置应能直接工作，测试可注入临时目录。
-
-**Acceptance criteria:**
-
-- [ ] 默认 product runtime 自动应用 overflow hook。
-- [ ] `AgentSessionBuilder` 支持覆盖 `max_inline_tool_output_bytes` 和 `tool_output_temp_dir`。
-- [ ] rewritten output 明确告诉 Agent：完整工具结果因太长已外置，需要用路径读取完整 JSON。
-
-**Verification:**
-
-- [ ] Integration test: runtime tool result over limit becomes short path prompt.
-- [ ] Integration test: custom temp dir is respected.
-- [ ] `cargo test -p noloong-agent tool_output_overflow`
-
-**Dependencies:** Task 4
+**Dependencies:** Task 1
 
 **Files likely touched:**
 
+- `crates/noloong-agent/src/approval.rs`
 - `crates/noloong-agent/src/session.rs`
 - `crates/noloong-agent/src/tools/output_overflow.rs`
-- `crates/noloong-agent/tests/tool_output_overflow.rs`
+- `crates/noloong-agent/tests/`
 
 **Estimated scope:** Small
 
-### Checkpoint: Tool Output Safety
+### Checkpoint: API and ID Rename
 
-- [ ] `cargo test -p noloong-agent tool_output_overflow`
-- [ ] Manual smoke: dummy tool returns large JSON, Agent sees path prompt, temp file contains full output.
-- [ ] Confirm core event log stores only bounded rewritten output for oversized tool results.
+- [x] `cargo fmt --check`
+- [x] `cargo test -p noloong-agent`
+- [x] `cargo clippy -p noloong-agent --all-targets --all-features -- -D warnings`
 
-### Phase 4: Documentation and Full Verification
+### Phase 2: Text and Error Rename
 
-#### Task 6: Update architecture documentation
+#### Task 3: Rename i18n and model-visible wording
 
-**Description:** 更新 product architecture docs，明确后台 completion injection 语义、非自动 continuation 策略、completion preview limit、tool output overflow policy 和 `MessageRole::User` 的原因。
+**Description:** Update `Catalog` text that can enter model context, approval requests, tool output, or errors. English uses application / built-in wording; Chinese uses 应用层 / 内置工具.
 
 **Acceptance criteria:**
 
-- [ ] Docs state that background completion queues steering and never starts a run by itself.
-- [ ] Docs state queued completion is injected before the next run's first model request.
-- [ ] Docs state default limits: completion preview `16 KiB`, tool output inline `64 KiB`.
-- [ ] Docs explain why completion messages are user-role observations instead of tool results.
+- [x] Approval-policy text uses application wording.
+- [x] Manifest permission text uses application agent wording.
+- [x] Unknown tool errors use built-in tool wording.
+- [x] Source text audit has no legacy terminology hits in `crates/noloong-agent/src`.
 
 **Verification:**
 
-- [ ] Review `crates/noloong-agent/docs/ARCHITECTURE.md`.
-- [ ] `rg -n "auto continuation|MessageRole::ToolResult" crates/noloong-agent/docs/ARCHITECTURE.md` confirms the intended semantics are documented.
+- [x] Source text audit passes for `crates/noloong-agent/src`.
+- [x] `cargo test -p noloong-agent --test i18n`
 
-**Dependencies:** Tasks 1-5
+**Dependencies:** Task 1
+
+**Files likely touched:**
+
+- `crates/noloong-agent/src/i18n.rs`
+- `crates/noloong-agent/src/manifest.rs`
+- `crates/noloong-agent/tests/i18n.rs`
+- `crates/noloong-agent/tests/manifest.rs`
+
+**Estimated scope:** Medium
+
+#### Task 4: Rename test data and assertions
+
+**Description:** Update test imports, expected strings, and search assertions to verify the new terminology rather than avoiding the old strings.
+
+**Acceptance criteria:**
+
+- [x] Tests import `BuiltIn*` APIs.
+- [x] Manifest error assertions expect built-in wording.
+- [x] i18n tests cover the new English and Chinese wording.
+
+**Verification:**
+
+- [x] Test text audit has no legacy terminology hits in `crates/noloong-agent/tests`.
+- [x] `cargo test -p noloong-agent`
+
+**Dependencies:** Task 1, Task 3
+
+**Files likely touched:**
+
+- `crates/noloong-agent/tests/approval.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
+- `crates/noloong-agent/tests/i18n.rs`
+- `crates/noloong-agent/tests/manifest.rs`
+- `crates/noloong-agent/tests/tool_output_overflow.rs`
+
+**Estimated scope:** Medium
+
+### Checkpoint: Text Rename
+
+- [x] `cargo test -p noloong-agent`
+- [x] Source and test text audit passes for `crates/noloong-agent`.
+
+### Phase 3: Documentation and Plan Rename
+
+#### Task 5: Update architecture documentation
+
+**Description:** Update `crates/noloong-agent/docs/ARCHITECTURE.md` to use application layer wording, `BuiltIn*` type names, and `noloong.builtin.*` ids.
+
+**Acceptance criteria:**
+
+- [x] Overview no longer uses legacy wording.
+- [x] Architecture diagram uses application / built-in wording.
+- [x] tool output overflow, approval, manifest evolution, and i18n sections use the new terminology.
+
+**Verification:**
+
+- [x] Documentation text audit passes for `crates/noloong-agent/docs/ARCHITECTURE.md`.
+- [x] Manual doc review confirms terminology is consistent with public API.
+
+**Dependencies:** Tasks 1-4
 
 **Files likely touched:**
 
 - `crates/noloong-agent/docs/ARCHITECTURE.md`
+
+**Estimated scope:** Small
+
+#### Task 6: Update cross-doc references and current plan
+
+**Description:** Ensure `plans/CURRENT_PLAN.md` and relevant cross-doc references do not preserve stale terminology. Do not change core public APIs.
+
+**Acceptance criteria:**
+
+- [x] `plans/CURRENT_PLAN.md` uses `BuiltIn*` / application layer terminology.
+- [x] Any stale `noloong-agent` API references in core docs are removed.
+- [x] Core public API is unchanged.
+
+**Verification:**
+
+- [x] Plan text audit has no legacy terminology hits.
+- [x] `git diff --check`
+
+**Dependencies:** Task 5
+
+**Files likely touched:**
+
 - `plans/CURRENT_PLAN.md`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
 
 **Estimated scope:** Small
 
 ### Final Checkpoint
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo test -p noloong-agent`
-- [ ] `cargo test -p noloong-agent --examples`
-- [ ] `cargo test -p noloong-agent-core agent`
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo nextest run --workspace --all-features -j 1`
-- [ ] `git diff --check`
+- [x] `cargo fmt --check`
+- [x] `cargo test -p noloong-agent`
+- [x] `cargo test -p noloong-agent-core --test agent`
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- [x] `cargo nextest run --workspace --all-features -j 1`
+- [x] Final terminology audit passes for `crates/noloong-agent` and `plans/CURRENT_PLAN.md`.
+- [x] `git diff --check`
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Completion event fires before stdout/stderr drain | Medium | Emit `JobCompleted` only after child exit and output readers reach EOF or terminal error. |
-| Queued steering changes first-turn ordering | Medium | Add core tests that lock ordering: queued completion before new user prompt, active steering unchanged. |
-| Large tool output still enters event log | High | Register overflow hook before product tools are used; integration test against event/state size and persisted file. |
-| Temp file path leaks sensitive data location | Medium | Store under a predictable product temp root and include only required path metadata in model-visible output. |
-| `ToolResult` temptation breaks provider contracts | High | Use `MessageRole::User` for async observations and document the rationale. |
+| Public API rename breaks downstream code | Medium | User chose no compatibility burden; keep rename complete and avoid aliases that prolong old terminology. |
+| Stable id rename breaks persisted audit expectations | Medium | Update tests and docs in the same change; no migration path because old ids are intentionally removed. |
+| Search misses stale lowercase text in docs or i18n | Medium | Final terminology audit covers source, tests, docs, and plan. |
+| `BuiltIn` overused in prose | Low | Use `BuiltIn*` for Rust types, but `application layer` / `应用层` in architecture prose. |
+| Core docs contain unrelated business-domain language | Low | Only update stale `noloong-agent` terminology; do not rewrite unrelated core architecture language unless it conflicts with new names. |
 
 ## Open Questions
 
-None. Defaults are: no auto continuation, next-run queued steering injection, product-level overflow hook, `16 KiB` completion preview, `64 KiB` inline tool output limit.
+None. Defaults are locked: full rename, no compatibility aliases, `BuiltIn*` Rust API, `noloong.builtin.*` ids, and application layer wording in documentation.

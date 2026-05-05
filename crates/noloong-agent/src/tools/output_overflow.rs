@@ -35,12 +35,12 @@ impl Default for ToolOutputOverflowConfig {
 }
 
 #[derive(Clone, Debug)]
-pub struct ProductToolOutputOverflowHook {
+pub struct BuiltInToolOutputOverflowHook {
     config: ToolOutputOverflowConfig,
     catalog: Catalog,
 }
 
-impl ProductToolOutputOverflowHook {
+impl BuiltInToolOutputOverflowHook {
     pub fn new(config: ToolOutputOverflowConfig) -> Self {
         Self {
             config,
@@ -58,9 +58,9 @@ impl ProductToolOutputOverflowHook {
     }
 }
 
-impl ToolCallHook for ProductToolOutputOverflowHook {
+impl ToolCallHook for BuiltInToolOutputOverflowHook {
     fn id(&self) -> Option<&str> {
-        Some("noloong.product.tool-output-overflow")
+        Some("noloong.builtin.tool-output-overflow")
     }
 
     fn after_tool_call<'a>(

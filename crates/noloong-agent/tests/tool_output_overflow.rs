@@ -1,5 +1,5 @@
 use noloong_agent::{
-    AgentManifest, AgentSession, ApprovalPolicy, Catalog, Locale, ProductToolOutputOverflowHook,
+    AgentManifest, AgentSession, ApprovalPolicy, BuiltInToolOutputOverflowHook, Catalog, Locale,
     ToolOutputOverflowConfig,
 };
 use noloong_agent_core::{
@@ -19,7 +19,7 @@ use std::{
 
 #[tokio::test]
 async fn small_tool_output_stays_inline() {
-    let hook = ProductToolOutputOverflowHook::new(ToolOutputOverflowConfig {
+    let hook = BuiltInToolOutputOverflowHook::new(ToolOutputOverflowConfig {
         max_inline_bytes: 1024,
         temp_dir: unique_temp_dir("small"),
         ..Default::default()
@@ -35,7 +35,7 @@ async fn small_tool_output_stays_inline() {
 #[tokio::test]
 async fn large_tool_output_is_persisted_and_rewritten() {
     let temp_dir = unique_temp_dir("large");
-    let hook = ProductToolOutputOverflowHook::new(ToolOutputOverflowConfig {
+    let hook = BuiltInToolOutputOverflowHook::new(ToolOutputOverflowConfig {
         max_inline_bytes: 128,
         preview_head_bytes: 64,
         preview_tail_bytes: 64,
@@ -78,7 +78,7 @@ async fn large_tool_output_is_persisted_and_rewritten() {
 
 #[tokio::test]
 async fn overflow_hook_uses_catalog_locale() {
-    let hook = ProductToolOutputOverflowHook::new(ToolOutputOverflowConfig {
+    let hook = BuiltInToolOutputOverflowHook::new(ToolOutputOverflowConfig {
         max_inline_bytes: 128,
         preview_head_bytes: 64,
         preview_tail_bytes: 64,

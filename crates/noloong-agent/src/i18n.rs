@@ -113,8 +113,8 @@ impl Catalog {
 
     pub fn approval_allow_reason(&self) -> &'static str {
         match self.locale {
-            Locale::En => "allowed by product approval policy",
-            Locale::Zh => "产品审批策略已允许该工具调用",
+            Locale::En => "allowed by application approval policy",
+            Locale::Zh => "应用审批策略已允许该工具调用",
         }
     }
 
@@ -416,7 +416,7 @@ impl Catalog {
                 format!("无效的 manifest 补丁：{message}")
             }
             (Locale::Zh, ManifestError::UnknownTool(tool_name)) => {
-                format!("未知产品工具：{tool_name}")
+                format!("未知内置工具：{tool_name}")
             }
             (Locale::Zh, ManifestError::UnknownProposal(proposal_id)) => {
                 format!("未知 manifest 提案：{proposal_id}")
@@ -499,12 +499,10 @@ fn en_message(key: MessageKey) -> &'static str {
         }
         MessageKey::HostExecListDescription => "List background host command jobs in this session.",
         MessageKey::ManifestPatchDescription => {
-            "Propose a manifest patch for the next product turn; it does not apply until approved."
+            "Propose a manifest patch for the next turn; it does not apply until approved."
         }
         MessageKey::HostCommandPermissionDescription => "Execute or control host commands.",
-        MessageKey::ManifestPatchPermissionDescription => {
-            "Propose changes to the product agent manifest."
-        }
+        MessageKey::ManifestPatchPermissionDescription => "Propose changes to the agent manifest.",
         MessageKey::ApprovalPrompt => "Review whether this tool call should be allowed.",
     }
 }
@@ -521,10 +519,10 @@ fn zh_message(key: MessageKey) -> &'static str {
         MessageKey::HostExecTerminateDescription => "终止后台宿主机命令，并返回其最新状态。",
         MessageKey::HostExecListDescription => "列出当前 session 中的后台宿主机命令 job。",
         MessageKey::ManifestPatchDescription => {
-            "为下一个 product turn 提交 manifest patch 提案；审批前不会生效。"
+            "为下一轮提交 manifest patch 提案；审批前不会生效。"
         }
         MessageKey::HostCommandPermissionDescription => "执行或控制宿主机命令。",
-        MessageKey::ManifestPatchPermissionDescription => "提交 product agent manifest 变更提案。",
+        MessageKey::ManifestPatchPermissionDescription => "提交 agent manifest 变更提案。",
         MessageKey::ApprovalPrompt => "判断这个工具调用是否应该被允许。",
     }
 }

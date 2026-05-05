@@ -1,7 +1,7 @@
 use crate::{
-    AgentManifest, Catalog, HostEnvironment, HostProcessCompletion, HostProcessEvent,
-    HostProcessManager, HostProcessSubscription, ManifestProposalStore, ProductApprovalHook,
-    ProductToolName, ProductToolOutputOverflowHook, ToolOutputOverflowConfig, text,
+    AgentManifest, BuiltInApprovalHook, BuiltInToolName, BuiltInToolOutputOverflowHook, Catalog,
+    HostEnvironment, HostProcessCompletion, HostProcessEvent, HostProcessManager,
+    HostProcessSubscription, ManifestProposalStore, ToolOutputOverflowConfig, text,
     tools::{
         HostExecListTool, HostExecReadTool, HostExecStartTool, HostExecTerminateTool,
         HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
@@ -104,16 +104,16 @@ impl AgentSession {
         let manifest = self.manifest();
         let catalog = Catalog::new(manifest.locale);
         let mut builder = AgentRuntime::builder()
-            .with_context_provider(Arc::new(ProductHostContextProvider::new(
+            .with_context_provider(Arc::new(BuiltInHostContextProvider::new(
                 self.inner.environment.clone(),
                 catalog.clone(),
             )))
-            .with_tool_hook(Arc::new(ProductApprovalHook::new(
+            .with_tool_hook(Arc::new(BuiltInApprovalHook::new(
                 manifest.approval_policy.clone(),
                 catalog.clone(),
             )))
             .with_tool_hook(Arc::new(
-                ProductToolOutputOverflowHook::new(self.inner.tool_output_overflow_config.clone())
+                BuiltInToolOutputOverflowHook::new(self.inner.tool_output_overflow_config.clone())
                     .with_catalog(catalog.clone()),
             ));
         for tool in self.tools_for_manifest(&manifest, &catalog) {
@@ -156,33 +156,33 @@ impl AgentSession {
             .collect()
     }
 
-    fn tool_for_name(&self, name: ProductToolName, catalog: &Catalog) -> Arc<dyn ToolProvider> {
+    fn tool_for_name(&self, name: BuiltInToolName, catalog: &Catalog) -> Arc<dyn ToolProvider> {
         match name {
-            ProductToolName::HostExecStart => Arc::new(HostExecStartTool::new(
+            BuiltInToolName::HostExecStart => Arc::new(HostExecStartTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
             )),
-            ProductToolName::HostExecRead => Arc::new(HostExecReadTool::new(
+            BuiltInToolName::HostExecRead => Arc::new(HostExecReadTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
             )),
-            ProductToolName::HostExecWait => Arc::new(HostExecWaitTool::new(
+            BuiltInToolName::HostExecWait => Arc::new(HostExecWaitTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
             )),
-            ProductToolName::HostExecWrite => Arc::new(HostExecWriteTool::new(
+            BuiltInToolName::HostExecWrite => Arc::new(HostExecWriteTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
             )),
-            ProductToolName::HostExecTerminate => Arc::new(HostExecTerminateTool::new(
+            BuiltInToolName::HostExecTerminate => Arc::new(HostExecTerminateTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
             )),
-            ProductToolName::HostExecList => Arc::new(HostExecListTool::new(
+            BuiltInToolName::HostExecList => Arc::new(HostExecListTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
             )),
-            ProductToolName::ManifestProposePatch => Arc::new(ManifestPatchProposalTool::new(
+            BuiltInToolName::ManifestProposePatch => Arc::new(ManifestPatchProposalTool::new(
                 self.inner.proposal_store.clone(),
                 catalog.clone(),
             )),
@@ -284,12 +284,12 @@ impl AgentSessionBuilder {
     }
 }
 
-struct ProductHostContextProvider {
+struct BuiltInHostContextProvider {
     environment: HostEnvironment,
     catalog: Catalog,
 }
 
-impl ProductHostContextProvider {
+impl BuiltInHostContextProvider {
     fn new(environment: HostEnvironment, catalog: Catalog) -> Self {
         Self {
             environment,
@@ -298,9 +298,9 @@ impl ProductHostContextProvider {
     }
 }
 
-impl noloong_agent_core::ContextProvider for ProductHostContextProvider {
+impl noloong_agent_core::ContextProvider for BuiltInHostContextProvider {
     fn id(&self) -> &str {
-        "noloong.product.host-context"
+        "noloong.builtin.host-context"
     }
 
     fn prepare_context<'a>(

@@ -1,4 +1,4 @@
-use crate::{Catalog, ManifestPatch, ManifestProposalStore, MessageKey, ProductToolName};
+use crate::{BuiltInToolName, Catalog, ManifestPatch, ManifestProposalStore, MessageKey};
 use noloong_agent_core::{
     BoxFuture, CancellationToken, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
 };
@@ -21,7 +21,7 @@ impl ManifestPatchProposalTool {
 impl ToolProvider for ManifestPatchProposalTool {
     fn spec(&self) -> ToolSpec {
         sequential_tool_spec(
-            ProductToolName::ManifestProposePatch.as_str(),
+            BuiltInToolName::ManifestProposePatch.as_str(),
             self.catalog.message(MessageKey::ManifestPatchDescription),
             json!({
                 "type": "object",
