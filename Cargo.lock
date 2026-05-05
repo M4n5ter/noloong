@@ -806,6 +806,16 @@ name = "noloong"
 version = "0.1.0"
 
 [[package]]
+name = "noloong-agent"
+version = "0.1.0"
+dependencies = [
+ "noloong-agent-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "noloong-agent-core"
 version = "0.1.0"
 dependencies = [

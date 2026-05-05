@@ -1,0 +1,13 @@
+[package]
+name = "noloong-agent"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+noloong-agent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

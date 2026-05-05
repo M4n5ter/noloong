@@ -205,7 +205,9 @@ Provider mapping references:
 
 ## Verification
 
-The conformance source of truth is [`plans/CONFORMANCE_MATRIX.md`](plans/CONFORMANCE_MATRIX.md). Update that matrix whenever a core capability, invariant, or verification command changes.
+The conformance source of truth is [`crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md`](crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md). Update that matrix whenever a core capability, invariant, or verification command changes.
+
+The product-layer agent runtime lives in [`crates/noloong-agent`](crates/noloong-agent). Its architecture notes are in [`crates/noloong-agent/docs/ARCHITECTURE.md`](crates/noloong-agent/docs/ARCHITECTURE.md). The first product-layer execution primitive is a host-first background command lifecycle with `host.exec.start/read/wait/write/terminate/list`; `host.exec.start` uses a short foreground window before falling back to a background job handle.
 
 ```bash
 cargo fmt --check

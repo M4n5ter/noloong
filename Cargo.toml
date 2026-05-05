@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/noloong-agent-core"]
+members = [".", "crates/noloong-agent-core", "crates/noloong-agent"]
 resolver = "3"
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace.dependencies]
 noloong-agent-core = { path = "crates/noloong-agent-core" }
+noloong-agent = { path = "crates/noloong-agent" }
 bytes = "1.11"
 memchr = "2.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

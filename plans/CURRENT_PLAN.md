@@ -1,234 +1,364 @@
-# Implementation Plan: Toasty-backed SQLite EventStore
+# Implementation Plan: Host-first Evolvable Agent
 
 ## Overview
 
-本轮实现一个内置的 SQLite 持久化 `EventStore`，用于替代仅内存的 `InMemoryEventStore`，并为后续 PostgreSQL backend 留出顺滑迁移路径。v1 明确采用 SQL-first，而不是 OpenDAL-first：OpenDAL 更适合作为未来 object archive/object backend 的统一访问层，不承担强一致 append event log 的主存储语义。
+新增 `noloong-agent` 产品层，基于 `noloong-agent-core` 构建宿主机优先的自进化 Agent。v1 的主路径是后台命令工具：命令启动后不阻塞，Agent 可以跨 product turn 读取、等待、写入或终止进程；system prompt、tools、approval policy 通过 manifest patch 在审批后于下一 product turn 生效。
 
-当前仓库状态：
+当前 `noloong-agent-core` 已提供：
 
-- `EventStore` 只有 `append(event)` 和 `load(run_id)` 两个方法。
-- `InMemoryEventStore` 当前用 `BTreeMap<RunId, Vec<AgentEvent>>` 保存事件。
-- runtime 依赖事件可按 `sequence` replay，并且 paused approval resume 会从 store load event log 后继续追加事件。
-- `AgentEvent` 已完整 `Serialize` / `Deserialize`，适合先以 JSON payload 持久化。
+- event-sourced runtime、phase graph、provider traits、tool permission/approval hooks。
+- JSON-RPC extension bridge、context compaction、built-in model providers、SQLite event store。
+- `AgentEffect::SetAvailableTools`、`ContextProvider`、`ToolProvider`、`ToolCallHook` 等产品层可复用扩展点。
 
-Toasty 参考资料：
+本轮不把 host、shell、SSH、VMM、process manager 概念放进 `noloong-agent-core`。SSH/VMM 暂时是宿主机命令能力：Agent 可以通过 `host.exec.start` 启动 `ssh`、`lima`、`qemu`、`clone` 等命令自行操作。
 
-- GitHub: <https://github.com/tokio-rs/toasty/tree/main>
-- docs.rs: <https://docs.rs/toasty>
-- Toasty guide: <https://tokio-rs.github.io/toasty/nightly/guide/>
-- Database setup guide: <https://tokio-rs.github.io/toasty/nightly/guide/database-setup.html>
-- Tokio release blog: <https://tokio.rs/blog/2026-04-03-toasty-released>
-- Local exploration option: `git clone https://github.com/tokio-rs/toasty.git /tmp/toasty`
-- Crates.io check already observed: `toasty = "0.5.0"`, `toasty-driver-sqlite = "0.5.0"`, `toasty-driver-postgresql = "0.5.0"`.
+参考资料：
+
+- OpenAI Codex repository: <https://github.com/openai/codex>
+- Codex exec server process lifecycle: <https://github.com/openai/codex/tree/main/codex-rs/exec-server>
+- Linux `clone` future sandbox candidate: <https://github.com/unixshells/clone>
 
 ## Architecture Decisions
 
-- v1 只实现 SQLite event store；PostgreSQL 是后续 task，不在本轮实现。
-- 使用 Toasty，依赖 `toasty` 和 `toasty-driver-sqlite`，通过 feature gate 控制。
-- 新 feature 命名为 `sqlite-store`；默认 build 不拉入 SQLite/Toasty。
-- `SqliteEventStore` 是内置 backend，不改变 `EventStore` trait 签名。
-- SQLite 持久化完整 `AgentEvent` JSON，同时拆出少量索引列：`run_id`、`sequence`、`turn_id`、`phase`、`kind_type`、`created_at_ms`。
-- 强 append 一致性以 Toasty composite primary key `(run_id, sequence)` 实现；重复 append 必须失败，不能 upsert 或静默覆盖。
-- `load(run_id)` 必须按 `sequence ASC` 返回事件，空 run 继续返回空 vec。
-- 不把 OpenDAL 引入本轮依赖；未来如果做 object store，需要单独设计 manifest/lock/compaction 协议。
+- 新 crate 命名为 `noloong-agent`，作为 product runtime；`noloong-agent-core` 继续保持 providerless kernel 边界。
+- 后台命令采用 lifecycle tool group，而不是一个阻塞式 `exec`：`host.exec.start`、`host.exec.read`、`host.exec.wait`、`host.exec.write`、`host.exec.terminate`、`host.exec.list`。
+- `host.exec.start` 使用 optimistic foreground window：命令若在配置的短等待窗口内完成，则直接返回完整结果；超过窗口才返回 running job handle，供后续 `read/wait/write/terminate` 使用。
+- `host.exec.start` 接收 shell command string，并显式记录 shell；默认 shell 从宿主机推断，也允许显式选择 `sh`、`bash`、`zsh`、`powershell`、`cmd` 或 custom shell。
+- 进程生命周期绑定 product session，不绑定单个 core run；session close 默认清理仍在运行的 job。
+- 输出写 product spool/ring buffer；core event log 只记录 tool result、job lifecycle 摘要、cursor、truncation metadata，避免大输出污染 event store。
+- 自进化采用 proposal + approval + next-turn rebuild：Agent 提交 manifest patch，审批通过后 supervisor 重建 core runtime，下一 product turn 生效。
+- v1 manifest patch 支持 system prompt、enabled tools、approval policy；phase node 替换只保留 schema/documentation，不实际执行。
+- 所有给模型看的 host context、tool description、approval prompt 使用 typed i18n catalog，默认支持 English 和 Chinese。
+- locale 解析顺序：显式配置优先，其次宿主机 `LC_ALL` / `LC_MESSAGES` / `LANG`，最后 fallback 到 English。
+- `crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md` 是 core 能力验证矩阵；product crate 后续如需独立矩阵，应放在 `crates/noloong-agent/docs/`，不再放入 `plans/`。
 
 ## Task List
 
-### Phase 1: Foundation
+### Phase 1: Product Crate Foundation
 
-#### Task 1: Add Toasty dependency plan and feature gates
+#### Task 1: Create product crate skeleton
 
-**Description:** 在 workspace dependency 层加入 Toasty SQLite 所需依赖，并通过 `sqlite-store` feature 隔离持久化 backend，保证默认 core 仍保持轻量。
+**Description:** 新增 `crates/noloong-agent`，建立 product runtime 的模块边界，依赖 `noloong-agent-core`，并导出后续任务需要的最小 public API。
 
 **Acceptance criteria:**
 
-- [ ] `Cargo.toml` workspace dependencies 包含 Toasty 相关依赖，版本使用 `0.5` 系列。
-- [ ] `crates/noloong-agent-core/Cargo.toml` 新增 `sqlite-store` feature。
-- [ ] 默认 `cargo check -p noloong-agent-core` 不启用 Toasty/SQLite backend。
+- [ ] workspace 包含 `crates/noloong-agent` member。
+- [ ] crate 暴露 `AgentSession`、`AgentManifest`、`HostEnvironment` 的初始 public API。
+- [ ] `noloong-agent-core` public API 不因 product crate 增加 host/process/VMM 概念。
 
 **Verification:**
 
+- [ ] `cargo check -p noloong-agent`
 - [ ] `cargo check -p noloong-agent-core`
-- [ ] `cargo check -p noloong-agent-core --features sqlite-store`
+- [ ] `rg -n "HostEnvironment|host.exec|process manager|VMM|shell" crates/noloong-agent-core/src crates/noloong-agent-core/docs/ARCHITECTURE.md` only returns intentional architecture text if any.
 
 **Dependencies:** None
 
 **Files likely touched:**
 
 - `Cargo.toml`
-- `crates/noloong-agent-core/Cargo.toml`
+- `crates/noloong-agent/Cargo.toml`
+- `crates/noloong-agent/src/lib.rs`
 
 **Estimated scope:** Small
 
-#### Task 2: Split store module and add store error variant
+#### Task 2: Add host environment detection and typed i18n catalog
 
-**Description:** 将当前 `store.rs` 拆成 facade + memory backend，为 SQLite backend 提供明确模块边界，并添加持久化错误类型入口。
+**Description:** 实现宿主机环境采集和 typed i18n catalog，为模型生成稳定的 host context、tool descriptions 和 approval prompts。
 
 **Acceptance criteria:**
 
-- [ ] `EventStore` 和 `InMemoryEventStore` 仍从 `noloong_agent_core` 原 public path 导出。
-- [ ] `AgentCoreError::Store(String)` 可表达 SQLite/Toasty/schema/constraint 错误。
-- [ ] `InMemoryEventStore` 行为不变。
+- [ ] `HostEnvironment` 包含 OS、arch、cwd、default shell、available shell hints、path style、locale。
+- [ ] locale 支持 explicit override、host inference、English fallback。
+- [ ] English/Chinese catalog key 完整性由测试保证，缺失 key 必须失败而不是静默 fallback。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test runtime_core`
-- [ ] `cargo test -p noloong-agent-core --test conformance runtime_success_replay_matches_report_state`
+- [ ] `cargo test -p noloong-agent host_environment`
+- [ ] `cargo test -p noloong-agent i18n_catalog`
+- [ ] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/store.rs`
-- `crates/noloong-agent-core/src/store/mod.rs`
-- `crates/noloong-agent-core/src/store/memory.rs`
-- `crates/noloong-agent-core/src/error.rs`
+- `crates/noloong-agent/src/host.rs`
+- `crates/noloong-agent/src/i18n.rs`
+- `crates/noloong-agent/tests/host_environment.rs`
+- `crates/noloong-agent/tests/i18n.rs`
 
-**Estimated scope:** Small
+**Estimated scope:** Medium
 
 ### Checkpoint: Foundation
 
 - [ ] `cargo fmt --check`
+- [ ] `cargo check -p noloong-agent`
 - [ ] `cargo check -p noloong-agent-core`
-- [ ] `cargo check -p noloong-agent-core --features sqlite-store`
+- [ ] `cargo test -p noloong-agent host_environment i18n_catalog`
 
-### Phase 2: SQLite EventStore
+### Phase 2: Background Command Runtime
 
-#### Task 3: Define Toasty event model and schema initialization
+#### Task 3: Implement `HostProcessManager`
 
-**Description:** 新增 SQLite event row model，并实现 `SqliteEventStoreConfig` 和 `SqliteEventStore::connect`。连接时按配置初始化 schema，默认支持 `sqlite::memory:` 和 `sqlite://path/to/db.sqlite`。
+**Description:** 实现 session 级后台进程管理器，负责 job id、process lifecycle、status、exit code、output cursor、spool/ring buffer、optimistic foreground window 和 session cleanup。
 
 **Acceptance criteria:**
 
-- [ ] `SqliteEventStoreConfig` 至少包含 `database_url` 和 `migrate_on_connect`。
-- [ ] `SqliteEventStore::connect(config)` 返回可 clone/share 的 store 实例。
-- [ ] Schema 使用 `(run_id, sequence)` composite primary key，提供唯一性和按 run replay 的稳定顺序。
-- [ ] 若 `migrate_on_connect = false` 且 schema 不存在，connect 或首次访问必须返回清晰 `AgentCoreError::Store`。
+- [ ] `start` 支持 configurable foreground wait；窗口内完成时返回 completed snapshot，超时才返回 running job handle。
+- [ ] `read`、`wait`、`list` 可在同一个 product session 内跨 turn 使用。
+- [ ] session close 默认清理仍在运行的进程，并保留已完成 job 的摘要状态。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store connect_in_memory_sqlite_store`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store connect_file_sqlite_store`
+- [ ] `cargo test -p noloong-agent host_process_manager_start_returns_completed_when_fast`
+- [ ] `cargo test -p noloong-agent host_process_manager_start_returns_running_when_slow`
+- [ ] `cargo test -p noloong-agent host_process_manager_read_wait_list`
+- [ ] `cargo test -p noloong-agent host_process_manager_session_cleanup`
 
-**Dependencies:** Task 2
+**Dependencies:** Task 1
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/store/sqlite.rs`
-- `crates/noloong-agent-core/src/store/mod.rs`
-- `crates/noloong-agent-core/tests/sqlite_store.rs`
+- `crates/noloong-agent/src/process/mod.rs`
+- `crates/noloong-agent/src/process/manager.rs`
+- `crates/noloong-agent/tests/host_process_manager.rs`
 
 **Estimated scope:** Medium
 
-#### Task 4: Implement append/load contract
+#### Task 4: Add process I/O and interactive command support
 
-**Description:** 实现 `EventStore` for `SqliteEventStore`，把完整 `AgentEvent` JSON 持久化，同时用索引列保证 replay 顺序和错误可诊断性。
+**Description:** 在 process manager 中加入 stdout/stderr/pty output buffering、stdin write、timeout 和 graceful terminate 行为，为交互式命令做基础。
 
 **Acceptance criteria:**
 
-- [ ] `append` 单事件写入，不 upsert。
-- [ ] Duplicate `(run_id, sequence)` 返回 `AgentCoreError::Store`。
-- [ ] `load(run_id)` 按 `sequence ASC` 返回完整事件。
-- [ ] 反序列化失败时返回包含 run id 和 sequence 的 store error。
+- [ ] 支持 stdout/stderr 增量读取，cursor 顺序稳定。
+- [ ] 支持 PTY 或 pipe stdin 写入；不支持的平台必须 fail fast 并给出结构化错误。
+- [ ] `wait` timeout 不杀进程；`terminate` graceful timeout 后 kill。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store append_and_load_orders_by_sequence`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store duplicate_sequence_is_rejected`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test core event_log_replays_to_report_state`
+- [ ] `cargo test -p noloong-agent host_process_output_cursor_order`
+- [ ] `cargo test -p noloong-agent host_process_interactive_write`
+- [ ] `cargo test -p noloong-agent host_process_wait_timeout_does_not_kill`
+- [ ] `cargo test -p noloong-agent host_process_terminate`
 
 **Dependencies:** Task 3
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/src/store/sqlite.rs`
-- `crates/noloong-agent-core/tests/sqlite_store.rs`
+- `crates/noloong-agent/src/process/manager.rs`
+- `crates/noloong-agent/src/process/io.rs`
+- `crates/noloong-agent/tests/host_process_manager.rs`
 
 **Estimated scope:** Medium
 
-### Checkpoint: SQLite EventStore
+### Checkpoint: Process Runtime
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy -p noloong-agent-core --all-targets --features sqlite-store -- -D warnings`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+- [ ] `cargo test -p noloong-agent host_process_manager`
+- [ ] Manual smoke: start a long command, read partial output, wait, then inspect final status.
+- [ ] Manual smoke: start an interactive command, write stdin, read response, terminate if still running.
 
-### Phase 3: Runtime Persistence Scenarios
+### Phase 3: Command Lifecycle Tools
 
-#### Task 5: Test durable replay across store instances
+#### Task 5: Implement host command ToolProviders
 
-**Description:** 验证 SQLite store 不是只在同一个 handle 内可用：同一个 DB 文件由第二个 store 实例重新连接后，仍能 load 并 replay 原 run。
+**Description:** 将 `HostProcessManager` 暴露为 core `ToolProvider` 组，使模型通过工具调用启动、读取、等待、写入、终止和列出后台命令。
 
 **Acceptance criteria:**
 
-- [ ] Runtime A 使用 file SQLite store 完成一个普通 run。
-- [ ] Runtime B 重新连接同一 DB 文件后 load 同一 run。
-- [ ] `reduce_events(events)` 与 Runtime A 的 report state 一致。
+- [ ] 提供 `host.exec.start`、`host.exec.read`、`host.exec.wait`、`host.exec.write`、`host.exec.terminate`、`host.exec.list`。
+- [ ] `host.exec.start` 在 foreground window 内完成时返回 completed output；超时返回 `jobId`、shell、cwd、status、initial output snapshot。
+- [ ] 所有 tool output 使用稳定 structured `details`，包含 status、cursor、exit code、truncated/error metadata。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store durable_replay_survives_store_reconnect`
+- [ ] `cargo test -p noloong-agent host_exec_tools_start_and_read`
+- [ ] `cargo test -p noloong-agent host_exec_tools_start_fast_path_returns_result`
+- [ ] `cargo test -p noloong-agent host_exec_tools_wait_timeout`
+- [ ] `cargo test -p noloong-agent host_exec_tools_write_and_terminate`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/tests/sqlite_store.rs`
+- `crates/noloong-agent/src/tools/host_exec.rs`
+- `crates/noloong-agent/src/tools/mod.rs`
+- `crates/noloong-agent/tests/host_exec_tools.rs`
 
-**Estimated scope:** Small
+**Estimated scope:** Medium
 
-#### Task 6: Test approval resume crash recovery with SQLite
+#### Task 6: Add command output audit summaries
 
-**Description:** 用 SQLite store 覆盖当前最关键的持久化恢复路径：tool approval pause 后，换一个 runtime 实例 resume 并完成。
+**Description:** 确保大输出留在 product spool/ring buffer，core tool result 只提交摘要、cursor、cap 和 truncation metadata。
 
 **Acceptance criteria:**
 
-- [ ] Runtime A 跑到 `RunStatus::Paused`，pending approval 写入 SQLite。
-- [ ] Runtime B 使用同一 SQLite DB 调用 `resume_tool_approvals`。
-- [ ] replay state 包含 approval resolved/expired、run resumed、tool output 和 run completed。
+- [ ] 大 stdout/stderr 不作为完整 chunk 写入 core event log。
+- [ ] `read` 支持 output cap，并明确返回 `truncated` 和 `nextCursor`。
+- [ ] non-zero exit、stderr-only output、timeout、unknown job 都有稳定错误或状态表达。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store approval_resume_survives_runtime_restart`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test tool_flow tool_approval_pauses_and_crash_recovers_on_resume`
+- [ ] `cargo test -p noloong-agent host_exec_large_output_is_spooled`
+- [ ] `cargo test -p noloong-agent host_exec_output_cap_and_cursor`
+- [ ] `cargo test -p noloong-agent host_exec_non_zero_and_unknown_job_details`
 
 **Dependencies:** Task 5
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/tests/sqlite_store.rs`
+- `crates/noloong-agent/src/process/spool.rs`
+- `crates/noloong-agent/src/tools/host_exec.rs`
+- `crates/noloong-agent/tests/host_exec_tools.rs`
 
 **Estimated scope:** Medium
 
-### Checkpoint: Runtime Persistence
+### Checkpoint: Command Tools
 
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test conformance`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test tool_flow`
+- [ ] `cargo test -p noloong-agent host_exec_tools`
+- [ ] Integration smoke: Agent starts long-running command, proceeds to another turn, then reads/waits result.
+- [ ] Confirm `noloong-agent-core` event store does not contain unbounded command output.
 
-### Phase 4: Documentation and Final Verification
+### Phase 4: Manifest Evolution
 
-#### Task 7: Update architecture docs and roadmap
+#### Task 7: Implement `AgentManifest` and patch validation
 
-**Description:** 更新架构文档，记录 SQL-first 决策、SQLite backend 的一致性 contract，以及 OpenDAL 的非 v1 定位。
+**Description:** 定义 product manifest 和 manifest patch，支持 prompt、enabled tools、approval policy 的受控变更，并预留 phase profile schema。
 
 **Acceptance criteria:**
 
-- [ ] `ARCHITECTURE.md` 描述 `SqliteEventStore` 和强 append contract。
-- [ ] “后续演进方向” 将 PostgreSQL 标记为下一步 SQL backend。
-- [ ] 文档明确 OpenDAL 未来可用于 object archive/object backend，但不作为 v1 primary event store。
-- [ ] Toasty 参考链接出现在文档或计划中，便于实现者查 API。
+- [ ] manifest 包含 locale、system prompt profile、enabled tools、approval policy、reserved phase profile。
+- [ ] patch 支持 replace system prompt、enable/disable tool、update approval policy。
+- [ ] invalid patch 被拒绝且不改变 manifest；phase patch v1 只能被记录为 unsupported/reserved。
 
 **Verification:**
 
-- [ ] `cargo test -p noloong-agent-core --test extension_docs_contract`
-- [ ] Manual check: docs mention SQL-first and Toasty references.
+- [ ] `cargo test -p noloong-agent manifest_patch_applies_prompt_tools_policy`
+- [ ] `cargo test -p noloong-agent manifest_patch_rejects_invalid_changes`
+- [ ] `cargo test -p noloong-agent manifest_phase_patch_is_reserved`
 
-**Dependencies:** Task 6
+**Dependencies:** Task 2
 
 **Files likely touched:**
 
-- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
-- `plans/CURRENT_PLAN.md`
+- `crates/noloong-agent/src/manifest.rs`
+- `crates/noloong-agent/tests/manifest.rs`
+
+**Estimated scope:** Medium
+
+#### Task 8: Add manifest patch proposal tool
+
+**Description:** 将自进化入口实现为 tool：Agent 只能提交 manifest patch proposal，不能直接修改 live manifest。
+
+**Acceptance criteria:**
+
+- [ ] `agent.manifest.propose_patch` 返回 proposal id 和 patch summary。
+- [ ] proposal 进入 approval path 前不会改变 manifest。
+- [ ] proposal details 可审计，并能被 human 或 auto-review agent 使用。
+
+**Verification:**
+
+- [ ] `cargo test -p noloong-agent manifest_proposal_does_not_apply_without_approval`
+- [ ] `cargo test -p noloong-agent manifest_proposal_tool_returns_auditable_details`
+
+**Dependencies:** Task 7
+
+**Files likely touched:**
+
+- `crates/noloong-agent/src/evolution.rs`
+- `crates/noloong-agent/src/tools/manifest.rs`
+- `crates/noloong-agent/tests/manifest_evolution.rs`
+
+**Estimated scope:** Medium
+
+### Checkpoint: Manifest Evolution
+
+- [ ] `cargo test -p noloong-agent manifest`
+- [ ] Manual check: a proposed manifest patch is visible, auditable, and not applied until approved.
+
+### Phase 5: Product Session Supervisor and Approval
+
+#### Task 9: Implement `AgentSession` next-turn rebuild
+
+**Description:** 实现 product supervisor：每个 product turn 使用当前 manifest 构造 core runtime；approved patch 在下一 product turn 前应用并重建 runtime，同时保留 session process manager。
+
+**Acceptance criteria:**
+
+- [ ] approved prompt/tool/policy patch 下一 product turn 生效。
+- [ ] rejected patch 不影响下一 product turn。
+- [ ] runtime rebuild 不丢失 `HostProcessManager` 中的后台 jobs。
+
+**Verification:**
+
+- [ ] `cargo test -p noloong-agent agent_session_prompt_patch_takes_effect_next_turn`
+- [ ] `cargo test -p noloong-agent agent_session_tool_patch_takes_effect_next_turn`
+- [ ] `cargo test -p noloong-agent agent_session_rebuild_preserves_background_jobs`
+
+**Dependencies:** Task 6, Task 8
+
+**Files likely touched:**
+
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/src/runtime_factory.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
+
+**Estimated scope:** Medium
+
+#### Task 10: Add approval reviewer integration
+
+**Description:** 通过 `ToolCallHook` 统一处理 host command 和 manifest patch approval，并支持 human fallback 与可关闭的 auto-review agent。
+
+**Acceptance criteria:**
+
+- [ ] `host.exec.start`、`host.exec.write`、`host.exec.terminate` 和 manifest patch proposal 都进入 permission audit。
+- [ ] human reviewer 可使用现有 pause/resume path。
+- [ ] auto-review agent 可插拔、可关闭；关闭后需要 human decision。
+
+**Verification:**
+
+- [ ] `cargo test -p noloong-agent approval_host_exec_start_allow_deny`
+- [ ] `cargo test -p noloong-agent approval_manifest_patch_allow_deny`
+- [ ] `cargo test -p noloong-agent approval_auto_review_can_be_disabled`
+
+**Dependencies:** Task 9
+
+**Files likely touched:**
+
+- `crates/noloong-agent/src/approval.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/approval.rs`
+
+**Estimated scope:** Medium
+
+### Checkpoint: Evolvable Session
+
+- [ ] `cargo test -p noloong-agent agent_session approval`
+- [ ] End-to-end smoke: start background command, propose tool/policy change, approve it, observe next-turn runtime change while job remains readable.
+
+### Phase 6: Documentation and Final Verification
+
+#### Task 11: Document product architecture and examples
+
+**Description:** 为 product crate 编写架构文档和 examples，解释 host-first execution、background command lifecycle、自进化 manifest、approval reviewer 和 i18n。
+
+**Acceptance criteria:**
+
+- [ ] docs 明确哪些能力在 `noloong-agent`，哪些能力留在 `noloong-agent-core`。
+- [ ] example 展示 start long-running command、继续做别的事、再 read/wait。
+- [ ] docs 明确 SSH/VMM v1 是宿主命令能力，不是 target abstraction。
+
+**Verification:**
+
+- [ ] `cargo test -p noloong-agent --examples`
+- [ ] Manual check: docs mention lifecycle tool group and next-turn manifest rebuild.
+
+**Dependencies:** Task 10
+
+**Files likely touched:**
+
+- `crates/noloong-agent/docs/ARCHITECTURE.md`
+- `crates/noloong-agent/examples/background_command.rs`
+- `README.md`
 
 **Estimated scope:** Small
 
@@ -236,29 +366,25 @@ Toasty 参考资料：
 
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo nextest run --workspace`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test conformance`
+- [ ] `cargo nextest run --workspace --all-features`
+- [ ] `cargo test -p noloong-agent --examples`
+- [ ] `cargo test -p noloong-agent-core --test extension_docs_contract`
 - [ ] `git diff --check`
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Toasty 0.x API churn | Medium | Keep SQLite backend isolated behind `sqlite-store`; use official guide/docs links before implementation |
-| Toasty schema API may not expose the exact migration primitive needed | Medium | First implementation task must inspect Toasty examples/source; if needed, keep schema init in a small SQL-specific helper behind the same backend |
-| Duplicate sequence handling differs across drivers | High | Treat duplicate append as required behavior; add explicit test now so PostgreSQL must match later |
-| Runtime event counter is process-local | Medium | Keep current runtime behavior for v1; SQLite enforces duplicate `(run_id, sequence)` instead of silently accepting conflicts |
-| JSON payload grows with large tool/media events | Medium | Accept for v1; object archive/media store is a later design, not part of SQLite event store |
-| Tests may need temporary DB files | Low | Use temp directories and unique DB paths; avoid checked-in artifacts |
+| PTY behavior differs across platforms | High | Keep PTY behind process I/O abstraction; Unix path first, unsupported platform fail fast with structured error |
+| Background output grows without bound | High | Use spool/ring buffer, output cap, truncation metadata, and lifecycle summaries |
+| Runtime rebuild loses session state | High | Keep process manager, manifest store, and approval reviewer in `AgentSession`, not in core runtime |
+| Approval auto-review makes unsafe decisions | High | Default to proposal + approval; auto-review can be disabled; every decision enters existing permission audit |
+| Shell command strings are injection-prone | Medium | Treat command string as the user's explicit shell program, always record shell/cwd/env, and route through approval policy |
+| Product crate accidentally leaks host concepts into core | Medium | Add regression audit and keep all host/process modules outside `noloong-agent-core` |
+| Long-running jobs survive unexpectedly | Medium | Session close cleanup is default; docs must make lifecycle explicit |
 
 ## Parallelization Opportunities
 
-- Task 1 and Toasty source/docs exploration can happen together.
-- Task 5 and Task 6 tests should wait until Task 4 append/load is green.
-- Documentation can be drafted after Task 3, but final wording should wait until SQLite behavior tests are stable.
-
-## Open Questions
-
-- None. Direction is locked to Toasty-backed SQLite v1 with strong append consistency.
+- Task 2 and Task 3 can run in parallel after Task 1.
+- Task 7 can run in parallel with Tasks 3-6 after Task 2 because manifest validation does not depend on process execution.
+- Task 11 documentation can start after Task 5, but final examples should wait until Task 10 is complete.
