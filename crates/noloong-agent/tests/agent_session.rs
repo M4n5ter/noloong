@@ -1,10 +1,14 @@
 use noloong_agent::{
     AgentManifest, AgentSession, ApprovalPolicy, BackgroundCompletionConfig, BuiltInToolName,
     Locale, ManifestPatch, StartCommandRequest,
+    approval::{
+        allow_decision as approval_allow_decision, deny_decision as approval_deny_decision,
+    },
 };
 use noloong_agent_core::{
-    Agent, AgentMessage, BoxFuture, CancellationToken, ContentBlock, ModelProvider, ModelRequest,
-    ModelStreamEvent, ModelStreamSink,
+    Agent, AgentEventKind, AgentMessage, BoxFuture, CancellationToken, ContentBlock, ModelProvider,
+    ModelRequest, ModelStreamEvent, ModelStreamSink, RunStatus, StopReason, ToolApprovalRequest,
+    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall,
 };
 use std::{
     collections::BTreeMap,
@@ -93,6 +97,75 @@ async fn agent_session_rebuild_preserves_background_jobs() {
 
     assert!(runtime.tool("host.exec.start").is_ok());
     assert!(jobs.iter().any(|job| job.job_id == snapshot.job_id));
+    session.process_manager().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_session_records_approved_built_in_tool_call_for_current_session() {
+    let session = approval_cache_session();
+    seed_approval_cache(&session, "printf cached").await;
+
+    let cached_agent = host_exec_agent(&session, "printf cached");
+    cached_agent.prompt("cached command").await.unwrap();
+
+    let state = cached_agent.state().await;
+    assert!(matches!(state.status, RunStatus::Completed));
+    assert!(state.pending_tool_approvals.is_empty());
+    session.process_manager().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_session_approval_cache_does_not_cover_changed_commands() {
+    let session = approval_cache_session();
+    seed_approval_cache(&session, "printf cached").await;
+
+    let changed_agent = host_exec_agent(&session, "printf changed");
+    changed_agent.prompt("changed command").await.unwrap();
+
+    let state = changed_agent.state().await;
+    assert!(matches!(state.status, RunStatus::Paused));
+    assert_eq!(state.pending_tool_approvals.len(), 1);
+    session.process_manager().close().await.unwrap();
+}
+
+#[test]
+fn agent_session_approval_cache_ignores_denials_and_external_hooks() {
+    let session = approval_cache_session();
+    let tool_call = host_exec_start_tool_call("printf cached");
+    let approval = tool_approval_request(
+        tool_call.clone(),
+        Some("noloong.builtin.approval"),
+        serde_json::json!({"approvalCacheKey": "cache-key-test"}),
+    );
+    let external = tool_approval_request(
+        tool_call.clone(),
+        Some("external.hook"),
+        serde_json::json!({"approvalCacheKey": "cache-key-test"}),
+    );
+    let missing_metadata = tool_approval_request(
+        tool_call,
+        Some("noloong.builtin.approval"),
+        serde_json::json!({}),
+    );
+
+    assert!(!session.record_tool_approval_resolution(&approval, &test_deny_decision()));
+    assert!(!session.record_tool_approval_resolution(&external, &test_allow_decision()));
+    assert!(!session.record_tool_approval_resolution(&missing_metadata, &test_allow_decision()));
+}
+
+#[tokio::test]
+async fn agent_session_built_in_tool_audit_includes_permission_metadata() {
+    let session = approval_cache_session();
+    let events = approve_host_exec_start_with_captured_events(&session, "printf audit").await;
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEventKind::ToolPermissionRequested { permissions, .. }
+            if permissions.iter().any(|permission|
+                permission.metadata["builtIn"] == true
+                    && permission.metadata["capability"] == "host.command"
+            )
+    )));
     session.process_manager().close().await.unwrap();
 }
 
@@ -259,6 +332,132 @@ async fn wait_for_completion_queued(agent: &Agent, job_id: &str) {
     .expect("completion steering message is queued");
 }
 
+fn approval_cache_session() -> AgentSession {
+    let manifest = AgentManifest::default().with_enabled_tool(BuiltInToolName::HostExecStart);
+    AgentSession::builder().with_manifest(manifest).build()
+}
+
+fn host_exec_agent(session: &AgentSession, command: &str) -> Agent {
+    Agent::builder()
+        .with_runtime(Arc::new(
+            session
+                .runtime_builder()
+                .with_model_provider(Arc::new(HostExecCommandModel::new(command)))
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap()
+}
+
+async fn seed_approval_cache(session: &AgentSession, command: &str) {
+    approve_host_exec_start(session, command, None).await;
+}
+
+async fn approve_host_exec_start_with_captured_events(
+    session: &AgentSession,
+    command: &str,
+) -> Vec<AgentEventKind> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    approve_host_exec_start(session, command, Some(Arc::clone(&events))).await;
+    events
+        .lock()
+        .expect("captured events lock poisoned")
+        .clone()
+}
+
+async fn approve_host_exec_start(
+    session: &AgentSession,
+    command: &str,
+    events: Option<Arc<Mutex<Vec<AgentEventKind>>>>,
+) {
+    let agent = host_exec_agent(session, command);
+    if let Some(events) = &events {
+        let captured_events = Arc::clone(events);
+        agent.subscribe(move |event| {
+            let captured_events = Arc::clone(&captured_events);
+            async move {
+                captured_events
+                    .lock()
+                    .expect("captured events lock poisoned")
+                    .push(event.kind);
+                Ok(())
+            }
+        });
+    }
+    agent.prompt("approval cache seed").await.unwrap();
+
+    let pending = agent.pending_tool_approvals().await;
+    assert_eq!(pending.len(), 1);
+    let (approval_id, approval) = pending.iter().next().expect("approval exists");
+    assert_eq!(
+        approval.tool_call.name,
+        BuiltInToolName::HostExecStart.as_str()
+    );
+    assert_eq!(
+        approval.request.metadata["classificationDecision"],
+        "needs_approval"
+    );
+    assert!(approval.request.metadata.get("approvalCacheKey").is_some());
+
+    let decision = test_allow_decision();
+    assert!(session.record_tool_approval_resolution(approval, &decision));
+    agent
+        .resume_tool_approval(ToolApprovalResolution {
+            approval_id: approval_id.clone(),
+            decision,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(agent.state().await.status, RunStatus::Completed));
+    agent.wait_for_idle().await;
+}
+
+fn host_exec_start_tool_call(command: &str) -> ToolCall {
+    ToolCall {
+        id: "host-exec-start-test".into(),
+        name: BuiltInToolName::HostExecStart.as_str().into(),
+        arguments: host_exec_start_arguments(command),
+    }
+}
+
+fn host_exec_start_arguments(command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "command": command,
+        "shell": "sh",
+        "cwd": ".",
+        "pipeStdin": false,
+        "foregroundWaitMs": 1000
+    })
+}
+
+fn tool_approval_request(
+    tool_call: ToolCall,
+    hook_id: Option<&str>,
+    metadata: serde_json::Value,
+) -> ToolApprovalRequest {
+    ToolApprovalRequest {
+        approval_id: "approval-test".into(),
+        tool_call,
+        permissions: Vec::new(),
+        hook_id: hook_id.map(str::to_owned),
+        request: ToolApprovalRequestSpec {
+            prompt: None,
+            reason: None,
+            expires_at_ms: None,
+            metadata,
+        },
+    }
+}
+
+fn test_allow_decision() -> noloong_agent_core::ToolPermissionDecision {
+    approval_allow_decision("approved by test", "test", serde_json::json!({}))
+}
+
+fn test_deny_decision() -> noloong_agent_core::ToolPermissionDecision {
+    approval_deny_decision("denied by test", "test", serde_json::json!({}))
+}
+
 struct DummyModelProvider;
 
 impl ModelProvider for DummyModelProvider {
@@ -276,6 +475,67 @@ impl ModelProvider for DummyModelProvider {
             Ok(vec![ModelStreamEvent::Finished {
                 stop_reason: noloong_agent_core::StopReason::Stop,
             }])
+        })
+    }
+}
+
+struct HostExecCommandModel {
+    command: String,
+    calls: AtomicU64,
+}
+
+impl HostExecCommandModel {
+    fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            calls: AtomicU64::new(0),
+        }
+    }
+}
+
+impl ModelProvider for HostExecCommandModel {
+    fn id(&self) -> &str {
+        "host-exec-command"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        stream: ModelStreamSink,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = if call == 0 {
+                vec![
+                    ModelStreamEvent::Started {
+                        stream_id: "host-exec-command-1".into(),
+                    },
+                    ModelStreamEvent::ToolCall {
+                        tool_call: host_exec_start_tool_call(&self.command),
+                    },
+                    ModelStreamEvent::Finished {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    ModelStreamEvent::Started {
+                        stream_id: "host-exec-command-2".into(),
+                    },
+                    ModelStreamEvent::TextDelta {
+                        text: "command complete".into(),
+                    },
+                    ModelStreamEvent::Finished {
+                        stop_reason: StopReason::Stop,
+                    },
+                ]
+            };
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
         })
     }
 }

@@ -100,10 +100,22 @@ phase profile patch 只保留为 reserved schema，不执行。
 当前 policy：
 
 - `AllowAll`：直接允许。
-- `RequireApproval`：进入 human approval。
-- `AutoReview`：如果配置了 auto-review agent，则由它做 decision；没有 reviewer 时可按配置回退 human approval 或 deny。
+- `RequireApproval`：smart-gated approval。内置 hook 先分类工具调用；已知安全的内置只读操作直接允许，需要人工判断的操作才进入 human approval，明确不可接受的操作可直接 deny。
+- `AutoReview`：复用同一套分类。安全调用直接允许；只有分类为 `NeedsApproval` 时才调用 auto-review agent。没有 reviewer 时可按配置回退 human approval 或 deny。
 
-所有 approval decision 都进入 core 的 `ToolPermissionDecided` audit。
+评估顺序：
+
+1. `AllowAll` 直接 bypass 内置检查。
+2. session approval cache 命中时直接 allow。cache 只记录当前 `AgentSession` 内由 `noloong.builtin.approval` 产生、带有内置 cache key，且 application 显式记录为 allow 的审批结果。
+3. 内置工具类别分类：`host.exec.read`、`host.exec.wait`、`host.exec.list` 直接 allow；`host.exec.write`、`host.exec.terminate`、`agent.manifest.propose_patch` 进入 approval；未知工具名进入 approval。
+4. `host.exec.start` 走命令安全分类器。已知只读命令允许；unsupported shell syntax、env assignment、redirection、command substitution、glob-heavy syntax 和未知命令都进入 approval；危险命令同样需要 approval。
+5. 对 `NeedsApproval` 结果，`RequireApproval` 产生 core pause/resume approval request；`AutoReview` 调用 reviewer 或按 fallback 策略处理。
+
+`AgentSession::record_tool_approval_resolution` 是 application 层接入 cache 的显式 API。调用方在用 core 的 `ToolApprovalResolution` resume 之前或之后，都可以把对应 `ToolApprovalRequest` 和 allow decision 传给 session；denial、外部 hook、缺少 built-in cache metadata 的 request 不会被记录。
+
+v1 没有完整 sandbox 边界，也没有持久化 execpolicy 文件；因此 unknown host command 默认需要 approval。后续可以在不改变 core approval 语义的前提下，加入持久化规则、host sandbox/VMM policy 或更细粒度的 capability policy。
+
+所有 approval decision 都进入 core 的 `ToolPermissionDecided` audit。进入 human approval 的请求也会保留 classification metadata 和 cache key，便于 application 层审计和记录 session cache。
 
 ## i18n
 

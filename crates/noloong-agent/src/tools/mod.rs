@@ -43,7 +43,11 @@ pub(crate) fn sequential_tool_spec(
         permissions: vec![ToolPermissionRequirement {
             capability: capability.into(),
             description: Some(permission_description.into()),
-            metadata: json!({"tool": name}),
+            metadata: json!({
+                "builtIn": true,
+                "capability": capability,
+                "tool": name,
+            }),
         }],
     }
 }

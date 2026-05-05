@@ -776,10 +776,7 @@ async fn has_new_output(handle: &Arc<JobHandle>, after_seq: u64) -> bool {
 }
 
 fn shell_command_argv(shell: &str, command: &str) -> (String, Vec<String>) {
-    let shell_name = PathBuf::from(shell)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_else(|| shell.to_ascii_lowercase());
+    let shell_name = shell_executable_name(shell);
     if shell_name == "cmd" || shell_name == "cmd.exe" {
         return (shell.into(), vec!["/C".into(), command.into()]);
     }
@@ -795,6 +792,13 @@ fn shell_command_argv(shell: &str, command: &str) -> (String, Vec<String>) {
         );
     }
     (shell.into(), vec!["-lc".into(), command.into()])
+}
+
+pub(crate) fn shell_executable_name(shell: &str) -> String {
+    PathBuf::from(shell)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| shell.to_ascii_lowercase())
 }
 
 fn now_ms() -> u64 {

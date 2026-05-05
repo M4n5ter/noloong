@@ -1,14 +1,17 @@
 use crate::{
     AgentManifest, BuiltInApprovalHook, BuiltInToolName, BuiltInToolOutputOverflowHook, Catalog,
     HostEnvironment, HostProcessCompletion, HostProcessEvent, HostProcessManager,
-    HostProcessSubscription, ManifestProposalStore, ToolOutputOverflowConfig, text,
+    HostProcessSubscription, ManifestProposalStore, ToolOutputOverflowConfig,
+    approval::{ApprovalCache, cache_key_from_approval_resolution},
+    text,
     tools::{
         HostExecListTool, HostExecReadTool, HostExecStartTool, HostExecTerminateTool,
         HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
     },
 };
 use noloong_agent_core::{
-    Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, Result, ToolProvider,
+    Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, Result, ToolApprovalRequest,
+    ToolPermissionDecision, ToolProvider,
 };
 use serde_json::{Map, json};
 use std::{
@@ -29,6 +32,7 @@ struct AgentSessionInner {
     process_manager: HostProcessManager,
     proposal_store: ManifestProposalStore,
     tool_output_overflow_config: ToolOutputOverflowConfig,
+    approval_cache: ApprovalCache,
 }
 
 #[derive(Default)]
@@ -38,6 +42,7 @@ pub struct AgentSessionBuilder {
     process_manager: Option<HostProcessManager>,
     proposal_store: ManifestProposalStore,
     tool_output_overflow_config: ToolOutputOverflowConfig,
+    approval_cache: ApprovalCache,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,10 +113,10 @@ impl AgentSession {
                 self.inner.environment.clone(),
                 catalog.clone(),
             )))
-            .with_tool_hook(Arc::new(BuiltInApprovalHook::new(
-                manifest.approval_policy.clone(),
-                catalog.clone(),
-            )))
+            .with_tool_hook(Arc::new(
+                BuiltInApprovalHook::new(manifest.approval_policy.clone(), catalog.clone())
+                    .with_approval_cache(self.inner.approval_cache.clone()),
+            ))
             .with_tool_hook(Arc::new(
                 BuiltInToolOutputOverflowHook::new(self.inner.tool_output_overflow_config.clone())
                     .with_catalog(catalog.clone()),
@@ -142,6 +147,17 @@ impl AgentSession {
         BackgroundCompletionSteering {
             _subscription: subscription,
         }
+    }
+
+    pub fn record_tool_approval_resolution(
+        &self,
+        approval: &ToolApprovalRequest,
+        decision: &ToolPermissionDecision,
+    ) -> bool {
+        let Some(cache_key) = cache_key_from_approval_resolution(approval, decision) else {
+            return false;
+        };
+        self.inner.approval_cache.insert(cache_key)
     }
 
     fn tools_for_manifest(
@@ -279,6 +295,7 @@ impl AgentSessionBuilder {
                 process_manager: self.process_manager.unwrap_or_default(),
                 proposal_store: self.proposal_store,
                 tool_output_overflow_config: self.tool_output_overflow_config,
+                approval_cache: self.approval_cache,
             }),
         }
     }

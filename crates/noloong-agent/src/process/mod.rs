@@ -7,4 +7,5 @@ pub use manager::{
 };
 pub(crate) use manager::{
     PROCESS_EMPTY_COMMAND_MESSAGE, PROCESS_STDIN_DISABLED_PREFIX, PROCESS_STDIN_DISABLED_SUFFIX,
+    shell_executable_name,
 };
