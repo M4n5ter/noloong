@@ -145,7 +145,9 @@ v1 没有完整 sandbox 边界，也没有持久化 execpolicy 文件；因此 u
 
 ## Interaction Control Plane
 
-`noloong-agent` 内置 stdio JSON-RPC 2.0 control plane，用于让任意第三方语言实现用户交互 bridge。它属于应用层，不进入 `noloong-agent-core`：core 仍只暴露 providerless `Agent`、event log、queue、approval pause/resume 和 runtime traits。
+`noloong-agent` 内置 JSON-RPC 2.0 control plane，用于让任意第三方语言实现用户交互 bridge。它属于应用层，不进入 `noloong-agent-core`：core 仍只暴露 providerless `Agent`、event log、queue、approval pause/resume 和 runtime traits。
+
+stdio line-delimited JSON-RPC 是默认、最低依赖、第三方 conformance baseline。启用 `interaction-http` feature 后，同一个 `InteractionControlHandler` 可以暴露为 HTTP/WebSocket transport：`POST /jsonrpc` 只处理单次 request/response，适合一次性 orchestration 调用；`GET /jsonrpc/ws` 是完整双向连接，同一 socket 承载 request、response 和 raw/display notification，适合 TS/Python 编写的 Telegram、WeChat/iLink 或 Web UI bridge。HTTP/WebSocket transport 使用 bearer token 做最小连接认证；具体方法权限仍由 `initialize` 后得到的 authority/UX grant 控制。
 
 control plane 的核心对象是 `AgentSessionRegistry`。每个 registry entry 持有一个 `AgentSession`、一个 core `Agent`、runtime profile id、session metadata、可选 `parentSessionId` 和 `role`。subagent 在 v1 中也是独立 session，只额外记录 parent/role/metadata；它不改变 parent session 的 run 状态，也不引入模型可调用的 subagent tool。
 
@@ -196,7 +198,6 @@ catalog key 必须完整；缺失 key 应在测试中失败，而不是运行时
 
 ## 后续演进方向
 
-- 在不改变 `InteractionControlHandler` 的前提下增加 WebSocket/HTTP transport；stdio JSON-RPC 继续作为最低依赖 conformance transport。
 - 将 display projection 拆成可插拔策略，使 Telegram、WeChat/iLink、TUI 和 Web UI 能各自定义消息合并、编辑和 truncation 策略。
 - 为 process control 增加可选 host sandbox/VMM policy，把当前 host-first tools 扩展到 SSH、Lima/QEMU 或其它隔离环境。
 - 增强 manifest apply lifecycle，让 approved patch 能自动触发下一次 session runtime rebuild，并在 control plane 中暴露 rebuild/audit 结果。

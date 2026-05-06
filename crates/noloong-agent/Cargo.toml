@@ -8,6 +8,7 @@ workspace = true
 
 [features]
 default = []
+interaction-http = ["dep:axum", "dep:futures-util"]
 openai = ["dep:noloong-openai"]
 registry-store-object = ["dep:base64", "dep:opendal"]
 registry-store-postgres = ["dep:toasty", "dep:toasty-driver-postgresql", "toasty/postgresql"]
@@ -19,7 +20,9 @@ registry-store-sqlite = [
 ]
 
 [dependencies]
+axum = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 noloong-agent-core.workspace = true
 noloong-openai = { workspace = true, optional = true }
 opendal = { workspace = true, optional = true }
@@ -30,3 +33,7 @@ tokio.workspace = true
 toasty = { workspace = true, optional = true }
 toasty-driver-postgresql = { workspace = true, optional = true }
 toasty-driver-sqlite = { workspace = true, optional = true }
+
+[dev-dependencies]
+reqwest.workspace = true
+tokio-tungstenite.workspace = true

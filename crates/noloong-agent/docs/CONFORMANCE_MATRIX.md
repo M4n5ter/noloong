@@ -8,6 +8,8 @@ This matrix tracks the application-layer interaction control plane. The core ker
 |---|---|---|
 | Wire and capabilities | `InteractionAuthorityCapability`, `InteractionUxCapabilities`, JSON-RPC errors | `cargo test -p noloong-agent --test interaction` |
 | JSON-RPC substrate | Line-delimited request/response, parse errors, shutdown, notification writer | `cargo test -p noloong-agent --test interaction_jsonrpc` |
+| HTTP transport | `interaction-http`, `POST /jsonrpc`, bearer auth, request size limit, request/response-only subscription rejection | `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport` |
+| WebSocket transport | `interaction-http`, `GET /jsonrpc/ws`, bearer auth, bidirectional request/response/notification, socket-local shutdown | `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport` |
 | Runtime profiles | `AgentRuntimeProfile`, `profile/list`, default profile selection | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
 | Session registry | `session/create`, `session/list`, `session/get`, `session/delete` | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
 | Registry snapshots | `AgentSessionRecord`, manifest/state/queue persistence, lazy restore, interrupted running normalization | `cargo test -p noloong-agent --test interaction_registry` |
@@ -31,7 +33,9 @@ Run these before accepting a change that modifies interaction wire types, handle
 ```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p noloong-agent --features interaction-http --all-targets -- -D warnings
 cargo test --workspace
+cargo test -p noloong-agent --features interaction-http --test interaction_http_transport
 cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite
 cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object
 cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres

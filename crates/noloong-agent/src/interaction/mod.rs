@@ -1,16 +1,26 @@
 mod control;
 mod error;
+#[cfg(feature = "interaction-http")]
+mod http;
 mod jsonrpc;
 mod profile;
 mod registry;
 mod store;
 mod wire;
 
-pub use control::{DISPLAY_EVENT_NOTIFICATION, InteractionControlHandler, RAW_EVENT_NOTIFICATION};
+pub use control::{
+    DISPLAY_EVENT_NOTIFICATION, DISPLAY_SUBSCRIBE_METHOD, EVENT_SUBSCRIBE_METHOD,
+    InteractionControlHandler, RAW_EVENT_NOTIFICATION,
+};
 pub use error::{
     INTERACTION_ERROR_BUSY, INTERACTION_ERROR_INTERNAL, INTERACTION_ERROR_INVALID_PARAMS,
     INTERACTION_ERROR_METHOD_NOT_FOUND, INTERACTION_ERROR_NOT_FOUND,
     INTERACTION_ERROR_UNAUTHORIZED, InteractionError,
+};
+#[cfg(feature = "interaction-http")]
+pub use http::{
+    InteractionHttpTransportConfig, InteractionTransportAuth, interaction_http_router,
+    serve_interaction_http,
 };
 pub use jsonrpc::{
     InteractionFuture, InteractionNotifier, JsonRpcHandler, JsonRpcHandlerOutput, serve_jsonrpc,

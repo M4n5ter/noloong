@@ -21,7 +21,14 @@ pub trait JsonRpcHandler: Send + Sync {
 
 #[derive(Clone)]
 pub struct InteractionNotifier {
-    sender: mpsc::Sender<JsonRpcOutbound>,
+    sink: InteractionNotifierSink,
+}
+
+#[derive(Clone)]
+enum InteractionNotifierSink {
+    Outbound(mpsc::Sender<JsonRpcOutbound>),
+    #[cfg(feature = "interaction-http")]
+    Discard,
 }
 
 impl InteractionNotifier {
@@ -32,15 +39,19 @@ impl InteractionNotifier {
         let params = serde_json::to_value(params).map_err(|error| {
             InteractionError::internal(format!("json-rpc notification encode failed: {error}"))
         })?;
-        self.sender
-            .try_send(JsonRpcOutbound::Notification(JsonRpcNotification::new(
-                method, params,
-            )))
-            .map_err(|error| {
-                InteractionError::internal(format!(
-                    "json-rpc notification writer is unavailable: {error}"
-                ))
-            })
+        match &self.sink {
+            InteractionNotifierSink::Outbound(sender) => sender
+                .try_send(JsonRpcOutbound::Notification(JsonRpcNotification::new(
+                    method, params,
+                )))
+                .map_err(|error| {
+                    InteractionError::internal(format!(
+                        "json-rpc notification writer is unavailable: {error}"
+                    ))
+                }),
+            #[cfg(feature = "interaction-http")]
+            InteractionNotifierSink::Discard => Ok(()),
+        }
     }
 }
 
@@ -76,57 +87,26 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
     H: JsonRpcHandler,
 {
-    let (outbound_sender, outbound_receiver) = mpsc::channel(JSONRPC_OUTBOUND_BUFFER);
+    let (outbound_sender, outbound_receiver, notifier) =
+        jsonrpc_outbound_channel(JSONRPC_OUTBOUND_BUFFER);
     let writer_task = tokio::spawn(write_outbound_jsonrpc(writer, outbound_receiver));
-    let notifier = InteractionNotifier {
-        sender: outbound_sender.clone(),
-    };
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = next_line(&mut lines).await? {
         if line.trim().is_empty() {
             continue;
         }
-        let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
+        let request = match parse_jsonrpc_request(line.as_bytes()) {
             Ok(request) => request,
-            Err(error) => {
-                send_response(
-                    &outbound_sender,
-                    JsonRpcResponse::parse_error(InteractionError::invalid_params(format!(
-                        "invalid json-rpc request: {error}"
-                    ))),
-                )?;
+            Err(response) => {
+                send_response(&outbound_sender, response)?;
                 continue;
             }
         };
-        if request.jsonrpc != "2.0" {
-            send_response(
-                &outbound_sender,
-                JsonRpcResponse::error(
-                    request.id,
-                    InteractionError::invalid_params(format!(
-                        "unsupported jsonrpc version: {}",
-                        request.jsonrpc
-                    )),
-                ),
-            )?;
-            continue;
-        }
-
-        let id = request.id;
-        let output = handler
-            .handle(&request.method, request.params, notifier.clone())
-            .await;
-        match output {
-            Ok(output) => {
-                send_response(&outbound_sender, JsonRpcResponse::result(id, output.result))?;
-                if output.shutdown {
-                    send_close(&outbound_sender)?;
-                    return await_writer(writer_task).await;
-                }
-            }
-            Err(error) => {
-                send_response(&outbound_sender, JsonRpcResponse::error(id, error))?;
-            }
+        let output = dispatch_jsonrpc_request(&handler, request, notifier.clone()).await;
+        send_response(&outbound_sender, output.response)?;
+        if output.shutdown {
+            send_close(&outbound_sender)?;
+            return await_writer(writer_task).await;
         }
     }
     send_close(&outbound_sender)?;
@@ -134,10 +114,80 @@ where
 }
 
 #[derive(Debug)]
-enum JsonRpcOutbound {
+pub(crate) enum JsonRpcOutbound {
     Response(JsonRpcResponse),
     Notification(JsonRpcNotification),
     Close,
+}
+
+pub(crate) struct JsonRpcDispatchOutput {
+    pub response: JsonRpcResponse,
+    pub shutdown: bool,
+}
+
+pub(crate) fn jsonrpc_outbound_channel(
+    buffer: usize,
+) -> (
+    mpsc::Sender<JsonRpcOutbound>,
+    mpsc::Receiver<JsonRpcOutbound>,
+    InteractionNotifier,
+) {
+    let (sender, receiver) = mpsc::channel(buffer);
+    let notifier = InteractionNotifier {
+        sink: InteractionNotifierSink::Outbound(sender.clone()),
+    };
+    (sender, receiver, notifier)
+}
+
+#[cfg(feature = "interaction-http")]
+pub(crate) fn request_response_notifier() -> InteractionNotifier {
+    InteractionNotifier {
+        sink: InteractionNotifierSink::Discard,
+    }
+}
+
+pub(crate) fn parse_jsonrpc_request(bytes: &[u8]) -> Result<JsonRpcRequest, JsonRpcResponse> {
+    serde_json::from_slice::<JsonRpcRequest>(bytes).map_err(|error| {
+        JsonRpcResponse::parse_error(InteractionError::invalid_params(format!(
+            "invalid json-rpc request: {error}"
+        )))
+    })
+}
+
+pub(crate) async fn dispatch_jsonrpc_request<H>(
+    handler: &H,
+    request: JsonRpcRequest,
+    notifier: InteractionNotifier,
+) -> JsonRpcDispatchOutput
+where
+    H: JsonRpcHandler + ?Sized,
+{
+    let JsonRpcRequest {
+        jsonrpc,
+        id,
+        method,
+        params,
+    } = request;
+    if jsonrpc != "2.0" {
+        return JsonRpcDispatchOutput {
+            response: JsonRpcResponse::error(
+                id,
+                InteractionError::invalid_params(format!("unsupported jsonrpc version: {jsonrpc}")),
+            ),
+            shutdown: false,
+        };
+    }
+
+    match handler.handle(&method, params, notifier).await {
+        Ok(output) => JsonRpcDispatchOutput {
+            response: JsonRpcResponse::result(id, output.result),
+            shutdown: output.shutdown,
+        },
+        Err(error) => JsonRpcDispatchOutput {
+            response: JsonRpcResponse::error(id, error),
+            shutdown: false,
+        },
+    }
 }
 
 async fn write_outbound_jsonrpc<W>(
@@ -159,7 +209,7 @@ where
     Ok(())
 }
 
-fn send_response(
+pub(crate) fn send_response(
     sender: &mpsc::Sender<JsonRpcOutbound>,
     response: JsonRpcResponse,
 ) -> Result<(), InteractionError> {
@@ -170,7 +220,7 @@ fn send_response(
         })
 }
 
-fn send_close(sender: &mpsc::Sender<JsonRpcOutbound>) -> Result<(), InteractionError> {
+pub(crate) fn send_close(sender: &mpsc::Sender<JsonRpcOutbound>) -> Result<(), InteractionError> {
     sender.try_send(JsonRpcOutbound::Close).map_err(|error| {
         InteractionError::internal(format!("json-rpc response writer is unavailable: {error}"))
     })

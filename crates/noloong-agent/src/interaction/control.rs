@@ -23,6 +23,8 @@ use std::{
 
 pub const RAW_EVENT_NOTIFICATION: &str = "agent/event";
 pub const DISPLAY_EVENT_NOTIFICATION: &str = "display/event";
+pub const EVENT_SUBSCRIBE_METHOD: &str = "event/subscribe";
+pub const DISPLAY_SUBSCRIBE_METHOD: &str = "display/subscribe";
 
 #[derive(Clone)]
 pub struct InteractionControlHandler {
@@ -276,7 +278,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                     registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
-                "event/subscribe" => {
+                EVENT_SUBSCRIBE_METHOD => {
                     self.require_ux(method, "rawEvents", |ux| ux.raw_events)?;
                     let request = parse_params::<EventSubscribeRequest>(params)?;
                     value(self.subscribe_raw(request, notifier).await?)?
@@ -285,7 +287,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                     let request = parse_params::<EventUnsubscribeRequest>(params)?;
                     value(self.unsubscribe(request.subscription_id).await?)?
                 }
-                "display/subscribe" => {
+                DISPLAY_SUBSCRIBE_METHOD => {
                     self.require_ux(method, "displayEvents", |ux| ux.display_events)?;
                     let request = parse_params::<DisplaySubscribeRequest>(params)?;
                     let granted_ux = self.granted_ux();

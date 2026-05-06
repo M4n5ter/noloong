@@ -2,11 +2,38 @@
 
 `noloong-agent` exposes a language-neutral control plane for external bridges such as terminal UIs, Telegram adapters, WeChat/iLink adapters, web UIs, or orchestration processes. The bridge is a JSON-RPC 2.0 client. The Rust host owns runtime profiles, provider credentials, tools, and approval policy.
 
-V1 transport is line-delimited stdio:
+V1 always supports line-delimited stdio. With the optional `interaction-http` feature, the same `InteractionControlHandler` can also be exposed over HTTP POST and WebSocket.
+
+stdio transport:
 
 - stdin: one JSON-RPC request per line.
 - stdout: one JSON-RPC response or notification per line.
 - stderr: logs only, never protocol data.
+
+HTTP/WebSocket transport:
+
+- `POST /jsonrpc`: one JSON-RPC request object per HTTP request, one JSON-RPC response object per HTTP response.
+- `GET /jsonrpc/ws`: WebSocket text frames carry JSON-RPC requests, responses, and notifications on the same socket.
+- HTTP/WebSocket auth uses `Authorization: Bearer <token>` when configured by the Rust host.
+- HTTP POST is request/response only. `event/subscribe` and `display/subscribe` require WebSocket because they need server-pushed notifications.
+
+Example HTTP request:
+
+```sh
+curl -sS \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"profile/list","params":{}}' \
+  http://127.0.0.1:8787/jsonrpc
+```
+
+Example WebSocket text frame:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"typescript-ilink-bridge","requestedAuthority":["agent.run","agent.queue"],"requestedUx":{"displayEvents":true,"streamText":true,"editMessage":true}}}
+```
+
+Third-party TypeScript/Python bridge processes should connect as clients to the Rust host. Use WebSocket for Telegram, WeChat/iLink, web UI, or any bridge that renders live raw/display events. Use HTTP POST only for one-shot orchestration calls that do not subscribe to events.
 
 All params and results use `camelCase`. Sensitive methods require authority capabilities granted during `initialize`.
 
