@@ -1,3 +1,5 @@
+#[cfg(feature = "interaction-client")]
+mod client;
 mod control;
 mod error;
 #[cfg(feature = "interaction-http")]
@@ -8,6 +10,11 @@ mod registry;
 mod store;
 mod wire;
 
+#[cfg(feature = "interaction-client")]
+pub use client::{
+    InteractionClientError, InteractionClientResult, InteractionWsClient,
+    InteractionWsClientConfig, InteractionWsNotification,
+};
 pub use control::{
     DISPLAY_EVENT_NOTIFICATION, DISPLAY_SUBSCRIBE_METHOD, EVENT_SUBSCRIBE_METHOD,
     InteractionControlHandler, RAW_EVENT_NOTIFICATION,

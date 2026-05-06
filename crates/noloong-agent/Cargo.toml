@@ -8,6 +8,7 @@ workspace = true
 
 [features]
 default = []
+interaction-client = ["dep:futures-util", "dep:tokio-tungstenite"]
 interaction-http = ["dep:axum", "dep:futures-util"]
 openai = ["dep:noloong-openai"]
 registry-store-object = ["dep:base64", "dep:opendal"]
@@ -29,11 +30,12 @@ opendal = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 toasty = { workspace = true, optional = true }
 toasty-driver-postgresql = { workspace = true, optional = true }
 toasty-driver-sqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 reqwest.workspace = true
-tokio-tungstenite.workspace = true

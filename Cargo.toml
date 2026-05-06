@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/noloong-agent-core",
     "crates/noloong-agent",
+    "crates/noloong-agent-telegram",
     "crates/noloong-openai",
 ]
 resolver = "3"
@@ -14,6 +15,7 @@ edition = "2024"
 [workspace.dependencies]
 noloong-agent-core = { path = "crates/noloong-agent-core" }
 noloong-agent = { path = "crates/noloong-agent" }
+noloong-agent-telegram = { path = "crates/noloong-agent-telegram" }
 noloong-openai = { path = "crates/noloong-openai" }
 base64 = "0.22"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
@@ -47,3 +49,14 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+noloong-agent = { workspace = true, features = ["interaction-http", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
+noloong-agent-core.workspace = true
+noloong-agent-telegram.workspace = true
+noloong-openai.workspace = true
+getrandom.workspace = true
+opendal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+clap = { version = "4.6", features = ["derive"] }

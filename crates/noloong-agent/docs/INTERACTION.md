@@ -37,6 +37,16 @@ Third-party TypeScript/Python bridge processes should connect as clients to the 
 
 All params and results use `camelCase`. Sensitive methods require authority capabilities granted during `initialize`.
 
+## First-party Telegram Client
+
+`crates/noloong-agent-telegram` is the first first-party interaction client. It dogfoods the same WebSocket JSON-RPC protocol as third-party clients:
+
+- `noloong telegram` starts the agent host, loopback WebSocket server, and Telegram long-polling bridge in one process.
+- `noloong serve interaction` starts only the host/control plane.
+- `noloong telegram-bridge` connects a Telegram bridge to an existing WebSocket control plane.
+
+The Telegram bridge never receives model/provider credentials. It may select a configured `profileId`, but runtime profiles and providers are owned by the Rust host. The bridge requires an allowlist by default through `TELEGRAM_ALLOWED_USERS` or `TELEGRAM_ALLOWED_CHATS`; `--telegram-allow-all` is explicit and should only be used for private testing. Group/supergroup mention gating uses `TELEGRAM_BOT_USERNAME` or `--telegram-bot-username`. Telegram-side UI locale is controlled by `TELEGRAM_LOCALE` or `--telegram-locale`; it localizes inline approval buttons, callback notifications, approval status text, and tool status messages.
+
 ## Initialize
 
 The client starts with `initialize` and requests authority plus UX capabilities. The server intersects those requests with host policy.

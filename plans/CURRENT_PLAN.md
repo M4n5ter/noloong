@@ -1,289 +1,180 @@
-# 实施计划：HTTP/WebSocket Interaction Transport
+# 实施计划：Telegram Interaction Client v1
 
-> 状态：已实施并通过本地验证。目标是在不改变 `InteractionControlHandler` 的前提下，为 `noloong-agent` 增加可选 HTTP/WebSocket control-plane transport。stdio line-delimited JSON-RPC 继续作为默认、最低依赖、第三方 conformance baseline。
+> 状态：已完成实现与本地验证。Telegram 已作为 noloong 的第一个第一方用户交互通道接入：Rust 实现、root CLI 使用 `clap`、支持单二进制 loopback 模式，也支持 interaction server 与 Telegram bridge 分进程部署。
 
-## 概览
+## 目标
 
-当前 interaction control plane 已经通过 `JsonRpcHandler` 把业务 handler 和 stdio framing 分离。下一步要把这条边界进一步固化：`InteractionControlHandler` 仍只实现 `JsonRpcHandler`，transport 层负责 stdio、HTTP POST 和 WebSocket framing、auth、连接生命周期与 notification 写出。
+在现有 `InteractionControlHandler`、HTTP/WebSocket JSON-RPC transport 和 display events 之上，新增内置 Telegram interaction client。Telegram client 只负责用户交互通道，不决定 agent profile、provider 或 credential；这些仍由 host/binary 层通过 profile config 构造。
 
-v1 默认面向第三方 TS/Python bridge 进程：Rust host 暴露 endpoint，bridge 作为 client 主动连接。HTTP POST 只支持 request/response；需要 raw/display event notification 的 bridge 必须使用 WebSocket。Bearer token 是 transport 层的最小认证机制；细粒度动作授权仍由 `InteractionCapabilityPolicy` 和 `initialize` grant 负责。
+v1 聚焦：
+
+- Telegram long polling。
+- 文本对话输入。
+- streaming delta edit 和 final reply。
+- tool lifecycle display。
+- Telegram inline approval buttons。
+- 默认安全 allowlist。
+- 可复用 `InteractionWsClient`。
+- 单进程 `noloong telegram` 和分进程 `noloong serve interaction` + `noloong telegram-bridge`。
+
+不在本轮范围：
+
+- Telegram webhook。
+- 图像/视频/音频 Telegram 消息输入输出。
+- per-chat profile mapping。
+- DM topic 自动管理。
+- 真实 Telegram Bot live smoke 自动化。
 
 ## 架构决策
 
-- 不修改 `InteractionControlHandler` 的公开 API、method set 或业务逻辑；只在 JSON-RPC/transport 层新增适配。
-- `serve_jsonrpc` 的 stdio 行为保持兼容：一行一个 JSON-RPC request，一行一个 response/notification。
-- 增加 optional feature `interaction-http`；默认 `noloong-agent` 不引入 HTTP/WebSocket 依赖。
-- HTTP endpoint 只提供单次 JSON-RPC request/response，不注册 subscription，不承诺 server push。
-- WebSocket endpoint 是完整双向 JSON-RPC 连接，同一 socket 承载 request、response 和 notification。
-- `shutdown` 在 stdio 中结束当前 stdio server；在 WebSocket 中只关闭当前 socket，不关闭整个 listener。
-- HTTP/WebSocket transport 必须支持 bearer token；未配置认证只允许测试或明确的本地嵌入场景。
-- 不新增 HTTP/WS conformance runner；stdio 继续是第三方扩展/bridge 的最低 conformance transport。HTTP/WS 只新增 transport-level tests。
-
-## 公开 API / 接口变化
-
-- 新增 Cargo feature：
-  - `interaction-http`
-- 新增可选公开类型和函数：
-  - `InteractionHttpTransportConfig`
-  - `InteractionTransportAuth`
-  - `interaction_http_router(handler, config) -> axum::Router`
-  - `serve_interaction_http(listener, handler, config)`
-- 新增 HTTP endpoints：
-  - `POST /jsonrpc`
-  - `GET /jsonrpc/ws`
-- auth 约定：
-  - `Authorization: Bearer <token>`
-  - auth 失败返回 HTTP `401`，不进入 `JsonRpcHandler`。
-- JSON-RPC 约定：
-  - 仍只支持 JSON-RPC 2.0 single request object，不支持 batch。
-  - JSON-RPC 协议错误返回 JSON-RPC error response。
-  - HTTP POST 对 `event/subscribe` 和 `display/subscribe` 返回 structured JSON-RPC error，提示需要 bidirectional transport。
-
-## 任务列表
-
-### Phase 1：JSON-RPC Dispatch 基础重构
-
-#### 任务 1：抽出单 request dispatch helper
-
-**描述：** 从 `serve_jsonrpc` 中抽出可复用的 JSON-RPC request parse、version check、handler dispatch 和 response mapping。stdio、HTTP 和 WebSocket 都应复用同一套逻辑，避免 transport 间错误语义漂移。
-
-**验收标准：**
-
-- [x] `serve_jsonrpc` 外部行为不变。
-- [x] 单 request helper 可以接收 `JsonRpcRequest`、`JsonRpcHandler` 和 `InteractionNotifier`，返回 `JsonRpcResponse` 与 shutdown flag。
-- [x] invalid JSON、unsupported `jsonrpc` version、unknown method 和 handler error 的 response shape 与现有 stdio 测试一致。
-- [x] helper 不依赖 HTTP/WebSocket 类型。
-
-**验证：**
-
-- [x] `cargo test -p noloong-agent --test interaction_jsonrpc`
-- [x] `cargo test -p noloong-agent --test interaction_control`
-- [x] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-
-**依赖：** 无
-
-**可能涉及文件：**
-
-- `crates/noloong-agent/src/interaction/jsonrpc.rs`
-- `crates/noloong-agent/tests/interaction_jsonrpc.rs`
-
-**预计范围：** 中
-
-#### 任务 2：明确 notifier/outbound 连接抽象
-
-**描述：** 将 `InteractionNotifier` 的构造和 outbound channel 管理收敛到 JSON-RPC transport 内部，使 stdio 和 WebSocket 都能创建一条 bidirectional connection；HTTP POST 则创建 request-response-only context。
-
-**验收标准：**
-
-- [x] bidirectional connection 有独立 outbound buffer，notification 和 response 共用同一 writer。
-- [x] request-response-only context 不暴露可持久订阅能力。
-- [x] `InteractionNotifier` 不需要暴露底层 channel 细节给 `InteractionControlHandler`。
-- [x] `JsonRpcOutbound` 保持 crate-private 或 module-private，不进入公开 API。
-
-**验证：**
-
-- [x] `cargo test -p noloong-agent --test interaction_jsonrpc`
-- [x] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-
-**依赖：** 任务 1
-
-**可能涉及文件：**
-
-- `crates/noloong-agent/src/interaction/jsonrpc.rs`
-
-**预计范围：** 小
-
-### Checkpoint：stdio 兼容性
-
-- [x] `cargo fmt --check`
-- [x] `cargo test -p noloong-agent --test interaction_jsonrpc`
-- [x] `cargo test -p noloong-agent --test interaction_control`
-- [x] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-
-### Phase 2：HTTP/WebSocket Optional Transport
-
-#### 任务 3：新增 feature 与依赖边界
-
-**描述：** 在 `noloong-agent` 中增加 `interaction-http` feature，把 HTTP/WebSocket 依赖限制在 feature gate 下。默认 feature 下不能编译或拉入 axum 相关代码。
-
-**验收标准：**
-
-- [x] `interaction-http` feature 启用 `axum` 的 HTTP 和 WebSocket 能力。
-- [x] 默认 `cargo clippy -p noloong-agent --all-targets -- -D warnings` 不需要 HTTP/WS 依赖。
-- [x] 开启 feature 后 `cargo clippy -p noloong-agent --features interaction-http --all-targets -- -D warnings` 能编译。
-- [x] HTTP/WS 测试需要的 client 依赖只放在 dev-dependencies 或 workspace dev 使用路径。
-
-**验证：**
-
-- [x] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-- [x] `cargo clippy -p noloong-agent --features interaction-http --all-targets -- -D warnings`
-
-**依赖：** 任务 1
-
-**可能涉及文件：**
-
-- `Cargo.toml`
-- `crates/noloong-agent/Cargo.toml`
-- `crates/noloong-agent/src/interaction/mod.rs`
-
-**预计范围：** 小
-
-#### 任务 4：实现 HTTP POST transport
-
-**描述：** 增加 `POST /jsonrpc` endpoint。它接收单个 JSON-RPC request object，调用同一个 `JsonRpcHandler` dispatch helper，并返回单个 JSON-RPC response。
-
-**验收标准：**
-
-- [x] valid request 返回 JSON-RPC result response。
-- [x] invalid JSON 或 unsupported JSON-RPC version 返回 JSON-RPC error response。
-- [x] auth missing/wrong token 返回 HTTP `401`，不调用 handler。
-- [x] request body 超过配置上限时返回 HTTP error，不调用 handler。
-- [x] `event/subscribe` 和 `display/subscribe` 在 HTTP POST 上返回 JSON-RPC error，提示需要 bidirectional transport。
-- [x] HTTP POST 不保留连接级 subscription 状态。
-
-**验证：**
-
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport http_post_jsonrpc_round_trips`
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport http_auth_is_required`
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport http_rejects_subscription_methods`
-
-**依赖：** 任务 2、任务 3
-
-**可能涉及文件：**
-
-- `crates/noloong-agent/src/interaction/http.rs`
-- `crates/noloong-agent/tests/interaction_http_transport.rs`
-
-**预计范围：** 中
-
-#### 任务 5：实现 WebSocket transport
-
-**描述：** 增加 `GET /jsonrpc/ws` endpoint。每个 WebSocket 连接都是一条 bidirectional JSON-RPC session：client 发送 text frame request，server 返回 response，并能在同一 socket 推送 notification。
-
-**验收标准：**
-
-- [x] WebSocket text frame 中的 valid JSON-RPC request 返回 response。
-- [x] invalid JSON text frame 返回 parse error response，连接保持可用。
-- [x] binary frame 返回 structured error 或关闭连接，行为在测试中固定。
-- [x] `event/subscribe` / `display/subscribe` 可以注册 notifier，并通过同一 socket 收到 notification。
-- [x] `shutdown` 返回 response 后关闭当前 WebSocket，不关闭 listener。
-- [x] socket 断开时 writer task 和 outbound channel 正常退出，不泄漏 subscription writer task。
-
-**验证：**
-
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport websocket_jsonrpc_round_trips`
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport websocket_delivers_notifications`
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport websocket_shutdown_closes_socket_only`
-
-**依赖：** 任务 2、任务 3
-
-**可能涉及文件：**
-
-- `crates/noloong-agent/src/interaction/http.rs`
-- `crates/noloong-agent/tests/interaction_http_transport.rs`
-
-**预计范围：** 中
-
-### Checkpoint：HTTP/WS 核心能力
-
-- [x] HTTP POST request/response tests 通过。
-- [x] WebSocket request/response/notification tests 通过。
-- [x] auth tests 通过。
-- [x] `cargo clippy -p noloong-agent --features interaction-http --all-targets -- -D warnings`
-
-### Phase 3：文档与集成验证
-
-#### 任务 6：更新 interaction 文档
-
-**描述：** 更新 interaction 文档，说明 stdio、HTTP POST 和 WebSocket 三种 transport 的能力差异，并给第三方 TS/Python bridge 作者清晰接入路径。
-
-**验收标准：**
-
-- [x] `INTERACTION.md` 明确 stdio 是最低依赖 transport。
-- [x] `INTERACTION.md` 明确 HTTP POST 不支持 subscription notification。
-- [x] `INTERACTION.md` 给出 WebSocket 连接、bearer token 和 JSON-RPC frame 示例。
-- [x] 文档说明 TS/Python bridge 作为 client 主动连接 Rust host。
-
-**验证：**
-
-- [x] 人工检查 `crates/noloong-agent/docs/INTERACTION.md`
-- [x] `rg "interaction-http|/jsonrpc|/jsonrpc/ws|Authorization" crates/noloong-agent/docs`
-
-**依赖：** 任务 4、任务 5
-
-**可能涉及文件：**
-
-- `crates/noloong-agent/docs/INTERACTION.md`
-- `crates/noloong-agent/docs/ARCHITECTURE.md`
-
-**预计范围：** 小
-
-#### 任务 7：更新验证矩阵和后续演进方向
-
-**描述：** 更新 `CONFORMANCE_MATRIX.md` 和架构文档，把“增加 WebSocket/HTTP transport”从后续演进项移动到已验证能力，同时保留 stdio conformance baseline 的定位。
-
-**验收标准：**
-
-- [x] matrix 包含 HTTP POST transport tests。
-- [x] matrix 包含 WebSocket notification transport tests。
-- [x] `ARCHITECTURE.md` 的后续演进方向不再保留这条已完成 TODO。
-- [x] 文档不暗示 HTTP/WS 已有第三方 conformance runner。
-
-**验证：**
-
-- [x] `rg "WebSocket|HTTP transport|stdio" crates/noloong-agent/docs/ARCHITECTURE.md crates/noloong-agent/docs/CONFORMANCE_MATRIX.md`
-
-**依赖：** 任务 6
-
-**可能涉及文件：**
-
-- `crates/noloong-agent/docs/ARCHITECTURE.md`
-- `crates/noloong-agent/docs/CONFORMANCE_MATRIX.md`
-
-**预计范围：** 小
-
-#### 任务 8：完整验证
-
-**描述：** 跑完整 workspace 验证，确保默认 feature、HTTP feature、stdio interaction 和已有 agent-core/provider 测试都没有回归。
-
-**验收标准：**
-
-- [x] 默认 feature 下 workspace 测试通过。
-- [x] `interaction-http` feature 下 noloong-agent clippy 和 transport tests 通过。
-- [x] stdio JSON-RPC 测试仍通过。
-- [x] 不存在 `#[allow(dead_code)]`。
-
-**验证：**
-
-- [x] `cargo fmt --check`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo clippy -p noloong-agent --features interaction-http --all-targets -- -D warnings`
+- 不修改 `noloong-agent-core`；Telegram 属于 application/interaction 层。
+- Telegram bridge 必须通过 WebSocket JSON-RPC 调用 interaction control plane；即使 `noloong telegram` 单进程模式也走 loopback WS，避免绕过协议。
+- 新增第一方 crate `crates/noloong-agent-telegram`，负责 Telegram 平台适配、消息渲染、long polling、access policy、approval callback 和 display event 投递。
+- 在 `noloong-agent` 中新增 feature-gated `InteractionWsClient`，供 Telegram 和未来 Web/TUI/其它第一方 interaction clients 复用。
+- root `noloong` binary 负责 profile config loading、provider/runtime 构造、interaction server 启动和 Telegram bridge 组合。
+- Telegram bridge 不包含 provider/model/credential 字段；它只持有可选 `profileId`，未配置时使用 `profile/list` 的默认 profile。
+- 默认要求 allowlist；未配置 allowed users/chats 且未显式 allow all 时启动失败。
+- group/supergroup mention gating 使用配置的 bot username 判断 `@bot` 和 reply-to-bot。
+- Bot API 使用 direct `reqwest` adapter；没有保留未使用的 Telegram framework 依赖，便于精确控制 long polling、fallback network、错误处理和 fake API 测试。
+- root CLI 使用 `clap` derive，一次性覆盖 `serve interaction`、`telegram-bridge`、`telegram` 三个入口。
+
+## 已完成改动
+
+### 1. Workspace 和 feature 边界
+
+- [x] 新增 workspace crate `crates/noloong-agent-telegram`。
+- [x] `noloong-agent` 新增可选 feature `interaction-client`。
+- [x] `InteractionWsClient` 依赖 `tokio-tungstenite`、`futures-util`，并保持 feature-gated。
+- [x] `noloong-agent-telegram` 通过 `noloong-agent` 的 `interaction-client` feature 使用 interaction client。
+- [x] 未引入 `teloxide`；Telegram Bot API 通过 direct `reqwest` adapter 实现。
+
+### 2. 可复用 WebSocket JSON-RPC client
+
+- [x] 新增 `InteractionWsClientConfig`、`InteractionWsClient`、`InteractionWsNotification`、`InteractionClientError`。
+- [x] 支持 bearer auth、request id、typed `request_as`、JSON-RPC error 映射和 request timeout。
+- [x] notifications 使用 bounded broadcast channel 暴露，不阻塞 response dispatch。
+- [x] connection close 会唤醒 pending requests。
+- [x] client 不依赖 Telegram 类型。
+
+### 3. Telegram 配置、权限与 session 映射
+
+- [x] 新增 `TelegramBridgeConfig`、`TelegramAccessPolicy`、`TelegramNetworkConfig`、`TelegramSessionMapper`。
+- [x] 支持 bot token、interaction URL/token、可选 profile id、UX 权限、batch/edit throttle 和 network config。
+- [x] 默认要求 allowed users/chats；显式 allow all 才能关闭 allowlist。
+- [x] DM、group、forum topic 映射为稳定 session id：`telegram:{chatId}` 或 `telegram:{chatId}:thread:{threadId}`。
+- [x] session metadata 记录 `channel=telegram`、`chatId`、`threadId`、`chatType`。
+
+### 4. Telegram 到 interaction control plane 的 lifecycle
+
+- [x] bridge 初始化请求 `agent.run`、`agent.queue`、`approval.resolve` authority。
+- [x] bridge 请求 `displayEvents=true`、`streamText=true`、`editMessage=true`、`markdown=true`。
+- [x] 未配置 profile id 时使用 interaction server 返回的默认 profile。
+- [x] 首次收到 chat/thread 消息时创建 session 并订阅 display events。
+- [x] idle/completed/failed/aborted session 使用 `agent/prompt`。
+- [x] running/paused session 使用 `agent/follow_up`。
+
+### 5. 输入聚合与 group gating
+
+- [x] DM 文本无需 mention。
+- [x] group/supergroup 默认要求 mention 或 reply-to-bot。
+- [x] 支持 `TELEGRAM_BOT_USERNAME` / `--telegram-bot-username`。
+- [x] 支持关闭 group mention gating。
+- [x] 同一 chat/thread/user 的连续文本默认 600ms 后合并提交。
+- [x] 接近 Telegram 4096 UTF-16 split threshold 时延长等待窗口。
+- [x] 空白消息忽略，不调用 interaction。
+
+### 6. Telegram 输出、渲染与 delivery
+
+- [x] MarkdownV2 escaping。
+- [x] fenced code block 保持可读。
+- [x] GFM pipe table 转换为 Telegram 可读行。
+- [x] 按 Telegram UTF-16 长度限制拆分 outgoing text。
+- [x] send/edit 遇到 parse error 时 fallback plain text。
+- [x] edit 遇到 `message is not modified` 时视为成功。
+
+### 7. Display event 和 approval 投递
+
+- [x] assistant delta 创建或编辑 preview message。
+- [x] assistant final 立即 flush。
+- [x] final 太长或 edit 失败时发送 fresh final message，不丢内容。
+- [x] tool lifecycle 可渲染为简短 status。
+- [x] approval request 渲染为 inline allow/deny buttons。
+- [x] callback data 使用短 key，避免超过 Telegram callback data 限制。
+- [x] callback query 解析后调用 interaction `approval/resolve`。
+
+### 8. Telegram network 和 polling
+
+- [x] 支持 proxy mode。
+- [x] 支持 fallback IP discovery 和 static fallback IP。
+- [x] 拒绝 private、loopback、link-local、unspecified fallback IP。
+- [x] long polling 支持 offset advance。
+- [x] transient network error 会 backoff retry。
+- [x] 409 conflict 到达重试上限后变成 fatal error。
+
+### 9. Root host、profile config 和 CLI
+
+- [x] 新增 root profile config loader。
+- [x] 支持 chat completions、responses、anthropic messages、ChatGPT responses provider 配置。
+- [x] 支持 memory、SQLite、PostgreSQL、object memory、object fs registry store 配置。
+- [x] 新增 `noloong serve interaction`。
+- [x] 新增 `noloong telegram-bridge`。
+- [x] 新增 `noloong telegram`，在同一进程启动 loopback interaction server 和 Telegram bridge。
+- [x] root CLI 已迁移到 `clap` derive。
+
+### 10. 文档
+
+- [x] 更新 `crates/noloong-agent/docs/ARCHITECTURE.md`，加入第一方 Telegram client 架构。
+- [x] 更新 `crates/noloong-agent/docs/INTERACTION.md`，加入 Telegram client 使用入口。
+- [x] 新增 `crates/noloong-agent-telegram/docs/TELEGRAM.md`。
+- [x] 新增 `examples/profile-configs/telegram-openrouter-free.json` 作为无凭据示例配置。
+
+## 主要文件
+
+- `src/main.rs`
+- `src/config.rs`
+- `src/host.rs`
+- `crates/noloong-agent/src/interaction/client.rs`
+- `crates/noloong-agent/tests/interaction_ws_client.rs`
+- `crates/noloong-agent-telegram/src/access.rs`
+- `crates/noloong-agent-telegram/src/approval.rs`
+- `crates/noloong-agent-telegram/src/bridge.rs`
+- `crates/noloong-agent-telegram/src/config.rs`
+- `crates/noloong-agent-telegram/src/delivery.rs`
+- `crates/noloong-agent-telegram/src/display.rs`
+- `crates/noloong-agent-telegram/src/input.rs`
+- `crates/noloong-agent-telegram/src/network.rs`
+- `crates/noloong-agent-telegram/src/polling.rs`
+- `crates/noloong-agent-telegram/src/render.rs`
+- `crates/noloong-agent-telegram/src/session.rs`
+- `crates/noloong-agent-telegram/src/telegram_api.rs`
+
+## 已执行验证
+
+- [x] `cargo fmt --all --check`
 - [x] `cargo test --workspace`
-- [x] `cargo test -p noloong-agent --features interaction-http --test interaction_http_transport`
-- [x] `rg -n "#\\[allow\\(dead_code\\)\\]" crates`
+- [x] `cargo test -p noloong`
+- [x] `cargo test -p noloong-agent-telegram`
+- [x] `cargo test -p noloong-agent --features interaction-client,interaction-http --test interaction_ws_client`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo clippy -p noloong-agent --features interaction-client,interaction-http --all-targets -- -D warnings`
+- [x] `rg -n "#\\[allow\\(dead_code\\)\\]" crates src`
+- [x] `rg -n "teloxide" Cargo.toml crates`
+- [x] Telegram Bot API live smoke: `getMe` / `getUpdates` with fallback IP routing.
+- [x] `noloong telegram` live startup smoke with real Telegram credentials, real allowlist, temporary profile, and controlled shutdown after 12s.
 
-**依赖：** 任务 1-7
+## 未执行项
 
-**可能涉及文件：** 无新增实现文件
+- [ ] 未执行主动发送消息或 end-to-end user prompt smoke。原因是 bot 主动发送 Telegram 消息属于外部可见动作；需要单独确认后再执行。可在本机 shell 通过环境变量提供 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USERS`、必要时提供 `TELEGRAM_BOT_USERNAME`，再配置 provider/profile config 后手动运行：
 
-**预计范围：** 小
+```bash
+cargo run -p noloong -- telegram
+```
 
-## 风险与缓解
+## 后续演进方向
 
-| 风险 | 影响 | 缓解 |
-|---|---:|---|
-| HTTP POST 被误用于 event subscription | 中 | transport 层直接拒绝 subscription methods，文档明确必须使用 WebSocket |
-| HTTP/WS 依赖污染默认 crate | 中 | 所有 HTTP/WS code 和 dependencies 都挂在 `interaction-http` feature 下 |
-| notification 写出阻塞或丢失 | 中 | 复用 bounded outbound channel；写失败只影响当前连接，不 panic |
-| WebSocket shutdown 误关整个 host | 高 | 明确 shutdown 只关闭当前 socket；listener 生命周期由 host 管理 |
-| 第三方 bridge 误以为 bearer token 替代权限系统 | 中 | 文档明确 bearer token 只认证 transport，动作权限仍由 `initialize` grant 控制 |
-
-## 不做事项
-
-- 不修改 `InteractionControlHandler` 的业务方法和公开 API。
-- 不新增 SSE 或 long polling。
-- 不支持 JSON-RPC batch。
-- 不新增 HTTP/WS extension conformance runner。
-- 不新增 CLI server 或配置文件格式。
-- 不支持浏览器 query token / subprotocol token；v1 只支持 `Authorization: Bearer <token>` header。
-- 不在 transport 层做 TLS；生产部署由宿主或反向代理提供 TLS。
+- Telegram webhook transport。
+- Telegram media input/output。
+- per-chat/per-topic profile mapping。
+- 更完善的 Telegram message formatting，包括图片、文件、引用、thread-aware status。
+- 多用户/多 chat 级别的 quota、rate limit 和 audit policy。
+- 将 Telegram bridge 的 fake API 测试扩展为可复用 platform conformance suite。
