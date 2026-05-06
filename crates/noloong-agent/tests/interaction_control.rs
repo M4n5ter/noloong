@@ -1,16 +1,17 @@
 use noloong_agent::{
     AgentManifest, AgentSession, BuiltInToolName, ManifestPatch,
     interaction::{
-        AgentRuntimeProfile, AgentSessionCreateRequest, AgentSessionRegistry,
-        DISPLAY_EVENT_NOTIFICATION, InteractionCapabilityPolicy, InteractionControlHandler,
-        InteractionError, InteractionFuture, InteractionProfileDescriptor, RAW_EVENT_NOTIFICATION,
-        serve_jsonrpc,
+        AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
+        AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore,
+        DISPLAY_EVENT_NOTIFICATION, InMemoryAgentSessionRegistryStore, InteractionCapabilityPolicy,
+        InteractionControlHandler, InteractionError, InteractionFuture,
+        InteractionProfileDescriptor, RAW_EVENT_NOTIFICATION, serve_jsonrpc,
     },
     process::StartCommandRequest,
 };
 use noloong_agent_core::{
-    AgentRuntime, BoxFuture, CancellationToken, ModelProvider, ModelRequest, ModelStreamEvent,
-    ModelStreamSink, StopReason, ToolCall,
+    AgentMessage, AgentRuntime, AgentState, BoxFuture, CancellationToken, ModelProvider,
+    ModelRequest, ModelStreamEvent, ModelStreamSink, QueueMode, RunStatus, StopReason, ToolCall,
 };
 use serde_json::{Map, Value, json};
 use std::{
@@ -383,6 +384,60 @@ async fn interaction_control_edits_agent_queues() {
 }
 
 #[tokio::test]
+async fn interaction_control_queue_changes_are_persisted() {
+    let store = Arc::new(InMemoryAgentSessionRegistryStore::default());
+    let registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![text_profile("default")],
+        Arc::clone(&store) as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+    let handler =
+        InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all());
+    let queued_message =
+        serde_json::to_value(AgentMessage::user("queued-user", "queued input")).unwrap();
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                1,
+                "initialize",
+                json!({
+                    "name": "queue-client",
+                    "requestedAuthority": ["agent.queue"]
+                }),
+            ),
+            rpc(2, "session/create", json!({"sessionId": "root"})),
+            rpc(
+                3,
+                "queue/set_mode",
+                json!({"sessionId": "root", "queue": "steering", "mode": "all"}),
+            ),
+            rpc(
+                4,
+                "queue/edit",
+                json!({
+                    "sessionId": "root",
+                    "queue": "steering",
+                    "messages": [{
+                        "message": queued_message,
+                        "intent": "user_input"
+                    }]
+                }),
+            ),
+            rpc(5, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert!(response(&messages, 4).get("result").is_some());
+    let record = store.get("root").await.unwrap().unwrap();
+    assert_eq!(record.queues.steering.mode, QueueMode::All);
+    assert_eq!(record.queues.steering.messages[0].message.id, "queued-user");
+}
+
+#[tokio::test]
 async fn interaction_control_lists_approves_and_applies_manifest_proposals() {
     let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
     registry
@@ -443,6 +498,104 @@ async fn interaction_control_lists_approves_and_applies_manifest_proposals() {
     assert_eq!(
         response(&messages, 6)["result"]["manifest"]["systemPrompt"],
         "Updated prompt."
+    );
+}
+
+#[tokio::test]
+async fn interaction_control_manifest_apply_is_persisted() {
+    let store = Arc::new(InMemoryAgentSessionRegistryStore::default());
+    let registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![text_profile("default")],
+        Arc::clone(&store) as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("root".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let registered = registry.get("root").await.unwrap().unwrap();
+    let proposal = registered
+        .session()
+        .proposal_store()
+        .record_pending_proposal(ManifestPatch::ReplaceSystemPrompt {
+            prompt: "Persisted prompt.".into(),
+        })
+        .unwrap();
+    let handler =
+        InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all());
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                1,
+                "initialize",
+                json!({
+                    "name": "manifest-client",
+                    "requestedAuthority": ["manifest.apply"]
+                }),
+            ),
+            rpc(
+                2,
+                "manifest/proposals/approve",
+                json!({"sessionId": "root", "proposalId": proposal.proposal_id}),
+            ),
+            rpc(3, "manifest/apply_approved", json!({"sessionId": "root"})),
+            rpc(4, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response(&messages, 3)["result"]["appliedProposalIds"][0],
+        proposal.proposal_id
+    );
+    assert_eq!(
+        store
+            .get("root")
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest
+            .system_prompt,
+        "Persisted prompt."
+    );
+}
+
+#[tokio::test]
+async fn interaction_control_get_reports_interrupted_session() {
+    let store = Arc::new(InMemoryAgentSessionRegistryStore::default());
+    let mut record = control_record("root");
+    record.state.status = RunStatus::Running;
+    record.state.active_phase = Some("model_stream".into());
+    store.insert(record).await.unwrap();
+    let registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![text_profile("default")],
+        Arc::clone(&store) as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+    let handler =
+        InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all());
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(1, "initialize", json!({"name": "session-client"})),
+            rpc(2, "session/get", json!({"sessionId": "root"})),
+            rpc(3, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(response(&messages, 2)["result"]["status"], "failed");
+    assert_eq!(
+        store.get("root").await.unwrap().unwrap().state.status,
+        RunStatus::Failed
     );
 }
 
@@ -723,6 +876,28 @@ fn model_profile(profile_id: &str, model: Arc<dyn ModelProvider>) -> Arc<dyn Age
         },
         model,
     })
+}
+
+fn control_record(session_id: &str) -> AgentSessionRecord {
+    AgentSessionRecord {
+        schema_version: AGENT_SESSION_RECORD_SCHEMA_VERSION,
+        session_id: session_id.into(),
+        profile_id: "default".into(),
+        parent_session_id: None,
+        role: None,
+        manifest: AgentManifest::default(),
+        state: AgentState {
+            run_id: Some("stored-run".into()),
+            status: RunStatus::Completed,
+            messages: vec![AgentMessage::user("stored-user", "hello")],
+            completed_turns: 1,
+            ..AgentState::default()
+        },
+        queues: Default::default(),
+        metadata: Map::new(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    }
 }
 
 struct TestProfile {

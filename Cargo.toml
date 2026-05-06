@@ -19,6 +19,7 @@ base64 = "0.22"
 bytes = "1.11"
 getrandom = "0.4"
 memchr = "2.8"
+opendal = { version = "0.56", default-features = false, features = ["executors-tokio", "services-fs", "services-memory"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = "0.39"
 serde = { version = "1.0", features = ["derive"] }
@@ -26,7 +27,8 @@ serde_json = "1.0"
 sha2 = "0.11"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-toasty = { version = "0.5", default-features = false, features = ["sqlite"] }
+toasty = { version = "0.5", default-features = false }
+toasty-driver-postgresql = "0.5"
 toasty-driver-sqlite = "0.5"
 url = "2.5"
 

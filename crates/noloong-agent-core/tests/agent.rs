@@ -1,5 +1,5 @@
 use noloong_agent_core::{
-    Agent, AgentCoreError, AgentEventKind, AgentMessage, BeforeToolCallContext,
+    Agent, AgentCoreError, AgentEventKind, AgentMessage, AgentState, BeforeToolCallContext,
     BeforeToolCallResult, BoxFuture, CancellationToken, ContentBlock, ModelProvider, ModelRequest,
     ModelStreamEvent, ModelStreamSink, QueueMode, QueuedAgentMessage, QueuedMessageIntent, Result,
     RunStatus, StopReason, ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolCallHook,
@@ -38,6 +38,40 @@ async fn agent_continue_run_validates_last_message_role() -> Result<()> {
     let error = agent.continue_run().await.unwrap_err();
 
     assert!(error.to_string().contains("cannot continue from assistant"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_builder_restores_initial_state() -> Result<()> {
+    let initial_state = AgentState {
+        status: RunStatus::Completed,
+        messages: vec![AgentMessage::user("restored-user", "restored")],
+        completed_turns: 7,
+        ..AgentState::default()
+    };
+    let agent = Agent::builder()
+        .with_model_provider(Arc::new(CountingModel::default()))
+        .with_initial_state(initial_state.clone())
+        .build()?;
+
+    assert_eq!(agent.state().await, initial_state);
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_modes_are_readable() -> Result<()> {
+    let agent = Agent::builder()
+        .with_model_provider(Arc::new(CountingModel::default()))
+        .build()?;
+
+    assert_eq!(agent.steering_queue_mode(), QueueMode::OneAtATime);
+    assert_eq!(agent.follow_up_queue_mode(), QueueMode::OneAtATime);
+
+    agent.set_steering_mode(QueueMode::All);
+    agent.set_follow_up_mode(QueueMode::All);
+
+    assert_eq!(agent.steering_queue_mode(), QueueMode::All);
+    assert_eq!(agent.follow_up_queue_mode(), QueueMode::All);
     Ok(())
 }
 

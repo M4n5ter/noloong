@@ -10,6 +10,10 @@ This matrix tracks the application-layer interaction control plane. The core ker
 | JSON-RPC substrate | Line-delimited request/response, parse errors, shutdown, notification writer | `cargo test -p noloong-agent --test interaction_jsonrpc` |
 | Runtime profiles | `AgentRuntimeProfile`, `profile/list`, default profile selection | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
 | Session registry | `session/create`, `session/list`, `session/get`, `session/delete` | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
+| Registry snapshots | `AgentSessionRecord`, manifest/state/queue persistence, lazy restore, interrupted running normalization | `cargo test -p noloong-agent --test interaction_registry` |
+| SQLite registry store | `registry-store-sqlite`, file/in-memory SQL snapshot backend | `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite` |
+| PostgreSQL registry store | `registry-store-postgres`, env-gated live SQL snapshot backend | `cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres` |
+| OpenDAL registry store | `registry-store-object`, single-writer object snapshot backend | `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object` |
 | Subagents | `subagent/spawn`, parent metadata, initial prompt, capability gate | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
 | Agent run control | `agent/prompt`, `agent/continue`, `agent/abort`, `agent/wait_idle`, `agent/state` | `cargo test -p noloong-agent --test interaction_control` |
 | Queues | `agent/steer`, `agent/follow_up`, `queue/list`, `queue/edit`, `queue/clear`, `queue/set_mode` | `cargo test -p noloong-agent --test interaction_control` |
@@ -28,6 +32,9 @@ Run these before accepting a change that modifies interaction wire types, handle
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite
+cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object
+cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres
 node --check examples/interaction/typescript-bridge/bridge.mjs
 python3 -m py_compile examples/interaction/python-bridge/bridge.py
 ```

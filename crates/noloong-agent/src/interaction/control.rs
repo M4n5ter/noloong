@@ -3,7 +3,7 @@ use super::{
     InteractionAuthorityCapability, InteractionCapabilityGrant, InteractionCapabilityPolicy,
     InteractionClientInfo, InteractionError, InteractionFuture, InteractionNotifier,
     InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionUxCapabilities,
-    JsonRpcHandler, JsonRpcHandlerOutput, SubagentSpawnRequest,
+    JsonRpcHandler, JsonRpcHandlerOutput, SubagentSpawnRequest, store::missing_session_error,
 };
 use crate::{ReadOutputRequest, text};
 use noloong_agent_core::{
@@ -147,7 +147,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                 }
                 "session/list" => {
                     let request = parse_params::<AgentSessionListFilter>(params)?;
-                    value(self.inner.registry.list(request).await)?
+                    value(self.inner.registry.list(request).await?)?
                 }
                 "session/get" => {
                     let request = parse_params::<SessionRequest>(params)?;
@@ -228,14 +228,14 @@ impl JsonRpcHandler for InteractionControlHandler {
                             registered.agent().steer_user_input(message)
                         }
                     }
-                    value(registered.descriptor().await)?
+                    value(registered.save_snapshot().await?)?
                 }
                 "agent/follow_up" => {
                     self.require(method, InteractionAuthorityCapability::AgentQueue)?;
                     let request = parse_params::<AgentFollowUpRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     registered.agent().follow_up(request.message);
-                    value(registered.descriptor().await)?
+                    value(registered.save_snapshot().await?)?
                 }
                 "queue/list" => {
                     let request = parse_params::<QueueRequest>(params)?;
@@ -257,6 +257,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .map(InteractionQueuedMessage::into_core)
                             .collect(),
                     );
+                    registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
                 "queue/clear" => {
@@ -264,6 +265,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                     let request = parse_params::<QueueRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     clear_queue(registered.agent(), request.queue);
+                    registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
                 "queue/set_mode" => {
@@ -271,6 +273,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                     let request = parse_params::<QueueSetModeRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     set_queue_mode(registered.agent(), request.queue, request.mode);
+                    registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
                 "event/subscribe" => {
@@ -354,11 +357,9 @@ impl JsonRpcHandler for InteractionControlHandler {
                 "manifest/apply_approved" => {
                     self.require(method, InteractionAuthorityCapability::ManifestApply)?;
                     let request = parse_params::<SessionRequest>(params)?;
-                    let applied = self
-                        .session(&request.session_id)
-                        .await?
-                        .session()
-                        .apply_approved_manifest_patches()?;
+                    let registered = self.session(&request.session_id).await?;
+                    let applied = registered.session().apply_approved_manifest_patches()?;
+                    registered.save_snapshot().await?;
                     value(ManifestApplyResult {
                         applied_proposal_ids: applied,
                     })?
@@ -444,7 +445,7 @@ impl InteractionControlHandler {
             .registry
             .get(session_id)
             .await?
-            .ok_or_else(|| InteractionError::not_found(format!("session not found: {session_id}")))
+            .ok_or_else(|| missing_session_error(session_id))
     }
 
     async fn session_descriptor(
@@ -455,7 +456,7 @@ impl InteractionControlHandler {
             .registry
             .get_descriptor(session_id)
             .await?
-            .ok_or_else(|| InteractionError::not_found(format!("session not found: {session_id}")))
+            .ok_or_else(|| missing_session_error(session_id))
     }
 
     async fn subscribe_raw(

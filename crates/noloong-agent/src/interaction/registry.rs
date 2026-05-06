@@ -1,93 +1,29 @@
 use super::{
-    AgentRuntimeProfile, InteractionError, InteractionFuture, InteractionProfileDescriptor,
+    AgentRuntimeProfile, InteractionError, InteractionProfileDescriptor,
     InteractionSessionDescriptor, InteractionSessionStatus,
+    store::{
+        AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentSessionQueueSnapshot, AgentSessionQueueState,
+        AgentSessionRecord, AgentSessionRegistryStore, InMemoryAgentSessionRegistryStore,
+        current_unix_ms, duplicate_session_error, missing_session_error,
+    },
 };
 use crate::{AgentManifest, AgentSession};
-use noloong_agent_core::{Agent, AgentMessage, RunStatus};
+use noloong_agent_core::{
+    Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentMessage, AgentState, RunStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSessionRecord {
-    pub session_id: String,
-    pub profile_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    pub manifest: AgentManifest,
-    #[serde(default)]
-    pub metadata: Map<String, Value>,
-}
-
-pub trait AgentSessionRegistryStore: Send + Sync {
-    fn upsert<'a>(&'a self, record: AgentSessionRecord) -> InteractionFuture<'a, ()>;
-
-    fn remove<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()>;
-
-    fn get<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<AgentSessionRecord>>;
-
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>>;
-}
-
-#[derive(Clone, Default)]
-pub struct InMemoryAgentSessionRegistryStore {
-    records: Arc<Mutex<BTreeMap<String, AgentSessionRecord>>>,
-}
-
-impl AgentSessionRegistryStore for InMemoryAgentSessionRegistryStore {
-    fn upsert<'a>(&'a self, record: AgentSessionRecord) -> InteractionFuture<'a, ()> {
-        Box::pin(async move {
-            self.records
-                .lock()
-                .expect("interaction session store lock poisoned")
-                .insert(record.session_id.clone(), record);
-            Ok(())
-        })
-    }
-
-    fn remove<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()> {
-        Box::pin(async move {
-            self.records
-                .lock()
-                .expect("interaction session store lock poisoned")
-                .remove(session_id);
-            Ok(())
-        })
-    }
-
-    fn get<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<AgentSessionRecord>> {
-        Box::pin(async move {
-            Ok(self
-                .records
-                .lock()
-                .expect("interaction session store lock poisoned")
-                .get(session_id)
-                .cloned())
-        })
-    }
-
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
-        Box::pin(async move {
-            Ok(self
-                .records
-                .lock()
-                .expect("interaction session store lock poisoned")
-                .values()
-                .cloned()
-                .collect())
-        })
-    }
-}
+const INTERRUPTED_RUNNING_SESSION_ERROR: &str =
+    "agent session was interrupted while running and cannot be resumed automatically";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -140,16 +76,19 @@ pub struct AgentSessionDeleteOptions {
     pub force_abort: bool,
 }
 
-#[derive(Clone)]
 pub struct RegisteredAgentSession {
-    record: AgentSessionRecord,
+    record: Mutex<AgentSessionRecord>,
     session: AgentSession,
     agent: Agent,
+    store: Arc<dyn AgentSessionRegistryStore>,
 }
 
 impl RegisteredAgentSession {
-    pub fn record(&self) -> &AgentSessionRecord {
-        &self.record
+    pub fn record(&self) -> AgentSessionRecord {
+        self.record
+            .lock()
+            .expect("interaction session record lock poisoned")
+            .clone()
     }
 
     pub fn session(&self) -> &AgentSession {
@@ -161,10 +100,27 @@ impl RegisteredAgentSession {
     }
 
     pub async fn descriptor(&self) -> InteractionSessionDescriptor {
-        let state = self.agent.state().await;
-        let mut descriptor = descriptor_from_record(&self.record, state);
-        descriptor.manifest = self.session.manifest();
-        descriptor
+        descriptor_from_record(&self.snapshot_record().await)
+    }
+
+    pub async fn save_snapshot(&self) -> Result<InteractionSessionDescriptor, InteractionError> {
+        let record = self.snapshot_record().await;
+        self.store.save(record.clone()).await?;
+        *self
+            .record
+            .lock()
+            .expect("interaction session record lock poisoned") = record.clone();
+        Ok(descriptor_from_record(&record))
+    }
+
+    async fn snapshot_record(&self) -> AgentSessionRecord {
+        let mut record = self.record();
+        record.schema_version = AGENT_SESSION_RECORD_SCHEMA_VERSION;
+        record.manifest = self.session.manifest();
+        record.state = self.agent.state().await;
+        record.queues = queue_snapshot_from_agent(&self.agent);
+        record.updated_at_ms = current_unix_ms();
+        record
     }
 }
 
@@ -179,6 +135,7 @@ struct AgentSessionRegistryInner {
     store: Arc<dyn AgentSessionRegistryStore>,
     sessions: RwLock<BTreeMap<String, Arc<RegisteredAgentSession>>>,
     creating_sessions: Mutex<BTreeSet<String>>,
+    session_changes: Notify,
     counter: AtomicU64,
 }
 
@@ -194,6 +151,7 @@ impl Drop for CreateSessionReservation {
             .lock()
             .expect("interaction creating sessions lock poisoned")
             .remove(&self.session_id);
+        self.inner.session_changes.notify_waiters();
     }
 }
 
@@ -233,12 +191,13 @@ impl AgentSessionRegistry {
                 store,
                 sessions: RwLock::new(BTreeMap::new()),
                 creating_sessions: Mutex::new(BTreeSet::new()),
+                session_changes: Notify::new(),
                 counter: AtomicU64::new(0),
             }),
         })
     }
 
-    pub fn profile_descriptors(&self) -> Vec<super::InteractionProfileDescriptor> {
+    pub fn profile_descriptors(&self) -> Vec<InteractionProfileDescriptor> {
         self.inner
             .profiles
             .values()
@@ -270,43 +229,30 @@ impl AgentSessionRegistry {
             .unwrap_or_else(|| self.next_session_id());
         let _reservation = self.reserve_session_id(&session_id)?;
         if self.inner.sessions.read().await.contains_key(&session_id) {
-            return Err(InteractionError::invalid_params(format!(
-                "session already exists: {session_id}"
-            )));
-        }
-        if self.inner.store.get(&session_id).await?.is_some() {
-            return Err(InteractionError::invalid_params(format!(
-                "session already exists: {session_id}"
-            )));
+            return Err(duplicate_session_error(&session_id));
         }
 
-        let session = AgentSession::builder()
-            .with_manifest(manifest.clone())
-            .build();
-        let runtime = profile.build_runtime(&session, &manifest).await?;
-        let agent = Agent::builder()
-            .with_runtime(Arc::new(runtime))
-            .build()
-            .map_err(InteractionError::from)?;
+        let created_at_ms = current_unix_ms();
         let record = AgentSessionRecord {
+            schema_version: AGENT_SESSION_RECORD_SCHEMA_VERSION,
             session_id: session_id.clone(),
             profile_id,
             parent_session_id: request.parent_session_id,
             role: request.role,
             manifest,
+            state: AgentState::default(),
+            queues: AgentSessionQueueSnapshot::default(),
             metadata: request.metadata,
+            created_at_ms,
+            updated_at_ms: created_at_ms,
         };
-        let registered = Arc::new(RegisteredAgentSession {
-            record: record.clone(),
-            session,
-            agent,
-        });
-        self.inner.store.upsert(record).await?;
+        let registered = self.registered_from_record(record.clone()).await?;
+        self.inner.store.insert(record).await?;
         self.inner
             .sessions
             .write()
             .await
-            .insert(session_id, registered.clone());
+            .insert(session_id, Arc::clone(&registered));
         Ok(registered.descriptor().await)
     }
 
@@ -314,18 +260,19 @@ impl AgentSessionRegistry {
         &self,
         request: SubagentSpawnRequest,
     ) -> Result<InteractionSessionDescriptor, InteractionError> {
-        let parent = self.get(&request.parent_session_id).await?.ok_or_else(|| {
-            InteractionError::not_found(format!(
-                "parent session not found: {}",
-                request.parent_session_id
-            ))
-        })?;
+        let parent = self
+            .get_descriptor(&request.parent_session_id)
+            .await?
+            .ok_or_else(|| {
+                InteractionError::not_found(format!(
+                    "parent session not found: {}",
+                    request.parent_session_id
+                ))
+            })?;
         let descriptor = self
             .create_session(AgentSessionCreateRequest {
                 session_id: None,
-                profile_id: request
-                    .profile_id
-                    .or_else(|| Some(parent.record.profile_id.clone())),
+                profile_id: request.profile_id.or(Some(parent.profile_id)),
                 manifest: request.manifest,
                 parent_session_id: Some(request.parent_session_id),
                 role: request.role,
@@ -341,7 +288,22 @@ impl AgentSessionRegistry {
         Ok(descriptor)
     }
 
-    pub async fn list(&self, filter: AgentSessionListFilter) -> Vec<InteractionSessionDescriptor> {
+    pub async fn list(
+        &self,
+        filter: AgentSessionListFilter,
+    ) -> Result<Vec<InteractionSessionDescriptor>, InteractionError> {
+        let mut descriptors = BTreeMap::new();
+        for record in self.inner.store.list().await? {
+            let record = self.normalize_record(record).await?;
+            if !record_filter_matches(&record, &filter) {
+                continue;
+            }
+            let descriptor = descriptor_from_record(&record);
+            if status_filter_matches(&descriptor, &filter) {
+                descriptors.insert(descriptor.session_id.clone(), descriptor);
+            }
+        }
+
         let sessions = self
             .inner
             .sessions
@@ -350,44 +312,59 @@ impl AgentSessionRegistry {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        let mut descriptors = Vec::new();
         for session in sessions {
-            if !record_filter_matches(session.record(), &filter) {
+            if !record_filter_matches(&session.record(), &filter) {
                 continue;
             }
             let descriptor = session.descriptor().await;
-            if !status_filter_matches(&descriptor, &filter) {
-                continue;
+            if status_filter_matches(&descriptor, &filter) {
+                descriptors.insert(descriptor.session_id.clone(), descriptor);
             }
-            descriptors.push(descriptor);
         }
-        descriptors
+        Ok(descriptors.into_values().collect())
     }
 
     pub async fn get(
         &self,
         session_id: &str,
     ) -> Result<Option<Arc<RegisteredAgentSession>>, InteractionError> {
-        if let Some(session) = self.inner.sessions.read().await.get(session_id).cloned() {
-            return Ok(Some(session));
+        loop {
+            if let Some(session) = self.loaded_session(session_id).await {
+                return Ok(Some(session));
+            }
+            let Some(_reservation) = self.try_reserve_session_id(session_id) else {
+                self.inner.session_changes.notified().await;
+                continue;
+            };
+            if let Some(session) = self.loaded_session(session_id).await {
+                return Ok(Some(session));
+            }
+            let Some(record) = self.inner.store.get(session_id).await? else {
+                return Ok(None);
+            };
+            let record = self.normalize_record(record).await?;
+            let registered = self.registered_from_record(record).await?;
+            self.inner
+                .sessions
+                .write()
+                .await
+                .insert(session_id.to_owned(), Arc::clone(&registered));
+            return Ok(Some(registered));
         }
-        let Some(record) = self.inner.store.get(session_id).await? else {
-            return Ok(None);
-        };
-        Err(InteractionError::internal(format!(
-            "session {} exists in store but is not loaded",
-            record.session_id
-        )))
     }
 
     pub async fn get_descriptor(
         &self,
         session_id: &str,
     ) -> Result<Option<InteractionSessionDescriptor>, InteractionError> {
-        let Some(session) = self.get(session_id).await? else {
+        if let Some(session) = self.loaded_session(session_id).await {
+            return Ok(Some(session.descriptor().await));
+        }
+        let Some(record) = self.inner.store.get(session_id).await? else {
             return Ok(None);
         };
-        Ok(Some(session.descriptor().await))
+        let record = self.normalize_record(record).await?;
+        Ok(Some(descriptor_from_record(&record)))
     }
 
     pub async fn delete_session(
@@ -395,10 +372,14 @@ impl AgentSessionRegistry {
         session_id: &str,
         options: AgentSessionDeleteOptions,
     ) -> Result<InteractionSessionDescriptor, InteractionError> {
-        let session = self.get(session_id).await?.ok_or_else(|| {
-            InteractionError::not_found(format!("session not found: {session_id}"))
-        })?;
-        let descriptor = session.descriptor().await;
+        let live_session = self.loaded_session(session_id).await;
+        let descriptor = if let Some(session) = &live_session {
+            session.descriptor().await
+        } else {
+            self.get_descriptor(session_id)
+                .await?
+                .ok_or_else(|| missing_session_error(session_id))?
+        };
         if matches!(
             descriptor.status,
             InteractionSessionStatus::Running | InteractionSessionStatus::Paused
@@ -408,11 +389,14 @@ impl AgentSessionRegistry {
                     "session is not idle: {session_id}"
                 )));
             }
-            session.agent.abort().await;
-            session.agent.wait_for_idle().await;
+            if let Some(session) = &live_session {
+                session.agent.abort().await;
+                session.agent.wait_for_idle().await;
+            }
         }
         self.inner.sessions.write().await.remove(session_id);
         self.inner.store.remove(session_id).await?;
+        self.inner.session_changes.notify_waiters();
         Ok(descriptor)
     }
 
@@ -421,41 +405,164 @@ impl AgentSessionRegistry {
         format!("session-{id}")
     }
 
+    async fn loaded_session(&self, session_id: &str) -> Option<Arc<RegisteredAgentSession>> {
+        self.inner.sessions.read().await.get(session_id).cloned()
+    }
+
+    async fn registered_from_record(
+        &self,
+        record: AgentSessionRecord,
+    ) -> Result<Arc<RegisteredAgentSession>, InteractionError> {
+        record
+            .validate_schema_version()
+            .map_err(InteractionError::internal)?;
+        let profile = self
+            .inner
+            .profiles
+            .get(&record.profile_id)
+            .cloned()
+            .ok_or_else(|| {
+                InteractionError::not_found(format!("profile not found: {}", record.profile_id))
+            })?;
+        let session = AgentSession::builder()
+            .with_manifest(record.manifest.clone())
+            .build();
+        let runtime = profile.build_runtime(&session, &record.manifest).await?;
+        let agent = Agent::builder()
+            .with_runtime(Arc::new(runtime))
+            .with_initial_state(record.state.clone())
+            .build()
+            .map_err(InteractionError::from)?;
+        restore_agent_queues(&agent, record.queues.clone());
+        let registered = Arc::new(RegisteredAgentSession {
+            record: Mutex::new(record),
+            session,
+            agent,
+            store: Arc::clone(&self.inner.store),
+        });
+        attach_snapshot_listener(&registered);
+        Ok(registered)
+    }
+
+    async fn normalize_record(
+        &self,
+        mut record: AgentSessionRecord,
+    ) -> Result<AgentSessionRecord, InteractionError> {
+        record
+            .validate_schema_version()
+            .map_err(InteractionError::internal)?;
+        if !matches!(record.state.status, RunStatus::Running) {
+            return Ok(record);
+        }
+        record.state.status = RunStatus::Failed;
+        record.state.last_error = Some(INTERRUPTED_RUNNING_SESSION_ERROR.into());
+        record.state.active_phase = None;
+        record.updated_at_ms = current_unix_ms();
+        self.inner.store.save(record.clone()).await?;
+        Ok(record)
+    }
+
     fn reserve_session_id(
         &self,
         session_id: &str,
     ) -> Result<CreateSessionReservation, InteractionError> {
+        self.try_reserve_session_id(session_id)
+            .ok_or_else(|| duplicate_session_error(session_id))
+    }
+
+    fn try_reserve_session_id(&self, session_id: &str) -> Option<CreateSessionReservation> {
         let mut creating = self
             .inner
             .creating_sessions
             .lock()
             .expect("interaction creating sessions lock poisoned");
         if !creating.insert(session_id.to_owned()) {
-            return Err(InteractionError::invalid_params(format!(
-                "session already exists: {session_id}"
-            )));
+            return None;
         }
-        Ok(CreateSessionReservation {
+        Some(CreateSessionReservation {
             inner: Arc::clone(&self.inner),
             session_id: session_id.to_owned(),
         })
     }
 }
 
-fn descriptor_from_record(
-    record: &AgentSessionRecord,
-    state: noloong_agent_core::AgentState,
-) -> InteractionSessionDescriptor {
+fn attach_snapshot_listener(registered: &Arc<RegisteredAgentSession>) {
+    let weak = Arc::downgrade(registered);
+    registered.agent.subscribe(move |event| {
+        let weak = Weak::clone(&weak);
+        async move {
+            if !event_requires_snapshot(&event) {
+                return Ok(());
+            }
+            if let Some(registered) = weak.upgrade() {
+                registered
+                    .save_snapshot()
+                    .await
+                    .map_err(|error| AgentCoreError::Provider(error.to_string()))?;
+            }
+            Ok(())
+        }
+    });
+}
+
+fn event_requires_snapshot(event: &AgentEvent) -> bool {
+    matches!(
+        event.kind,
+        AgentEventKind::RunStarted
+            | AgentEventKind::RunCompleted
+            | AgentEventKind::RunAborted
+            | AgentEventKind::RunFailed { .. }
+            | AgentEventKind::RunPaused { .. }
+            | AgentEventKind::RunResumed { .. }
+            | AgentEventKind::TurnCompleted { .. }
+            | AgentEventKind::PhaseStarted { .. }
+            | AgentEventKind::PhaseCompleted { .. }
+            | AgentEventKind::PhaseFailed { .. }
+            | AgentEventKind::EffectCommitted { .. }
+            | AgentEventKind::ToolApprovalRequested { .. }
+            | AgentEventKind::ToolApprovalResolved { .. }
+            | AgentEventKind::ToolApprovalExpired { .. }
+    )
+}
+
+fn descriptor_from_record(record: &AgentSessionRecord) -> InteractionSessionDescriptor {
     InteractionSessionDescriptor {
         session_id: record.session_id.clone(),
         profile_id: record.profile_id.clone(),
         parent_session_id: record.parent_session_id.clone(),
         role: record.role.clone(),
-        status: InteractionSessionStatus::from(state.status.clone()),
+        status: InteractionSessionStatus::from(record.state.status.clone()),
         manifest: record.manifest.clone(),
-        state,
+        state: record.state.clone(),
         metadata: record.metadata.clone(),
     }
+}
+
+fn queue_snapshot_from_agent(agent: &Agent) -> AgentSessionQueueSnapshot {
+    AgentSessionQueueSnapshot {
+        steering: AgentSessionQueueState::from_core(
+            agent.steering_queue_mode(),
+            agent.queued_steering_messages(),
+        ),
+        follow_up: AgentSessionQueueState::from_core(
+            agent.follow_up_queue_mode(),
+            agent.queued_follow_up_messages(),
+        ),
+    }
+}
+
+fn restore_agent_queues(agent: &Agent, queues: AgentSessionQueueSnapshot) {
+    let steering = queues.steering;
+    agent.set_steering_mode(steering.mode);
+    agent.edit_steering_queue(|queue| {
+        *queue = steering.into_core_messages();
+    });
+
+    let follow_up = queues.follow_up;
+    agent.set_follow_up_mode(follow_up.mode);
+    agent.edit_follow_up_queue(|queue| {
+        *queue = follow_up.into_core_messages();
+    });
 }
 
 fn manifest_for_request(

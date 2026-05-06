@@ -42,6 +42,10 @@ Read-only methods such as `profile/list`, `session/list`, `session/get`, `agent/
 
 Profiles are registered by the Rust host. A bridge can select a `profileId` but cannot send provider credentials.
 
+Session descriptors may come from a persisted registry store without a live runtime loaded in memory. `session/get` and `session/list` are read-only descriptor operations: they can return SQLite/PostgreSQL/OpenDAL-backed snapshots without constructing a provider, tools, or background process runtime. Run and mutation methods restore the live session lazily from the snapshot using the currently registered `AgentRuntimeProfile` with the same `profileId`.
+
+If a persisted snapshot was `running` when the previous process stopped, the registry reports it as `failed` and writes that interrupted status back to the store. Persisted `paused` sessions remain paused so approval and human workflows can be resumed by the host.
+
 ```json
 {"jsonrpc":"2.0","id":2,"method":"profile/list","params":{}}
 ```

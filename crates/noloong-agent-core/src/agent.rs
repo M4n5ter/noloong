@@ -270,6 +270,22 @@ impl Agent {
             .queued_messages()
     }
 
+    pub fn steering_queue_mode(&self) -> QueueMode {
+        self.inner
+            .steering_queue
+            .lock()
+            .expect("agent steering queue lock poisoned")
+            .mode
+    }
+
+    pub fn follow_up_queue_mode(&self) -> QueueMode {
+        self.inner
+            .follow_up_queue
+            .lock()
+            .expect("agent follow-up queue lock poisoned")
+            .mode
+    }
+
     pub fn edit_steering_queue<F>(&self, edit: F)
     where
         F: FnOnce(&mut Vec<QueuedAgentMessage>),
@@ -483,6 +499,11 @@ impl AgentBuilder {
 
     pub fn with_initial_messages(mut self, messages: Vec<AgentMessage>) -> Self {
         self.initial_state.messages = messages;
+        self
+    }
+
+    pub fn with_initial_state(mut self, state: AgentState) -> Self {
+        self.initial_state = state;
         self
     }
 

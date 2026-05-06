@@ -151,6 +151,23 @@ control plane 的核心对象是 `AgentSessionRegistry`。每个 registry entry 
 
 runtime 由 Rust host 注册 `AgentRuntimeProfile`。外部 bridge 只能选择 `profileId`，不能通过 JSON-RPC 传 provider credential 或任意模型配置。profile descriptor 可以携带默认 manifest patch；若创建 session 时没有传完整 manifest，registry 会先从 `AgentManifest::default()` 开始应用这些 patch。
 
+`AgentSessionRegistryStore` 持久化的是 application session snapshot，不是 `noloong-agent-core` 的 append-only event store。它保存 `AgentManifest`、`AgentState`、steering/follow-up queue、profile id、parent/role/metadata 和时间戳，用于让 interaction registry 在进程重启后恢复 session 目录和按需重建 live runtime。core event store 仍然负责 run-level event replay、approval resume 和审计顺序；两者不能互相替代。
+
+registry 支持 unloaded persisted session。`session/list` 和 `session/get` 可以直接从 store 中生成 descriptor，不会立即创建 provider、tool runtime 或后台进程管理器。只有 `agent/prompt`、`agent/continue`、queue/manifest mutation 等需要 live session 的操作才会触发 lazy restore：registry 用 snapshot 里的 `profileId` 查找当前 host 注册的 `AgentRuntimeProfile`，以 snapshot 中的 manifest 重建 `AgentRuntime`，再把 `AgentState` 和两类 queue 写回 core `Agent`。
+
+恢复策略是显式保守的：
+
+- `running` snapshot 说明上一进程在 run 中断，恢复时会被标记为 `failed`，并写回 store；不会自动继续调用模型或工具。
+- `paused` snapshot 会保持 paused 状态，用于 approval 或人工流程恢复。
+- 如果当前 host 没有注册 snapshot 所需的 `profileId`，恢复会失败；这是 host/runtime profile 配置问题，不由外部 bridge 动态补 credential。
+- profile 的默认 manifest patch 只在创建 session 时应用；恢复时使用 snapshot 中已持久化的 manifest。
+
+内置 store backend：
+
+- 默认 `InMemoryAgentSessionRegistryStore` 只适合测试或单进程临时 session。
+- `registry-store-sqlite` 和 `registry-store-postgres` feature 启用 Toasty SQL backend。SQLite 支持 memory/file URL；PostgreSQL 支持 `postgres://` 和 `postgresql://` URL。SQL backend 适合需要强约束 session id、跨进程或多写者一致性的 registry。
+- `registry-store-object` feature 启用 OpenDAL backend。每个 session 是 prefix 下的一个 JSON object，session id 使用 URL-safe base64 编码成 object key。该 backend 是 single-writer snapshot store，不承诺多进程同时写同一 registry 的强一致语义；需要多写者时应使用 SQL backend。
+
 权限分为两层：
 
 - authority capabilities：控制敏感动作，例如 `agent.run`、`agent.queue`、`approval.resolve`、`manifest.apply`、`process.control`、`subagent.spawn`、`session.delete`。
@@ -179,7 +196,6 @@ catalog key 必须完整；缺失 key 应在测试中失败，而不是运行时
 
 ## 后续演进方向
 
-- 为 `AgentSessionRegistryStore` 增加 SQLite/PostgreSQL/object-store backed implementation，并明确恢复 live session 时的 runtime profile 重建策略。
 - 在不改变 `InteractionControlHandler` 的前提下增加 WebSocket/HTTP transport；stdio JSON-RPC 继续作为最低依赖 conformance transport。
 - 将 display projection 拆成可插拔策略，使 Telegram、WeChat/iLink、TUI 和 Web UI 能各自定义消息合并、编辑和 truncation 策略。
 - 为 process control 增加可选 host sandbox/VMM policy，把当前 host-first tools 扩展到 SSH、Lima/QEMU 或其它隔离环境。

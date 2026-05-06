@@ -9,10 +9,24 @@ workspace = true
 [features]
 default = []
 openai = ["dep:noloong-openai"]
+registry-store-object = ["dep:base64", "dep:opendal"]
+registry-store-postgres = ["dep:toasty", "dep:toasty-driver-postgresql", "toasty/postgresql"]
+registry-store-sqlite = [
+    "dep:rusqlite",
+    "dep:toasty",
+    "dep:toasty-driver-sqlite",
+    "toasty/sqlite",
+]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 noloong-agent-core.workspace = true
 noloong-openai = { workspace = true, optional = true }
+opendal = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+toasty = { workspace = true, optional = true }
+toasty-driver-postgresql = { workspace = true, optional = true }
+toasty-driver-sqlite = { workspace = true, optional = true }
