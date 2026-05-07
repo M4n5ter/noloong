@@ -14,7 +14,7 @@ use crate::{
 use crate::{CancellationToken, ModelStreamSink};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use wire::{
@@ -45,10 +45,7 @@ impl ModelProvider for StdioModelProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
-            let stream_id = format!(
-                "model-{}",
-                self.extension.request_counter.load(Ordering::SeqCst) + 1
-            );
+            let stream_id = format!("model-{}", self.extension.next_request_id());
             let mut stream_events = self
                 .extension
                 .register_model_stream(stream_id.clone(), stream.clone())

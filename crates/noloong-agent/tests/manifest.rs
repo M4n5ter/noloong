@@ -1,3 +1,4 @@
+use noloong_agent::manifest::ManifestError;
 use noloong_agent::{
     AgentManifest, AgentPluginDeclaration, ApprovalPolicy, BuiltInToolName, FileEditToolPolicy,
     Locale, ManifestPatch, ManifestProposalStore, PluginEnvSource, PluginLoadFailurePolicy,
@@ -291,7 +292,41 @@ fn manifest_plugin_validation_rejects_empty_ids_and_commands() {
     let error = ManifestPatch::RegisterPlugin { plugin }
         .validate()
         .unwrap_err();
-    assert!(error.to_string().contains("duplicate allowed capability"));
+    assert_eq!(
+        error,
+        ManifestError::Invalid("duplicate allowed capability: tool:echo.run".into())
+    );
+}
+
+#[test]
+fn manifest_plugin_validation_rejects_zero_timeouts() {
+    let mut plugin = test_plugin("echo");
+    match &mut plugin.transport {
+        PluginTransport::Stdio(transport) => {
+            transport.request_timeout_secs = Some(0);
+        }
+    }
+    let error = ManifestPatch::RegisterPlugin { plugin }
+        .validate()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ManifestError::Invalid("requestTimeoutSecs must be greater than zero".into())
+    );
+
+    let mut plugin = test_plugin("echo");
+    match &mut plugin.transport {
+        PluginTransport::Stdio(transport) => {
+            transport.stream_timeout_secs = Some(0);
+        }
+    }
+    let error = ManifestPatch::RegisterPlugin { plugin }
+        .validate()
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ManifestError::Invalid("streamTimeoutSecs must be greater than zero".into())
+    );
 }
 
 fn test_plugin(plugin_id: &str) -> AgentPluginDeclaration {

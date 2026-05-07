@@ -88,10 +88,12 @@ async fn login_browser_server_ignores_state_mismatch_then_accepts_current_state(
 
     let stale_response = send_browser_callback(port, "code=stale-code&state=stale-state").await?;
     assert!(stale_response.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_http_body_matches_content_length(&stale_response, "Login failed.\n");
 
     let current_response =
         send_browser_callback(port, &format!("code=current-code&state={expected_state}")).await?;
     assert!(current_response.starts_with("HTTP/1.1 200 OK"));
+    assert_http_body_matches_content_length(&current_response, "Login completed.\n");
     let callback = callback.await.expect("callback task should not panic")?;
 
     assert_eq!(callback.code, "current-code");
@@ -119,6 +121,21 @@ async fn send_browser_callback(port: u16, query: &str) -> noloong_openai::Result
     let mut response = String::new();
     stream.read_to_string(&mut response).await?;
     Ok(response)
+}
+
+fn assert_http_body_matches_content_length(response: &str, expected_body: &str) {
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .expect("response should include header terminator");
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length:"))
+        .expect("response should include content length")
+        .trim()
+        .parse::<usize>()
+        .expect("content length should be valid");
+    assert_eq!(content_length, expected_body.len());
+    assert_eq!(body, expected_body);
 }
 
 #[tokio::test]

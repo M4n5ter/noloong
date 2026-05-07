@@ -138,6 +138,8 @@ impl StdioPluginTransport {
             validate_non_empty("env target name", target_name)?;
             source.validate()?;
         }
+        validate_positive_timeout("requestTimeoutSecs", self.request_timeout_secs)?;
+        validate_positive_timeout("streamTimeoutSecs", self.stream_timeout_secs)?;
         Ok(())
     }
 
@@ -261,6 +263,18 @@ fn validate_non_empty(field: &str, value: &str) -> Result<(), PluginDeclarationE
     if value.trim().is_empty() {
         return Err(PluginDeclarationError::Invalid(format!(
             "{field} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_positive_timeout(
+    field: &str,
+    value: Option<u64>,
+) -> Result<(), PluginDeclarationError> {
+    if value == Some(0) {
+        return Err(PluginDeclarationError::Invalid(format!(
+            "{field} must be greater than zero"
         )));
     }
     Ok(())

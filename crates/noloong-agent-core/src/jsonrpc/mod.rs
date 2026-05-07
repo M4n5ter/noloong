@@ -220,7 +220,7 @@ impl StdioExtension {
     where
         T: DeserializeOwned,
     {
-        let id = self.request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = self.next_request_id();
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
             id,
@@ -303,5 +303,9 @@ impl StdioExtension {
 
     async fn unregister_model_stream(&self, stream_id: &str) {
         self.model_stream_sinks.lock().await.remove(stream_id);
+    }
+
+    fn next_request_id(&self) -> u64 {
+        self.request_counter.fetch_add(1, Ordering::SeqCst) + 1
     }
 }

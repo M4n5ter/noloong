@@ -38,12 +38,8 @@ impl BrowserLoginServer {
             let request = String::from_utf8_lossy(&buffer[..read]);
             let callback = parse_http_request_callback(&request, &self.session.state);
             let response = match callback {
-                Ok(_) => {
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 22\r\n\r\nLogin completed.\n"
-                }
-                Err(_) => {
-                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 14\r\n\r\nLogin failed.\n"
-                }
+                Ok(_) => plain_text_http_response("200 OK", "Login completed.\n"),
+                Err(_) => plain_text_http_response("400 Bad Request", "Login failed.\n"),
             };
             stream.write_all(response.as_bytes()).await?;
             match callback {
@@ -173,6 +169,13 @@ async fn bind_callback_listener(config: &ChatGptLoginConfig) -> Result<(TcpListe
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn plain_text_http_response(status: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 fn parse_http_request_callback(request: &str, expected_state: &str) -> Result<BrowserCallback> {

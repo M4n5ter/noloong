@@ -124,25 +124,71 @@ fn manifest_patch_input_schema() -> Value {
                                         "allowedCapabilities": {
                                             "type": "array",
                                             "items": {
-                                                "type": "object",
-                                                "required": ["type"],
-                                                "properties": {
-                                                    "type": {
-                                                        "enum": [
-                                                            "model_provider",
-                                                            "tool",
-                                                            "context_provider",
-                                                            "phase_node",
-                                                            "phase_hook",
-                                                            "tool_call_hook",
-                                                            "compaction_summarizer",
-                                                            "context_compactor",
-                                                            "http_auth_provider"
-                                                        ]
+                                                "oneOf": [
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "model_provider"},
+                                                            "id": {"type": "string"}
+                                                        }
                                                     },
-                                                    "id": {"type": "string"},
-                                                    "name": {"type": "string"}
-                                                }
+                                                    {
+                                                        "required": ["type", "name"],
+                                                        "properties": {
+                                                            "type": {"const": "tool"},
+                                                            "name": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "context_provider"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "phase_node"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "phase_hook"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "tool_call_hook"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "compaction_summarizer"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "context_compactor"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    },
+                                                    {
+                                                        "required": ["type", "id"],
+                                                        "properties": {
+                                                            "type": {"const": "http_auth_provider"},
+                                                            "id": {"type": "string"}
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         },
                                         "transport": {
@@ -202,4 +248,55 @@ fn manifest_patch_input_schema() -> Value {
         }"#,
     )
     .expect("manifest patch tool input schema is valid JSON")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_patch_input_schema;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn manifest_patch_schema_matches_capability_selector_shapes() {
+        let schema = manifest_patch_input_schema();
+        let variants = schema["properties"]["patch"]["oneOf"][4]["properties"]["plugin"]
+            ["properties"]["allowedCapabilities"]["items"]["oneOf"]
+            .as_array()
+            .expect("capability selector schema should use oneOf");
+
+        let required_by_type = variants
+            .iter()
+            .map(|variant| {
+                let selector_type = variant["properties"]["type"]["const"]
+                    .as_str()
+                    .expect("selector type should be const");
+                let required = required_fields(variant);
+                (selector_type, required)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(required_by_type.len(), 9);
+        assert_eq!(required_by_type["tool"], vec!["type", "name"]);
+        for selector_type in [
+            "model_provider",
+            "context_provider",
+            "phase_node",
+            "phase_hook",
+            "tool_call_hook",
+            "compaction_summarizer",
+            "context_compactor",
+            "http_auth_provider",
+        ] {
+            assert_eq!(required_by_type[selector_type], vec!["type", "id"]);
+        }
+    }
+
+    fn required_fields(value: &Value) -> Vec<&str> {
+        value["required"]
+            .as_array()
+            .expect("selector schema should declare required fields")
+            .iter()
+            .map(|value| value.as_str().expect("required field should be a string"))
+            .collect()
+    }
 }
