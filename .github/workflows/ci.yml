@@ -34,6 +34,9 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      - name: Check profile config schema
+        run: cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json
+
       - name: Build examples
         run: cargo test -p noloong-agent-core --examples
 

@@ -1,4 +1,6 @@
 use noloong_agent_core::{ExtensionCapabilitySelector, StdioExtensionConfig};
+#[cfg(feature = "json-schema")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8,6 +10,7 @@ use std::{
 use thiserror::Error;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPluginDeclaration {
     pub plugin_id: String,
@@ -85,6 +88,7 @@ impl AgentPluginDeclaration {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -109,6 +113,7 @@ impl PluginTransport {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StdioPluginTransport {
     pub command: String,
@@ -164,6 +169,7 @@ impl StdioPluginTransport {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -205,6 +211,7 @@ impl PluginEnvSource {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PluginLoadFailurePolicy {
     #[default]

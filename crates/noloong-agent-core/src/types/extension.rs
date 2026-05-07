@@ -1,4 +1,6 @@
 use super::ToolSpec;
+#[cfg(feature = "json-schema")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -47,6 +49,7 @@ impl ExtensionCapability {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(
     tag = "type",
     rename_all = "snake_case",

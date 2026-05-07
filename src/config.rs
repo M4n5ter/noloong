@@ -1,5 +1,7 @@
+use jsonc_parser::{ParseOptions, parse_to_serde_value};
 use noloong_agent::{AgentPluginDeclaration, ManifestPatch};
 use noloong_agent_core::ContextCompactionMode;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
@@ -26,7 +28,7 @@ pub const DEFAULT_CHATGPT_TOKEN_FILE_ENV: &str = "NOLOONG_CHATGPT_TOKEN_FILE";
 const DEFAULT_CHATGPT_TOKEN_FILE_RELATIVE: &[&str] =
     &[".agents", "noloong", "chatgpt", "token.json"];
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HostProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,7 +43,7 @@ impl HostProfileConfig {
         let path = path.as_ref();
         let text = fs::read_to_string(path)
             .map_err(|error| CliConfigError::ReadConfig(format!("{}: {error}", path.display())))?;
-        serde_json::from_str(&text).map_err(|error| CliConfigError::ParseConfig(error.to_string()))
+        parse_profile_config_text(&text)
     }
 
     pub fn validate(&self) -> Result<(), CliConfigError> {
@@ -72,7 +74,7 @@ impl HostProfileConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeProfileConfig {
     pub profile_id: String,
@@ -92,7 +94,7 @@ pub struct RuntimeProfileConfig {
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -153,7 +155,7 @@ pub enum BuiltInProviderConfig {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -181,7 +183,7 @@ impl Default for ChatGptAuthConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvHeaderConfig {
     pub name: String,
@@ -190,7 +192,7 @@ pub struct EnvHeaderConfig {
     pub value_prefix: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -218,7 +220,7 @@ pub enum ProfileCompactionConfig {
     },
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -234,7 +236,7 @@ pub enum ProfileEventStoreConfig {
     },
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -379,6 +381,28 @@ fn default_migrate_on_connect() -> bool {
     true
 }
 
+fn parse_profile_config_text(text: &str) -> Result<HostProfileConfig, CliConfigError> {
+    let value = parse_profile_config_value(text)?;
+    serde_json::from_value(value).map_err(|error| CliConfigError::ParseConfig(error.to_string()))
+}
+
+pub(crate) fn parse_profile_config_value(text: &str) -> Result<Value, CliConfigError> {
+    parse_to_serde_value::<Value>(text, &profile_jsonc_parse_options())
+        .map_err(|error| CliConfigError::ParseConfig(error.to_string()))
+}
+
+pub(crate) fn profile_jsonc_parse_options() -> ParseOptions {
+    ParseOptions {
+        allow_comments: true,
+        allow_loose_object_property_names: false,
+        allow_trailing_commas: true,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+    }
+}
+
 fn parse_csv<T>(
     value: Option<String>,
     parse: impl Fn(&str) -> Result<T, CliConfigError>,
@@ -398,6 +422,7 @@ mod tests {
         BuiltInProviderConfig, ChatGptAuthConfig, HostProfileConfig, ProfileCompactionConfig,
         ProfileEventStoreConfig, RuntimeProfileConfig, resolve_chatgpt_token_file_with_env,
     };
+    use crate::test_support::{remove_temp_file, write_temp_file};
     use noloong_agent_core::ContextCompactionMode;
     use std::path::PathBuf;
 
@@ -427,6 +452,78 @@ mod tests {
             config.profiles[0].event_store,
             ProfileEventStoreConfig::Memory
         );
+    }
+
+    #[test]
+    fn profile_config_load_reads_json_file() {
+        let path = write_temp_file(
+            "profile-json",
+            "json",
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+                }]
+            }"#,
+        );
+
+        let config = HostProfileConfig::load(&path).unwrap();
+        remove_temp_file(path);
+
+        assert_eq!(config.profiles[0].profile_id, "default");
+    }
+
+    #[test]
+    fn profile_config_load_reads_jsonc_file() {
+        let path = write_temp_file(
+            "profile-jsonc",
+            "jsonc",
+            r#"{
+                // Editor tooling can keep comments in profile configs.
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                }],
+            }"#,
+        );
+
+        let config = HostProfileConfig::load(&path).unwrap();
+        remove_temp_file(path);
+
+        assert_eq!(config.profiles[0].profile_id, "default");
+    }
+
+    #[test]
+    fn profile_config_loads_jsonc_example() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/profile-configs/telegram-openrouter-free.jsonc");
+
+        let config = HostProfileConfig::load(path).unwrap();
+
+        config.validate().unwrap();
+        assert_eq!(config.profiles[0].profile_id, "telegram-openrouter-free");
+    }
+
+    #[test]
+    fn profile_config_load_rejects_json5_only_syntax() {
+        let path = write_temp_file(
+            "profile-json5",
+            "jsonc",
+            r#"{
+                profiles: [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+                }]
+            }"#,
+        );
+
+        let error = HostProfileConfig::load(&path).unwrap_err();
+        remove_temp_file(path);
+
+        assert!(error.to_string().contains("failed to parse profile config"));
     }
 
     #[test]

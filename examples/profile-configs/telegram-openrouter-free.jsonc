@@ -1,0 +1,64 @@
+{
+  "$schema": "../../schemas/profile-config.schema.json",
+  // JSONC is supported only for root profile config files.
+  "defaultProfileId": "telegram-openrouter-free",
+  "registryStore": {
+    "type": "memory",
+  },
+  "profiles": [
+    {
+      "profileId": "telegram-openrouter-free",
+      "displayName": "Telegram OpenRouter Free",
+      "description": "JSONC example profile using OpenRouter's free router. Secrets are read from environment variables.",
+      "provider": {
+        "type": "chat_completions",
+        "providerId": "openrouter-free",
+        "model": "openrouter/free",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "headers": {
+          "HTTP-Referer": "https://github.com/M4n5ter/noloong",
+          "X-Title": "noloong telegram JSONC example",
+        },
+        "maxCompletionTokens": 1024,
+      },
+      "manifestPatches": [
+        {
+          "op": "set_locale",
+          "locale": "zh",
+        },
+        {
+          "op": "update_approval_policy",
+          "policy": {
+            "mode": "require_approval",
+          },
+        },
+        {
+          "op": "update_file_edit_tool_policy",
+          "policy": "auto_by_model",
+        },
+        {
+          "op": "enable_tool",
+          "toolName": "host.exec.start",
+        },
+        {
+          "op": "enable_tool",
+          "toolName": "host.exec.read",
+        },
+        {
+          "op": "enable_tool",
+          "toolName": "host.exec.wait",
+        },
+        {
+          "op": "enable_tool",
+          "toolName": "host.exec.list",
+        },
+      ],
+      "metadata": {
+        "channel": "telegram",
+        "example": true,
+        "format": "jsonc",
+      },
+    },
+  ],
+}

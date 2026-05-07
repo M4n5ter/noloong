@@ -1,4 +1,6 @@
 use crate::{AgentPluginDeclaration, ApprovalPolicy, Locale};
+#[cfg(feature = "json-schema")]
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -127,6 +129,7 @@ impl Default for AgentManifest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(tag = "op", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ManifestPatch {
     ReplaceSystemPrompt {
@@ -204,6 +207,7 @@ impl ManifestPatch {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum FileEditToolPolicy {
     #[default]
@@ -224,42 +228,43 @@ impl FileEditToolPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BuiltInToolName {
-    HostExecStart,
-    HostExecRead,
-    HostExecWait,
-    HostExecWrite,
-    HostExecTerminate,
-    HostExecList,
-    ManifestProposePatch,
+macro_rules! define_built_in_tool_names {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum BuiltInToolName {
+            $($variant,)+
+        }
+
+        impl BuiltInToolName {
+            pub const ALL: &'static [Self] = &[
+                $(Self::$variant,)+
+            ];
+
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            pub fn parse(value: &str) -> Result<Self, ManifestError> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|tool_name| tool_name.as_str() == value)
+                    .ok_or_else(|| ManifestError::UnknownTool(value.into()))
+            }
+        }
+    };
 }
 
-impl BuiltInToolName {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::HostExecStart => "host.exec.start",
-            Self::HostExecRead => "host.exec.read",
-            Self::HostExecWait => "host.exec.wait",
-            Self::HostExecWrite => "host.exec.write",
-            Self::HostExecTerminate => "host.exec.terminate",
-            Self::HostExecList => "host.exec.list",
-            Self::ManifestProposePatch => "agent.manifest.propose_patch",
-        }
-    }
-
-    pub fn parse(value: &str) -> Result<Self, ManifestError> {
-        match value {
-            "host.exec.start" => Ok(Self::HostExecStart),
-            "host.exec.read" => Ok(Self::HostExecRead),
-            "host.exec.wait" => Ok(Self::HostExecWait),
-            "host.exec.write" => Ok(Self::HostExecWrite),
-            "host.exec.terminate" => Ok(Self::HostExecTerminate),
-            "host.exec.list" => Ok(Self::HostExecList),
-            "agent.manifest.propose_patch" => Ok(Self::ManifestProposePatch),
-            other => Err(ManifestError::UnknownTool(other.into())),
-        }
-    }
+define_built_in_tool_names! {
+    HostExecStart => "host.exec.start",
+    HostExecRead => "host.exec.read",
+    HostExecWait => "host.exec.wait",
+    HostExecWrite => "host.exec.write",
+    HostExecTerminate => "host.exec.terminate",
+    HostExecList => "host.exec.list",
+    ManifestProposePatch => "agent.manifest.propose_patch",
 }
 
 impl std::fmt::Display for BuiltInToolName {
@@ -284,6 +289,30 @@ impl<'de> Deserialize<'de> for BuiltInToolName {
     {
         let value = String::deserialize(deserializer)?;
         Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "json-schema")]
+impl JsonSchema for BuiltInToolName {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BuiltInToolName".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::BuiltInToolName").into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        let values = BuiltInToolName::ALL
+            .iter()
+            .map(|tool_name| tool_name.as_str())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "type": "string",
+            "enum": values,
+        })
+        .try_into()
+        .expect("built-in tool name schema is valid")
     }
 }
 

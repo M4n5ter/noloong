@@ -1,0 +1,1083 @@
+{
+  "$defs": {
+    "AgentPluginDeclaration": {
+      "properties": {
+        "allowedCapabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExtensionCapabilitySelector"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "onLoadFailure": {
+          "$ref": "#/$defs/PluginLoadFailurePolicy",
+          "default": "disable_for_run"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "transport": {
+          "$ref": "#/$defs/PluginTransport"
+        }
+      },
+      "required": [
+        "pluginId",
+        "displayName",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "ApprovalPolicy": {
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "allow_all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "require_approval",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "fallback_to_human": {
+              "type": "boolean"
+            },
+            "mode": {
+              "const": "auto_review",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "fallback_to_human"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BuiltInProviderConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "apiKeyEnv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "baseUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "extraBody": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "maxCompletionTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "chat_completions",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "apiKeyEnv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "baseUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "extraBody": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "maxOutputTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "responses",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "apiKeyEnv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "baseUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "extraBody": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "maxTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "anthropic_messages",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "auth": {
+              "$ref": "#/$defs/ChatGptAuthConfig"
+            },
+            "model": {
+              "type": "string"
+            },
+            "providerId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "chatgpt_responses",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BuiltInToolName": {
+      "enum": [
+        "host.exec.start",
+        "host.exec.read",
+        "host.exec.wait",
+        "host.exec.write",
+        "host.exec.terminate",
+        "host.exec.list",
+        "agent.manifest.propose_patch"
+      ],
+      "type": "string"
+    },
+    "ChatGptAuthConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "tokenFile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tokenFileEnv": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "token_file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "headers": {
+              "items": {
+                "$ref": "#/$defs/EnvHeaderConfig"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "env_headers",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "headers"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ContextCompactionMode": {
+      "enum": [
+        "persistent_state",
+        "request_only"
+      ],
+      "type": "string"
+    },
+    "EnvHeaderConfig": {
+      "properties": {
+        "env": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "valuePrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "env"
+      ],
+      "type": "object"
+    },
+    "ExtensionCapabilitySelector": {
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "model_provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "tool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "context_provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "phase_node",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "phase_hook",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "tool_call_hook",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "compaction_summarizer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "context_compactor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "http_auth_provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileEditToolPolicy": {
+      "enum": [
+        "auto_by_model",
+        "apply_patch",
+        "write_file",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "Locale": {
+      "enum": [
+        "en",
+        "zh"
+      ],
+      "type": "string"
+    },
+    "ManifestPatch": {
+      "oneOf": [
+        {
+          "properties": {
+            "op": {
+              "const": "replace_system_prompt",
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "prompt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "locale": {
+              "$ref": "#/$defs/Locale"
+            },
+            "op": {
+              "const": "set_locale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "locale"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "enable_tool",
+              "type": "string"
+            },
+            "toolName": {
+              "$ref": "#/$defs/BuiltInToolName"
+            }
+          },
+          "required": [
+            "op",
+            "toolName"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "disable_tool",
+              "type": "string"
+            },
+            "toolName": {
+              "$ref": "#/$defs/BuiltInToolName"
+            }
+          },
+          "required": [
+            "op",
+            "toolName"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "update_approval_policy",
+              "type": "string"
+            },
+            "policy": {
+              "$ref": "#/$defs/ApprovalPolicy"
+            }
+          },
+          "required": [
+            "op",
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "update_file_edit_tool_policy",
+              "type": "string"
+            },
+            "policy": {
+              "$ref": "#/$defs/FileEditToolPolicy"
+            }
+          },
+          "required": [
+            "op",
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "register_plugin",
+              "type": "string"
+            },
+            "plugin": {
+              "$ref": "#/$defs/AgentPluginDeclaration"
+            }
+          },
+          "required": [
+            "op",
+            "plugin"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "op": {
+              "const": "set_plugin_enabled",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "pluginId",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "remove_plugin",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "pluginId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "metadata": {
+              "default": null
+            },
+            "op": {
+              "const": "reserved_phase_profile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "description"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginEnvSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "host_env",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginLoadFailurePolicy": {
+      "enum": [
+        "disable_for_run",
+        "fail_run"
+      ],
+      "type": "string"
+    },
+    "PluginTransport": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StdioPluginTransport",
+          "properties": {
+            "type": {
+              "const": "stdio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProfileCompactionConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "auto",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "contextWindowTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "keepRecentTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContextCompactionMode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requestTimeoutSecs": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reserveTokens": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "openai_responses",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProfileEventStoreConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "memory",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "databaseUrl": {
+              "type": "string"
+            },
+            "migrateOnConnect": {
+              "default": true,
+              "type": "boolean"
+            },
+            "type": {
+              "const": "sqlite",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "databaseUrl"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RegistryStoreConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "memory",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "databaseUrl": {
+              "type": "string"
+            },
+            "type": {
+              "const": "sqlite",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "databaseUrl"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "databaseUrl": {
+              "type": "string"
+            },
+            "type": {
+              "const": "postgres",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "databaseUrl"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "prefix": {
+              "default": "",
+              "type": "string"
+            },
+            "type": {
+              "const": "object_memory",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "prefix": {
+              "default": "",
+              "type": "string"
+            },
+            "root": {
+              "type": "string"
+            },
+            "type": {
+              "const": "object_fs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "root"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeProfileConfig": {
+      "properties": {
+        "compaction": {
+          "$ref": "#/$defs/ProfileCompactionConfig"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "eventStore": {
+          "$ref": "#/$defs/ProfileEventStoreConfig"
+        },
+        "manifestPatches": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManifestPatch"
+          },
+          "type": "array"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "plugins": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AgentPluginDeclaration"
+          },
+          "type": "array"
+        },
+        "profileId": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/BuiltInProviderConfig"
+        }
+      },
+      "required": [
+        "profileId",
+        "displayName",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "StdioPluginTransport": {
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PluginEnvSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "streamTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "defaultProfileId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "profiles": {
+      "items": {
+        "$ref": "#/$defs/RuntimeProfileConfig"
+      },
+      "type": "array"
+    },
+    "registryStore": {
+      "$ref": "#/$defs/RegistryStoreConfig"
+    }
+  },
+  "required": [
+    "profiles"
+  ],
+  "title": "Noloong Profile Config",
+  "type": "object"
+}

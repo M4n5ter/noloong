@@ -129,6 +129,30 @@ cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatg
 
 Set `"compaction": {"type": "none"}` in the profile to disable the ChatGPT Codex compact endpoint.
 
+## Profile Config Schema
+
+Root profile config has a checked-in JSON Schema at [`schemas/profile-config.schema.json`](schemas/profile-config.schema.json). Editors can reference it with a `$schema` field:
+
+```json
+{
+  "$schema": "../../schemas/profile-config.schema.json",
+  "profiles": [{
+    "profileId": "default",
+    "displayName": "Default",
+    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+  }]
+}
+```
+
+Regenerate or check the artifact with the root CLI:
+
+```bash
+cargo run -p noloong -- profile-config schema --output schemas/profile-config.schema.json
+cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json
+```
+
+Profile config loading also supports JSONC for comments and trailing commas; see [`examples/profile-configs/telegram-openrouter-free.jsonc`](examples/profile-configs/telegram-openrouter-free.jsonc). This applies only to root profile config files. JSON-RPC extension protocol messages, model provider payloads, and Telegram API payloads remain strict JSON. Noloong intentionally does not accept JSON5 syntax such as unquoted keys, single-quoted strings, or hexadecimal numbers, because that would widen the public config language beyond the editor-oriented JSONC use case.
+
 ## Extension Authoring
 
 The deterministic conformance examples are the fastest way to learn the stdio JSON-RPC extension contract. They do not call a real model; they exist to validate the bridge surface and pass `noloong-extension-conformance --profile strict`.

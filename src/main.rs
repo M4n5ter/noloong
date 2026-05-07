@@ -1,6 +1,9 @@
 mod chatgpt;
 mod config;
 mod host;
+mod schema;
+#[cfg(test)]
+mod test_support;
 
 use crate::{
     config::{
@@ -40,7 +43,15 @@ use noloong_agent_telegram::{
     session::TelegramSessionKey,
     telegram_api::{ReqwestTelegramApi, TelegramApi},
 };
-use std::{collections::BTreeMap, env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    io::{self, Write},
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::Mutex};
 
@@ -63,9 +74,53 @@ async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
             command: ServeSubcommand::Interaction(options),
         }) => run_serve_interaction(options).await,
         CliCommand::ChatGpt(options) => chatgpt::run_chatgpt(options).await.map_err(Into::into),
+        CliCommand::ProfileConfig(ProfileConfigCommand {
+            command: ProfileConfigSubcommand::Schema(options),
+        }) => run_profile_config_schema(options),
         CliCommand::TelegramBridge(options) => run_telegram_bridge(options).await,
         CliCommand::Telegram(options) => run_telegram(options).await,
     }
+}
+
+fn run_profile_config_schema(options: ProfileConfigSchemaOptions) -> Result<(), CliError> {
+    if options.output.is_some() && options.check.is_some() {
+        return Err(CliError::Schema(
+            "--output cannot be used together with --check".into(),
+        ));
+    }
+    if let Some(check_path) = options.check {
+        return check_profile_config_schema(&check_path);
+    }
+    let schema = schema::profile_config_schema_json();
+    if let Some(output_path) = options.output {
+        return write_profile_config_schema(&output_path, &schema);
+    }
+    io::stdout().lock().write_all(schema.as_bytes())?;
+    Ok(())
+}
+
+fn check_profile_config_schema(path: &Path) -> Result<(), CliError> {
+    let current = fs::read_to_string(path)?;
+    let expected = schema::profile_config_schema_json();
+    if current == expected {
+        return Ok(());
+    }
+    Err(CliError::Schema(format!(
+        "profile config schema is out of date: {}; regenerate it with `noloong profile-config schema --output {}`",
+        path.display(),
+        path.display()
+    )))
+}
+
+fn write_profile_config_schema(path: &Path, schema: &str) -> Result<(), CliError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, schema)?;
+    Ok(())
 }
 
 async fn run_serve_interaction(options: ServeInteractionOptions) -> Result<(), CliError> {
@@ -587,6 +642,25 @@ struct ServeInteractionOptions {
     interaction_token_env: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Args, PartialEq, Eq)]
+struct ProfileConfigSchemaOptions {
+    #[arg(long = "output", conflicts_with = "check")]
+    output: Option<PathBuf>,
+    #[arg(long = "check", conflicts_with = "output")]
+    check: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct ProfileConfigCommand {
+    #[command(subcommand)]
+    command: ProfileConfigSubcommand,
+}
+
+#[derive(Clone, Debug, Subcommand, PartialEq, Eq)]
+enum ProfileConfigSubcommand {
+    Schema(ProfileConfigSchemaOptions),
+}
+
 #[derive(Clone, Debug, Parser, PartialEq, Eq)]
 #[command(name = "noloong", version, about = "Noloong agent runtime")]
 struct Cli {
@@ -599,6 +673,8 @@ enum CliCommand {
     Serve(ServeCommand),
     #[command(name = "chatgpt")]
     ChatGpt(chatgpt::ChatGptOptions),
+    #[command(name = "profile-config")]
+    ProfileConfig(ProfileConfigCommand),
     #[command(name = "telegram-bridge")]
     TelegramBridge(TelegramBridgeOptions),
     Telegram(TelegramOptions),
@@ -646,19 +722,24 @@ enum CliError {
     #[error("random token generation failed: {0}")]
     Random(String),
     #[error("{0}")]
+    Schema(String),
+    #[error("{0}")]
     Usage(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliCommand, CliError, TelegramBridgeOptions, telegram_config_from_values,
+        Cli, CliCommand, CliError, ProfileConfigSchemaOptions, ProfileConfigSubcommand,
+        TelegramBridgeOptions, run_profile_config_schema, telegram_config_from_values,
         telegram_text_input, validate_interaction_bind,
     };
+    use crate::schema::profile_config_schema_json;
+    use crate::test_support::{remove_temp_file, write_temp_file};
     use clap::Parser;
     use noloong_agent::Locale;
     use noloong_agent_telegram::polling::{TelegramChat, TelegramMessage, TelegramUser};
-    use std::{collections::BTreeMap, net::SocketAddr};
+    use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
     #[test]
     fn cli_serve_rejects_public_bind_without_token() {
@@ -718,6 +799,69 @@ mod tests {
         assert_eq!(options.bridge.bot_username.as_deref(), Some("noloong_bot"));
         assert_eq!(options.bridge.allowed_users.as_deref(), Some("123456789"));
         assert_eq!(options.bridge.locale, Some(Locale::Zh));
+    }
+
+    #[test]
+    fn cli_profile_config_schema_command_parses() {
+        let cli = Cli::try_parse_from([
+            "noloong",
+            "profile-config",
+            "schema",
+            "--check",
+            "schemas/profile-config.schema.json",
+        ])
+        .unwrap();
+
+        let CliCommand::ProfileConfig(command) = cli.command else {
+            panic!("expected profile-config command");
+        };
+        let ProfileConfigSubcommand::Schema(options) = command.command;
+        assert_eq!(
+            options.check,
+            Some(PathBuf::from("schemas/profile-config.schema.json"))
+        );
+    }
+
+    #[test]
+    fn cli_profile_config_schema_rejects_output_and_check_together() {
+        let error = Cli::try_parse_from([
+            "noloong",
+            "profile-config",
+            "schema",
+            "--output",
+            "schemas/profile-config.schema.json",
+            "--check",
+            "schemas/profile-config.schema.json",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be used with"));
+    }
+
+    #[test]
+    fn profile_config_schema_check_accepts_matching_file() {
+        let path = write_temp_file("profile-schema", "json", &profile_config_schema_json());
+
+        run_profile_config_schema(ProfileConfigSchemaOptions {
+            check: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        remove_temp_file(path);
+    }
+
+    #[test]
+    fn profile_config_schema_check_rejects_mismatch() {
+        let path = write_temp_file("profile-schema-mismatch", "json", "{}\n");
+
+        let error = run_profile_config_schema(ProfileConfigSchemaOptions {
+            check: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        remove_temp_file(path);
+
+        assert!(error.to_string().contains("schema is out of date"));
     }
 
     #[test]

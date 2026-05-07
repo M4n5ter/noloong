@@ -26,6 +26,7 @@ memchr = "2.8"
 opendal = { version = "0.56", default-features = false, features = ["executors-tokio", "services-fs", "services-memory"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = "0.39"
+schemars = "1.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
@@ -36,6 +37,8 @@ toasty = { version = "0.5", default-features = false }
 toasty-driver-postgresql = "0.5"
 toasty-driver-sqlite = "0.5"
 url = "2.5"
+jsonc-parser = { version = "0.32", features = ["serde", "serde_json"] }
+jsonschema = { version = "0.46", default-features = false }
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -49,15 +52,20 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-noloong-agent = { workspace = true, features = ["interaction-http", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
-noloong-agent-core = { workspace = true, features = ["sqlite-store"] }
+noloong-agent = { workspace = true, features = ["interaction-http", "json-schema", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
+noloong-agent-core = { workspace = true, features = ["json-schema", "sqlite-store"] }
 noloong-agent-telegram.workspace = true
 noloong-openai.workspace = true
 getrandom.workspace = true
+jsonc-parser.workspace = true
 opendal.workspace = true
 reqwest.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 clap = { version = "4.6", features = ["derive"] }
+
+[dev-dependencies]
+jsonschema.workspace = true

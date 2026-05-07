@@ -3,6 +3,8 @@ use crate::{
     ModelProvider, ModelRequest, ModelStreamEvent, Result, StopReason, ToolCall,
     provider_utils::collect_model_stream, providers::BoxFuture,
 };
+#[cfg(feature = "json-schema")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
@@ -48,6 +50,7 @@ pub trait TokenEstimator: Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCompactionMode {
     #[default]
