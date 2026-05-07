@@ -1,366 +1,352 @@
-# 实施计划：ChatGPT/Codex 订阅一等公民支持
+# 实施计划：产品级插件系统
 
-> 状态：已完成实现、本地验证、browser/device flow 登录验证、真实 ChatGPT/Codex `gpt-5.4-mini` live smoke 和 Telegram 端到端 smoke。
+> 状态：已完成实现、本地验证、workspace 测试和 clippy。
 
 ## 概览
 
-当前 `noloong-openai` 已经具备 ChatGPT OAuth、browser/device login、token storage、auth refresh、ChatGPT Codex Responses provider 和 `responses/compact` compactor；但 root `noloong` 的 profile config 仍要求手写 `env_headers`，用户体验不够好。本轮要把它提升为可直接使用的产品能力：root CLI 能登录并写入 token file，profile config 默认读取 `~/.agents/noloong/chatgpt/token.json`，启用 ChatGPT Responses 时默认启用 Codex compact，并提供可复制运行的示例配置与用法。
+当前仓库已经有语言无关的 stdio JSON-RPC extension 协议、Rust 侧 `StdioExtensionConfig`、runtime 注册入口、conformance runner，以及 TypeScript/Python 示例；但这还不是产品级插件系统。现在缺的是：插件不能作为 profile/session/manifest 的一等配置被声明、审批、持久化、启用、禁用和恢复；agent 也不能通过现有 `agent.manifest.propose_patch` 工具安全地提出“安装或启用某个插件”。本轮目标是补齐这个产品层插件系统，同时继续复用已有 extension wire contract，不重新设计一套协议。
 
 ## 架构决策
 
-- `noloong-agent-core` 保持不变；ChatGPT 订阅是 `noloong` binary 与 `noloong-openai` 的装配能力。
-- token file 默认路径为 `~/.agents/noloong/chatgpt/token.json`，允许通过 CLI、profile config 和 `NOLOONG_CHATGPT_TOKEN_FILE` 覆盖。
-- `chatgpt_responses` 的 `auth` 改为可选；未配置时默认使用 token file auth，不再要求用户手写 header/env。
-- 保留 `env_headers` auth 作为高级逃生口，便于第三方 auth provider 或临时调试，但默认路径不使用它。
-- root CLI 新增 `noloong chatgpt login/status/logout`；browser flow 默认打印 URL 并等待本地 callback，不主动打开浏览器。
-- 启用 `chatgpt_responses` 时，`compaction: auto` 默认启用 Codex `responses/compact`；用户可以显式配置 `compaction: none` 关闭。
-- compact 使用同一个 `ChatGptAuthManager`，避免 provider 和 compactor 各自刷新 token 造成行为不一致。
-- 示例配置不写入 secret，不写入机器私有 token 路径；默认路径与环境变量承担本地差异。
+- 插件 v1 只支持 stdio JSON-RPC transport；这是当前最稳定、最低依赖、跨语言最清晰的边界。
+- `noloong-agent-core` 继续负责 extension 进程连接、wire contract、capability 注册和 conformance；`noloong-agent` 负责插件声明、审批、manifest patch、session 恢复和产品安全策略。
+- 插件声明进入 `AgentManifest`，这样 session snapshot 可以完整恢复插件状态；root profile config 只提供默认插件声明，创建 session 时通过 default manifest patches 或 profile defaults 落到 manifest。
+- agent 不能直接安装插件，只能通过 `agent.manifest.propose_patch` 提出 `register_plugin`、`set_plugin_enabled`、`remove_plugin` 等 patch；真正生效仍然走 human approval。
+- 插件命令使用直接 exec：`command + args + cwd`，不经过 shell，不支持内联脚本字符串。
+- 插件环境默认隔离：不继承宿主环境；只能显式映射环境变量名，配置中不能保存 secret literal。
+- 插件能力必须有显式 allowlist；extension 进程可以声明更多 capabilities，但 runtime 只注册插件声明允许的部分。
+- v1 不做远程下载、签名校验、marketplace、版本锁定、MCP adapter、热插拔；这些保留为后续演进，避免把“接入插件”与“分发插件”混成一个大系统。
 
 ## 任务列表
 
-### 阶段 1：配置与 auth 基础
+### 阶段 1：插件声明与 manifest patch 基础
 
-#### 任务 1：扩展 ChatGPT auth 配置模型
+#### 任务 1：新增插件声明数据模型
 
-**描述：** 扩展 root profile config 中的 `chatgpt_responses` provider，使 `auth` 可选，并新增 token-file auth 配置。默认路径解析规则需要稳定、可测试、无 secret 泄漏。
+**描述：** 在 `noloong-agent` 中定义产品级插件声明，挂到 `AgentManifest`。声明需要表达插件身份、显示信息、stdio transport、环境变量映射、允许的 capability、启用状态和加载失败策略。
 
 **验收标准：**
-- [x] `{"type":"chatgpt_responses","model":"gpt-5.4-mini"}` 可以被解析并默认使用 token file auth。
-- [x] 默认 token file 路径解析为 `~/.agents/noloong/chatgpt/token.json`。
-- [x] 支持 profile 显式 token file path、token file env override 和 `NOLOONG_CHATGPT_TOKEN_FILE`。
-- [x] 现有 `env_headers` 配置仍然可用，且只作为显式配置路径。
+- [x] `AgentManifest` 新增 `plugins: BTreeMap<String, AgentPluginDeclaration>`，默认空集合。
+- [x] `AgentPluginDeclaration` 至少包含 `pluginId`、`displayName`、`description`、`transport`、`allowedCapabilities`、`enabled`、`onLoadFailure`。
+- [x] `PluginTransport::Stdio` 支持 `command`、`args`、`cwd`、`env`、`requestTimeoutSecs`、`streamTimeoutSecs`。
+- [x] `PluginEnv` 只允许把宿主环境变量名映射进插件环境，不允许 JSON 配置中保存 secret literal。
+- [x] 所有新增 manifest 字段保持 `camelCase` wire format。
 
 **验证：**
-- [x] 测试通过：`cargo test -p noloong config::`
-- [x] 测试通过：`cargo test -p noloong`
+- [x] 单元测试：空 manifest 反序列化保持兼容。
+- [x] 单元测试：插件声明 JSON round-trip 后字段稳定。
+- [x] 单元测试：空 `pluginId`、空 `command`、重复/空 capability 被拒绝。
 
 **依赖：** 无
 
 **预计涉及文件：**
-- `src/config.rs`
-- `src/host.rs`
+- `crates/noloong-agent/src/manifest.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
 
 **预计范围：** M
 
-#### 任务 2：用 ChatGptAuthManager 构造 provider auth
+#### 任务 2：扩展 manifest patch 和 proposal summary
 
-**描述：** 在 root host 装配层把 token-file auth 转成 `ChatGptTokenStorage::file` + `ChatGptAuthManager`，再传给 `chatgpt_responses_provider`。缺少 token 时给出可执行的登录提示。
+**描述：** 让 agent 可以通过现有 manifest proposal 工具提出插件变更。patch 本身需要严格校验，approval 摘要必须把将要启动的命令、参数、cwd、环境变量名、允许能力和启用状态展示清楚。
 
 **验收标准：**
-- [x] `chatgpt_responses` 默认 auth 路径构造的是 `ChatGptAuthManager`，而不是硬编码 header。
-- [x] 缺失 token 或 token 文件不可读时，错误信息提示运行 `noloong chatgpt login --flow browser`。
-- [x] token 和 Authorization header 不会出现在 `Debug`、error 或 CLI 输出中。
-- [x] 仍支持 401 后由 `ChatGptAuthManager` refresh 并让 provider retry。
+- [x] `ManifestPatch` 新增 `RegisterPlugin`、`SetPluginEnabled`、`RemovePlugin`。
+- [x] `AgentManifest::apply_patch` 可以添加、启用、禁用和移除插件声明。
+- [x] 注册已存在 `pluginId`、启用不存在插件、移除不存在插件时返回结构化错误。
+- [x] `ManifestPatch::summary()` 和 i18n catalog 展示插件命令、能力 allowlist、env var names，不展示 secret value。
+- [x] `agent.manifest.propose_patch` 的 input schema 能反映新增插件 patch 结构。
 
 **验证：**
-- [x] 测试通过：`cargo test -p noloong-openai --test auth_manager`
-- [x] 测试通过：`cargo test -p noloong-openai --test provider`
-- [x] 测试通过：`cargo test -p noloong`
+- [x] 单元测试：三类 plugin patch 的 apply 成功路径。
+- [x] 单元测试：非法 patch 被拒绝且不会修改 manifest。
+- [x] 单元测试：proposal summary 不包含环境变量真实值。
 
 **依赖：** 任务 1
 
 **预计涉及文件：**
-- `src/host.rs`
-- `crates/noloong-openai/src/auth/manager.rs`
+- `crates/noloong-agent/src/manifest.rs`
+- `crates/noloong-agent/src/tools/manifest.rs`
+- `crates/noloong-agent/src/catalog.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
 
 **预计范围：** M
 
-### 检查点：认证基础
+### 检查点：manifest 基础
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-openai`
-- [x] `cargo test -p noloong`
-- [x] Profile config 可以在没有任何 secret 的情况下构造 ChatGPT provider，运行时按 token file 取凭据。
+- [x] `cargo test -p noloong-agent manifest`
+- [x] `cargo test -p noloong-agent agent_session`
+- [x] 手工检查 manifest proposal 的 JSON schema 和 approval 文案不会误导用户授权未知命令。
 
-### 阶段 2：root CLI 登录体验
+### 阶段 2：core extension 加固与 capability allowlist
 
-#### 任务 3：新增 `noloong chatgpt login`
+#### 任务 3：扩展 `StdioExtensionConfig` 的进程启动选项
 
-**描述：** 在 root CLI 增加 ChatGPT 登录入口。默认 browser flow 绑定本地 callback server，打印 authorization URL，等待用户在真实浏览器完成验证，然后交换 token 并写入 token file。device flow 作为 fallback，同样写入 token file。
+**描述：** 让 core 的 stdio extension 启动配置支持产品层插件所需的最小进程控制：工作目录、环境变量、是否清空环境，以及可选的 capability allowlist。保持手动 Rust API 仍然可用。
 
 **验收标准：**
-- [x] 支持 `noloong chatgpt login --flow browser`，默认 flow 也是 `browser`。
-- [x] browser flow 打印 authorization URL 和 token file path，并等待 callback 完成。
-- [x] 支持 `noloong chatgpt login --flow device`，打印 verification URL 和 user code。
-- [x] 支持 `--token-file <path>` 覆盖写入路径。
-- [x] token file 使用现有 `ChatGptFileTokenStorage` 写入，Unix 下权限保持 `0600`。
+- [x] `StdioExtensionConfig` 新增 `cwd`、`env`、`clearEnv`、`allowedCapabilities`。
+- [x] 默认行为保持当前手动 API 兼容：不设置 `clearEnv` 时不破坏现有 extension tests。
+- [x] 插件 loader 后续可以显式使用 `clearEnv = true`。
+- [x] `Command` 启动时正确应用 cwd/env/env_clear，stderr 仍只作为日志通道。
 
 **验证：**
-- [x] 测试通过：`cargo test -p noloong chatgpt`
-- [x] 手动 smoke：`cargo run -p noloong -- chatgpt login --flow browser`
-- [x] 手动 smoke：`cargo run -p noloong -- chatgpt login --flow device`
+- [x] 单元测试：config builder 能设置 cwd/env/clear env。
+- [x] 集成测试：fixture extension 可以读取显式传入的 env，不能读取被隔离的 env。
+- [x] 现有 JSON-RPC conformance tests 保持通过。
 
-**依赖：** 任务 1
+**依赖：** 无
 
 **预计涉及文件：**
-- `src/main.rs`
-- `src/chatgpt.rs`
-- `src/config.rs`
+- `crates/noloong-agent-core/src/jsonrpc/mod.rs`
+- `crates/noloong-agent-core/tests/jsonrpc_conformance.rs`
 
 **预计范围：** M
 
-#### 任务 4：新增 `status/logout` 与错误体验
+#### 任务 4：实现 capability allowlist 过滤
 
-**描述：** 补齐 token file 的生命周期操作。`status` 只显示是否已登录、账号摘要和 token 文件路径，不输出 token；`logout` 删除 token file。provider 构造失败、token 缺失、refresh 失败时统一给出下一步命令。
+**描述：** extension 可以声明多个 capability，但插件声明必须决定哪些 capability 进入 runtime。过滤要在 duplicate validation 和注册前完成，避免未授权工具、hook、model provider 混入 runtime。
 
 **验收标准：**
-- [x] 支持 `noloong chatgpt status`，不会输出 access token、refresh token 或 id token。
-- [x] 支持 `noloong chatgpt logout`，重复执行保持幂等。
-- [x] 交互入口如 `noloong telegram` 使用 ChatGPT profile 但缺 token 时，错误信息能直接指向 login 命令。
-- [x] `src/main.rs` 不继续膨胀；ChatGPT CLI 逻辑拆入专门模块，`mod.rs` 不放业务逻辑。
+- [x] `AgentRuntimeBuilder::with_stdio_extension` 在注册前按 allowlist 过滤 capabilities。
+- [x] allowlist 支持按 capability kind 和 id/tool name 精确匹配。
+- [x] 插件未允许的 capability 不会注册，也不会影响 duplicate validation。
+- [x] 当 allowlist 为空时，产品层插件默认注册零能力；手动 Rust API 可以继续选择“全部允许”的兼容路径。
+- [x] 错误信息能区分“extension malformed”和“capability not allowed”。
 
 **验证：**
-- [x] 测试通过：`cargo test -p noloong chatgpt`
-- [x] 手动 smoke：`cargo run -p noloong -- chatgpt status`
-- [x] 手动 smoke：`cargo run -p noloong -- chatgpt logout`
+- [x] 测试：fixture 同时声明 tool/model/hook，只 allow tool 时只注册 tool。
+- [x] 测试：未授权 model provider 不能成为 default model provider。
+- [x] 测试：未授权 capability 与已有内置能力同名时不会触发 duplicate error。
 
 **依赖：** 任务 3
 
 **预计涉及文件：**
-- `src/main.rs`
-- `src/chatgpt.rs`
-- `src/config.rs`
-
-**预计范围：** S
-
-### 检查点：CLI 登录体验
-
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong`
-- [x] `cargo test -p noloong-openai`
-- [x] 真实 browser login 可写入 `~/.agents/noloong/chatgpt/token.json`。
-- [x] 真实 device login fallback 可写入同一 token file。
-
-### 阶段 3：Codex compact 默认接入
-
-#### 任务 5：新增 root profile compaction 配置
-
-**描述：** 给 `RuntimeProfileConfig` 增加可选 `compaction` 字段，支持 `auto`、`none` 和显式 `openai_responses` 配置。`auto` 在普通 provider 上保持关闭，在 `chatgpt_responses` 上默认启用 Codex compact。
-
-**验收标准：**
-- [x] 未配置 `compaction` 时等价于 `auto`。
-- [x] `chatgpt_responses + auto` 自动注册 `OpenAiResponsesCompactor`。
-- [x] `compaction: {"type":"none"}` 明确关闭 compact。
-- [x] 显式 compact 配置可以覆盖 model、threshold、reserve tokens、keep recent tokens 和 mode。
-- [x] compact 共享 provider 的 `ChatGptAuthManager`，不创建第二套 token storage。
-
-**验证：**
-- [x] 测试通过：`cargo test -p noloong compaction`
-- [x] 测试通过：`cargo test -p noloong-openai --test compact`
-- [x] 测试通过：`cargo test -p noloong-agent-core --test compaction`
-
-**依赖：** 任务 2
-
-**预计涉及文件：**
-- `src/config.rs`
-- `src/host.rs`
-- `crates/noloong-openai/src/compact.rs`
+- `crates/noloong-agent-core/src/runtime/builder.rs`
+- `crates/noloong-agent-core/src/jsonrpc/mod.rs`
+- `crates/noloong-agent-core/tests/jsonrpc_conformance.rs`
 
 **预计范围：** M
 
-#### 任务 6：把 compactor 接入 runtime builder
+### 检查点：core 加固
 
-**描述：** 当前 `RuntimeProfile::build_runtime` 只注册 model provider，需要扩展为根据 profile compaction 配置向 `AgentRuntimeBuilder` 注册 context compactor。保留 core 现有 phase hook 与 compaction phase，不新增 ChatGPT-specific phase。
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-agent-core --test jsonrpc_conformance`
+- [x] `cargo test -p noloong-agent-core --test extension_conformance`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+
+### 阶段 3：session runtime 插件加载
+
+#### 任务 5：实现 manifest 插件到 runtime 的装配
+
+**描述：** 在 `AgentSession::runtime_builder` 或相邻模块中读取 manifest 中已启用插件，转换为 `StdioExtensionConfig` 并加载进 runtime。加载失败策略由插件声明控制。
 
 **验收标准：**
-- [x] `RuntimeProfile` 可以携带 model provider 与可选 compactor registration。
-- [x] 启用 compact 后，runtime builder 注册 context compaction phase。
-- [x] `auto` compact 的默认 context window 使用 Codex 级别的大上下文阈值，避免过早压缩。
-- [x] compact output 使用 existing replacement history 行为，不把 summary-only 当默认。
+- [x] 已启用插件会在 session runtime build 时启动并注册允许的 capabilities。
+- [x] 已禁用插件不会启动进程。
+- [x] `onLoadFailure = "disable_for_run"` 时，本轮 build 记录 warning/metadata，但 runtime 仍可继续构建。
+- [x] `onLoadFailure = "fail_run"` 时，插件加载失败会阻止 runtime build 并返回结构化错误。
+- [x] 插件进程生命周期仍由 core runtime 持有，runtime drop 时进程被清理。
 
 **验证：**
-- [x] 测试通过：`cargo test -p noloong`
-- [x] 集成测试：profile build 后 runtime 中存在 context compaction。
-- [x] 集成测试：`compaction: none` 时 runtime 中不存在 context compaction。
+- [x] 集成测试：manifest 中启用 fixture plugin 后，runtime 能看到插件 tool。
+- [x] 集成测试：禁用插件不会启动 fixture process。
+- [x] 集成测试：失败插件在两种 `onLoadFailure` 策略下行为不同。
+
+**依赖：** 任务 1、任务 3、任务 4
+
+**预计涉及文件：**
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/src/plugin.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
+
+**预计范围：** M
+
+#### 任务 6：明确恢复 live session 时的插件重建策略
+
+**描述：** 已持久化 session 通过 registry store 恢复 live runtime 时，需要使用 snapshot 中的 manifest 插件声明重新启动插件，而不是依赖当前进程的临时 builder 状态。
+
+**验收标准：**
+- [x] session snapshot 中的 manifest 完整包含 plugins 字段。
+- [x] live restore 时按 snapshot manifest 重建 enabled plugins。
+- [x] 插件命令缺失、cwd 不存在、env var 缺失时错误可诊断。
+- [x] read-only `session/list` / `session/get` 不启动插件进程。
+
+**验证：**
+- [x] registry restore 测试：只读读取不会构建 runtime。
+- [x] registry restore 测试：恢复并运行时会启动 snapshot manifest 中的插件。
+- [x] registry restore 测试：缺失 env var 返回明确错误。
 
 **依赖：** 任务 5
 
 **预计涉及文件：**
-- `src/host.rs`
-- `src/config.rs`
+- `crates/noloong-agent/src/interaction/registry.rs`
+- `crates/noloong-agent/src/interaction/store/snapshot.rs`
+- `crates/noloong-agent/tests/interaction_registry.rs`
 
 **预计范围：** M
 
-### 检查点：Compact 接入
+### 检查点：runtime 装配
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong`
-- [x] `cargo test -p noloong-agent-core --test compaction`
-- [x] `cargo test -p noloong-openai --test compact`
-- [x] 真实 ChatGPT compact smoke 可通过 `NOLOONG_OPENAI_LIVE_CHATGPT=1` 手动执行。
+- [x] `cargo test -p noloong-agent agent_session`
+- [x] `cargo test -p noloong-agent interaction_registry`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 
-### 阶段 4：示例、文档与端到端验证
+### 阶段 4：profile config、交互协议与示例
 
-#### 任务 7：新增 ChatGPT/Codex profile 示例
+#### 任务 7：给 root profile config 增加默认插件声明
 
-**描述：** 新增一个无 secret 的示例配置，展示 `chatgpt_responses` 默认 token-file auth 与默认 compact 行为。该配置应能直接用于 `noloong telegram` 或未来其它 interaction clients。
+**描述：** root `RuntimeProfileConfig` 应允许配置默认插件，让 `noloong telegram`、`noloong serve interaction` 等入口启动 session 时天然带有一组 host-approved 插件声明。
 
 **验收标准：**
-- [x] 新增 `examples/profile-configs/chatgpt-codex-subscription.json`。
-- [x] 示例默认模型使用 `gpt-5.4-mini`。
-- [x] 示例不包含 token、Authorization header 或用户本地绝对路径。
-- [x] 示例通过 host registry build test。
+- [x] `RuntimeProfileConfig` 支持 `plugins` 字段，结构复用 `AgentPluginDeclaration`。
+- [x] profile build 时先校验默认插件声明，再把它们注入新 session manifest。
+- [x] profile 默认插件和 `manifestPatches` 的顺序明确：先应用 profile defaults，再应用 manifest patches。
+- [x] 示例配置中可以声明 TypeScript/Python stdio 插件，不包含 secret literal。
 
 **验证：**
-- [x] 测试通过：`cargo test -p noloong example_chatgpt_codex_subscription_profile_builds_registry`
-- [x] 手动 smoke：`cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json`
+- [x] `cargo test -p noloong config::`
+- [x] `cargo test -p noloong host::`
+- [x] 示例 profile config build test 通过。
 
-**依赖：** 任务 1、任务 5
+**依赖：** 任务 1、任务 2
 
 **预计涉及文件：**
-- `examples/profile-configs/chatgpt-codex-subscription.json`
+- `src/config.rs`
 - `src/host.rs`
+- `examples/profile-configs/plugin-stdio-example.json`
 
-**预计范围：** S
+**预计范围：** M
 
-#### 任务 8：更新文档和使用说明
+#### 任务 8：在 interaction 文档中暴露插件工作流
 
-**描述：** 把登录、token file、profile 示例、Telegram 用法、compact 默认行为和禁用方式写入文档。重点是让用户不需要理解 OAuth header 细节就能跑起来。
+**描述：** 不新增独立 plugin RPC；v1 复用 manifest proposal/apply 流程。需要把“agent 提议、human 审批、apply 后下一次 runtime build 生效”的流程写清楚，并给出 JSON 示例。
 
 **验收标准：**
-- [x] `crates/noloong-openai/README.md` 说明 root CLI login，而不仅是 crate examples。
-- [x] `crates/noloong-agent-telegram/docs/TELEGRAM.md` 增加 ChatGPT subscription profile 用法。
-- [x] root README 或 interaction 文档给出最短路径命令。
-- [x] 文档明确 `NOLOONG_CHATGPT_TOKEN_FILE` 与 `~/.agents/noloong/chatgpt/token.json` 的关系。
-- [x] 文档明确 `compaction: none` 可关闭 Codex compact。
+- [x] `INTERACTION.md` 增加 plugin manifest patch 示例。
+- [x] 文档说明 read-only session 操作不会启动插件。
+- [x] 文档说明插件启用/禁用后何时生效：下一次 runtime build/run 生效，不做 hot reload。
+- [x] 文档说明外部 bridge 不能直接提交 provider credentials，只能触发 manifest proposal/approval 流程。
 
 **验证：**
-- [x] Markdown 示例使用现有命令名。
-- [x] 检查文档与示例：不能包含真实 token、真实 Authorization header、旧的 ChatGPT 默认模型或要求用户手写 ChatGPT header 的路径。
+- [x] 文档中的 JSON 字段名与 serde wire format 一致。
+- [x] 文档不出现真实 token、真实代理地址或机器私有路径。
 
-**依赖：** 任务 3、任务 5、任务 7
+**依赖：** 任务 2、任务 7
 
 **预计涉及文件：**
-- `README.md`
-- `crates/noloong-openai/README.md`
-- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
 - `crates/noloong-agent/docs/INTERACTION.md`
+- `README.md`
 
 **预计范围：** S
 
-#### 任务 9：真实订阅路径 smoke
+#### 任务 9：补充插件作者和使用者文档
 
-**描述：** 在实现完成后，用真实浏览器完成登录，再用 root profile 和 Telegram interaction client 做一次最小端到端验证。真实外部动作只在用户明确许可后执行；默认先给出命令和等待用户在浏览器侧完成认证。
+**描述：** 现有 `EXTENSIONS.md` 面向 extension 作者；本任务补充产品层“如何被 noloong 作为插件加载”的文档，包括 manifest 声明、profile config、allowlist、安全模型和 conformance。
 
 **验收标准：**
-- [x] browser login 可以拿到 token 并写入默认 token file。
-- [x] `chatgpt status` 可以识别登录状态且不输出 secret。
-- [x] `noloong telegram` 使用 ChatGPT profile 能收到用户消息并返回模型回复。
-- [x] compact live smoke 在长上下文测试中可手动执行，失败时错误能定位到 auth、endpoint 或模型权限。
+- [x] 新增或更新插件使用文档，区分 extension wire contract 与 product plugin declaration。
+- [x] TypeScript/Python 示例说明如何通过 profile config 加载。
+- [x] 文档给出 `noloong-extension-conformance` 的推荐运行方式。
+- [x] 文档明确 v1 不支持 shell string、remote install、hot reload、secret literal。
 
 **验证：**
-- [x] 手动 smoke：`cargo run -p noloong -- chatgpt login --flow browser`
-- [x] 手动 smoke：`cargo run -p noloong -- chatgpt status`
-- [x] 手动 smoke：`cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json`
-- [x] 可选 live test：`NOLOONG_OPENAI_LIVE_CHATGPT=1 cargo test -p noloong-openai --test live_chatgpt -- --ignored`
+- [x] 文档示例命令可在仓库根目录执行。
+- [x] 示例 extension 的 README 与 root docs 不互相矛盾。
 
 **依赖：** 任务 7、任务 8
 
 **预计涉及文件：**
-- 无，除非 smoke 暴露 bug。
+- `crates/noloong-agent-core/docs/EXTENSIONS.md`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `examples/extensions/typescript-conformance/README.md`
+- `examples/extensions/python-conformance/README.md`
+- `README.md`
 
 **预计范围：** S
 
-### 检查点：完成
+### 检查点：产品接入
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-openai`
-- [x] `cargo test -p noloong-agent-core --test compaction`
 - [x] `cargo test -p noloong`
+- [x] `cargo test -p noloong-agent`
+- [x] `cargo test -p noloong-agent-core`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+
+### 阶段 5：端到端验证与收尾
+
+#### 任务 10：增加端到端插件 smoke tests
+
+**描述：** 用现有 TypeScript/Python conformance fixture 或新增最小 fixture，验证 profile 默认插件、manifest proposal 插件、禁用插件和 capability allowlist 的完整链路。
+
+**验收标准：**
+- [x] profile 默认插件可以被加载，并暴露一个允许的 test tool。
+- [x] agent 提出的 `register_plugin` patch 经 approval/apply 后，下一轮 runtime build 能加载插件。
+- [x] `set_plugin_enabled(false)` 后插件能力从 runtime 消失。
+- [x] 未被 allowlist 允许的 tool/model/hook 不会注册。
+
+**验证：**
+- [x] `cargo test -p noloong-agent plugin`
+- [x] `cargo test -p noloong-agent-core --test extension_language_examples`
+- [x] TypeScript 示例在依赖可用时通过 strict conformance。
+- [x] Python 示例通过 strict conformance。
+
+**依赖：** 任务 5、任务 7
+
+**预计涉及文件：**
+- `crates/noloong-agent/tests/plugin.rs`
+- `crates/noloong-agent-core/tests/extension_language_examples.rs`
+- `examples/extensions/typescript-conformance/README.md`
+- `examples/extensions/python-conformance/README.md`
+
+**预计范围：** M
+
+#### 任务 11：全量检查与架构文档更新
+
+**描述：** 收尾阶段跑完整验证，更新架构文档中的后续演进方向，确保插件系统边界、非目标和未来扩展路径清晰。
+
+**验收标准：**
+- [x] `ARCHITECTURE.md` 描述 product plugin layer、extension layer、manifest approval layer 的关系。
+- [x] `ARCHITECTURE.md` 的后续演进方向更新为 marketplace/signature/version lock/MCP adapter/hot reload，而不是继续写“接入插件”本身。
+- [x] 没有新增 `#[allow(dead_code)]`。
+- [x] 没有把 secret、真实 bot token、真实 API key 写入仓库。
+
+**验证：**
+- [x] `cargo fmt --all --check`
 - [x] `cargo test --workspace`
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `git diff --check`
-- [x] examples/docs/tests 中没有泄漏凭据。
-- [x] 已准备好进入 review。
+- [x] 手工 review 文档与示例配置中的 secret 泄漏风险。
 
-## 目标示例配置
+**依赖：** 任务 1-10
 
-```json
-{
-  "defaultProfileId": "chatgpt-codex",
-  "registryStore": {
-    "type": "memory"
-  },
-  "profiles": [
-    {
-      "profileId": "chatgpt-codex",
-      "displayName": "ChatGPT Codex",
-      "provider": {
-        "type": "chatgpt_responses",
-        "model": "gpt-5.4-mini"
-      },
-      "compaction": {
-        "type": "auto"
-      },
-      "manifestPatches": [
-        {
-          "op": "set_locale",
-          "locale": "zh"
-        },
-        {
-          "op": "update_file_edit_tool_policy",
-          "policy": "auto_by_model"
-        }
-      ],
-      "metadata": {
-        "channel": "telegram",
-        "example": true
-      }
-    }
-  ]
-}
-```
+**预计涉及文件：**
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
+- `plans/CURRENT_PLAN.md`
+- 其它被实现任务实际触及的文件
 
-## 目标用法
-
-```bash
-cargo run -p noloong -- chatgpt login --flow browser
-cargo run -p noloong -- chatgpt status
-cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json
-```
+**预计范围：** S
 
 ## 风险与缓解
 
 | 风险 | 影响 | 缓解 |
-|------|--------|------------|
-| ChatGPT OAuth/browser flow 与上游 Codex 行为漂移 | 高 | 复用 `noloong-openai` 中已按 Codex 对齐的 login 模块；保留 device flow fallback；live smoke 使用真实浏览器确认。 |
-| token file 泄漏或被日志打印 | 高 | 所有 CLI/status/error 输出只显示路径和账号摘要；storage 写入 `0600`；测试覆盖 `Debug`/status 不输出 token。 |
-| 默认 compact 在不合适的 provider 上启用 | 中 | `auto` 只在 `chatgpt_responses` 上开启；其它 provider 默认关闭；显式 `none` 可禁用。 |
-| provider 与 compactor 分别刷新 token 导致竞态 | 中 | 在 host 装配中共享同一个 `Arc<ChatGptAuthManager>`。 |
-| root `main.rs` 继续膨胀 | 中 | 新增 `src/chatgpt.rs` 承载 CLI 子命令逻辑；`main.rs` 只保留路由。 |
-| 真实订阅模型名不可用 | 中 | 默认文档使用 `gpt-5.4-mini`；真实 smoke 固定验证该模型，错误信息保留 provider/model context。 |
+|---|---|---|
+| 插件命令被 agent 轻易注册后执行任意代码 | 高 | agent 只能 proposal；human approval 必须展示 command/args/cwd/env/capabilities；默认不继承 env |
+| extension 声明了超出预期的工具或 hooks | 高 | capability allowlist 在注册前过滤；默认产品插件不允许任何能力 |
+| session 恢复时意外启动插件进程 | 中 | read-only descriptor 操作不构建 runtime；只有 run/mutation 恢复 live session 时启动 |
+| 插件加载失败导致产品不可用 | 中 | 插件级 `onLoadFailure` 策略，默认 `disable_for_run`；关键插件可配置 `fail_run` |
+| profile defaults、manifest patches、snapshot 恢复顺序混乱 | 中 | 明确顺序并加 registry/session restore 测试 |
+| 为未来 marketplace 过早设计过多结构 | 中 | v1 只做本地 arbitrary command 插件声明；远程分发、签名、版本锁后置 |
 
-## 可并行点
+## 并行化机会
 
-- 任务 1、任务 3 不能完全并行，因为 CLI login 依赖 token path resolver。
-- 任务 5、任务 7 可以在任务 1 完成后并行推进。
-- 任务 8 可在接口名稳定后独立推进。
-- 任务 9 必须最后执行，因为它依赖完整登录、provider、compact 和示例配置。
+- 任务 1 和任务 3 可以并行：一个在 `noloong-agent` 数据模型层，一个在 `noloong-agent-core` 进程配置层。
+- 任务 8 和任务 9 可以在任务 2/7 的 schema 稳定后并行。
+- 任务 10 的 TypeScript/Python fixture 验证可以与文档收尾并行，但必须等任务 5/7 的 runtime 装配完成。
 
-## 待确认问题
+## 已定决策
 
-- 无。当前决策采用：root CLI 登录、默认 token file 路径 `~/.agents/noloong/chatgpt/token.json`、所有 interaction clients 可复用、ChatGPT profile 默认开启 Codex compact。
-
-## 已执行验证
-
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-openai`
-- [x] `cargo test -p noloong-openai --test login`
-- [x] `cargo test -p noloong-agent-core --test compaction`
-- [x] `cargo test -p noloong`
-- [x] `cargo test --workspace`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo run -p noloong -- chatgpt status --token-file target/tmp/noloong-chatgpt-test/token.json`
-- [x] `cargo run -p noloong -- chatgpt logout --token-file target/tmp/noloong-chatgpt-test/token.json`
-- [x] `cargo run -p noloong -- chatgpt login --flow browser`
-- [x] `cargo run -p noloong -- chatgpt login --flow device`
-- [x] `cargo run -p noloong -- chatgpt status`
-- [x] `NOLOONG_OPENAI_LIVE_CHATGPT=1 NOLOONG_CHATGPT_LIVE_MODEL=gpt-5.4-mini NOLOONG_CHATGPT_TOKEN_FILE=/Users/m4n5ter/.agents/noloong/chatgpt/token.json cargo test -p noloong-openai --test live_chatgpt -- --ignored --nocapture`
-- [x] `TELEGRAM_BOT_TOKEN=<test-bot-token> TELEGRAM_ALLOWED_USERS=<telegram-user-id> TELEGRAM_LOCALE=zh TELEGRAM_DISABLE_ENV_PROXY=1 TELEGRAM_FALLBACK_IPS=149.154.167.220 cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json`
-- [x] `git diff --check`
-- [x] `rg -n "#\\[allow\\(dead_code\\)\\]" crates src`
-
-## 未完成外部验证
-
-- 无。
+- v1 不新增 `noloong plugin list` / `noloong plugin validate` CLI；先通过 profile config 和 manifest proposal 暴露，保持表面积小。
+- 插件 allowlist 不支持 wildcard，只做 capability kind + id/tool name 精确匹配，降低审批误解风险。
+- 插件加载失败的 warning 记录在 `AgentSessionRuntimeBuilder` 本轮 build 结果中；`fail_run` 策略会返回结构化 build error。后续若需要 UI 主动展示，可把 warning 投射到 display/event 层。

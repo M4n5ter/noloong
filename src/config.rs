@@ -1,4 +1,4 @@
-use noloong_agent::ManifestPatch;
+use noloong_agent::{AgentPluginDeclaration, ManifestPatch};
 use noloong_agent_core::ContextCompactionMode;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -58,6 +58,16 @@ impl HostProfileConfig {
                 default_profile_id.clone(),
             ));
         }
+        for profile in &self.profiles {
+            for plugin in &profile.plugins {
+                plugin.validate().map_err(|error| {
+                    CliConfigError::ParseConfig(format!(
+                        "profile {} plugin {} is invalid: {error}",
+                        profile.profile_id, plugin.plugin_id
+                    ))
+                })?;
+            }
+        }
         Ok(())
     }
 }
@@ -72,6 +82,8 @@ pub struct RuntimeProfileConfig {
     pub provider: BuiltInProviderConfig,
     #[serde(default)]
     pub compaction: ProfileCompactionConfig,
+    #[serde(default)]
+    pub plugins: Vec<AgentPluginDeclaration>,
     #[serde(default)]
     pub manifest_patches: Vec<ManifestPatch>,
     #[serde(default)]
@@ -422,6 +434,43 @@ mod tests {
         .unwrap();
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn profile_config_loads_default_plugins() {
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                    "plugins": [{
+                        "pluginId": "echo",
+                        "displayName": "Echo",
+                        "enabled": true,
+                        "transport": {
+                            "type": "stdio",
+                            "command": "node",
+                            "args": ["examples/extensions/echo.mjs"],
+                            "env": {
+                                "PATH": {
+                                    "type": "host_env",
+                                    "name": "PATH"
+                                }
+                            }
+                        },
+                        "allowedCapabilities": [
+                            {"type": "tool", "name": "echo.run"}
+                        ]
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        config.validate().unwrap();
+        assert_eq!(config.profiles[0].plugins.len(), 1);
+        assert_eq!(config.profiles[0].plugins[0].plugin_id, "echo");
     }
 
     #[test]

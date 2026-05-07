@@ -29,6 +29,55 @@ cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile
 cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict --json -- python3 ./extension.py
 ```
 
+## Extension vs Product Plugin
+
+An extension is the wire implementation described by this document. A product plugin is an application-level declaration in `noloong-agent` that tells a session how to start one extension process, which environment variables may be mapped into it, which capabilities may be registered, whether it is enabled, and what to do when startup fails.
+
+The core bridge still sees only `StdioExtensionConfig` and JSON-RPC capabilities. Product plugins add the safer host-facing layer:
+
+- command execution is direct `command + args`, with no shell string;
+- product plugins default to an isolated child environment;
+- `env` entries map child env names to host env var names and never store secret literal values;
+- `allowedCapabilities` is a required product safety boundary, and unlisted capabilities are filtered before runtime registration;
+- plugin registration, enable, disable, and removal happen through manifest proposal and human approval;
+- enabled plugins are loaded on the next live runtime build, not hot-reloaded into an already running runtime.
+
+Minimal profile-level plugin declaration:
+
+```json
+{
+  "plugins": [
+    {
+      "pluginId": "python-conformance",
+      "displayName": "Python conformance plugin",
+      "enabled": true,
+      "onLoadFailure": "disable_for_run",
+      "transport": {
+        "type": "stdio",
+        "command": "python3",
+        "args": [
+          "examples/extensions/python-conformance/full_conformance_extension.py"
+        ],
+        "env": {
+          "PATH": {
+            "type": "host_env",
+            "name": "PATH"
+          }
+        }
+      },
+      "allowedCapabilities": [
+        {
+          "type": "tool",
+          "name": "conformance_echo"
+        }
+      ]
+    }
+  ]
+}
+```
+
+The complete runnable profile example is `examples/profile-configs/plugin-stdio-example.json`.
+
 ## Transport Rules
 
 - The host starts the extension process with stdin, stdout, and stderr.

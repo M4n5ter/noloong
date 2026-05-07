@@ -16,6 +16,12 @@ Run strict conformance from the repository root:
 cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- python3 examples/extensions/python-conformance/full_conformance_extension.py
 ```
 
+Load the same extension through the product plugin layer:
+
+```bash
+cargo run -p noloong -- telegram --profile-config examples/profile-configs/plugin-stdio-example.json
+```
+
 Start the extension manually:
 
 ```bash

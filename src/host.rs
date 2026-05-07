@@ -3,7 +3,7 @@ use crate::config::{
     ProfileCompactionConfig, RegistryStoreConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
 };
 use noloong_agent::{
-    AgentManifest, AgentSession,
+    AgentManifest, AgentSession, ManifestPatch,
     interaction::{
         AgentRuntimeProfile, AgentSessionRegistry, AgentSessionRegistryStore,
         InMemoryAgentSessionRegistryStore, InteractionError, InteractionFuture,
@@ -97,7 +97,14 @@ struct RuntimeProfile {
 impl RuntimeProfile {
     fn try_from_config(config: &RuntimeProfileConfig) -> Result<Self, HostBuildError> {
         let mut validated_manifest = AgentManifest::default();
-        for patch in &config.manifest_patches {
+        let mut default_manifest_patches = config
+            .plugins
+            .iter()
+            .cloned()
+            .map(|plugin| ManifestPatch::RegisterPlugin { plugin })
+            .collect::<Vec<_>>();
+        default_manifest_patches.extend(config.manifest_patches.iter().cloned());
+        for patch in &default_manifest_patches {
             validated_manifest
                 .apply_patch(patch.clone())
                 .map_err(|error| {
@@ -115,7 +122,7 @@ impl RuntimeProfile {
                 profile_id: config.profile_id.clone(),
                 display_name: config.display_name.clone(),
                 description: config.description.clone(),
-                default_manifest_patches: config.manifest_patches.clone(),
+                default_manifest_patches,
                 metadata: config.metadata.clone(),
             },
             provider: provider.provider,
@@ -144,6 +151,10 @@ impl AgentRuntimeProfile for RuntimeProfile {
                     Arc::clone(&compaction.compactor),
                 );
             }
+            builder = builder
+                .with_manifest_plugins()
+                .await
+                .map_err(InteractionError::from)?;
             builder.build().map_err(InteractionError::from)
         })
     }
@@ -500,7 +511,9 @@ fn opendal_error(error: opendal::Error) -> HostBuildError {
 mod tests {
     use super::{DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS, RuntimeProfile, build_registry};
     use crate::config::{HostProfileConfig, RuntimeProfileConfig};
-    use noloong_agent::{AgentManifest, AgentSession, interaction::AgentRuntimeProfile};
+    use noloong_agent::{
+        AgentManifest, AgentSession, ManifestPatch, interaction::AgentRuntimeProfile,
+    };
     use noloong_agent_core::ContextCompactionMode;
 
     #[tokio::test]
@@ -550,6 +563,63 @@ mod tests {
             registry.profile_descriptors()[0].profile_id,
             "chatgpt-codex"
         );
+    }
+
+    #[tokio::test]
+    async fn example_plugin_stdio_profile_builds_registry() {
+        let config = serde_json::from_str::<HostProfileConfig>(include_str!(
+            "../examples/profile-configs/plugin-stdio-example.json"
+        ))
+        .unwrap();
+
+        let registry = build_registry(&config).await.unwrap();
+
+        assert_eq!(
+            registry.profile_descriptors()[0].profile_id,
+            "plugin-stdio-example"
+        );
+    }
+
+    #[test]
+    fn profile_default_plugins_become_default_manifest_patches() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                "plugins": [{
+                    "pluginId": "echo",
+                    "displayName": "Echo",
+                    "transport": {
+                        "type": "stdio",
+                        "command": "node",
+                        "args": ["examples/extensions/echo.mjs"]
+                    },
+                    "allowedCapabilities": [
+                        {"type": "tool", "name": "echo.run"}
+                    ]
+                }],
+                "manifestPatches": [{
+                    "op": "set_plugin_enabled",
+                    "pluginId": "echo",
+                    "enabled": true
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let descriptor = profile.descriptor();
+
+        assert!(matches!(
+            &descriptor.default_manifest_patches[0],
+            ManifestPatch::RegisterPlugin { plugin } if plugin.plugin_id == "echo"
+        ));
+        assert!(matches!(
+            &descriptor.default_manifest_patches[1],
+            ManifestPatch::SetPluginEnabled { plugin_id, enabled }
+                if plugin_id == "echo" && *enabled
+        ));
     }
 
     #[tokio::test]

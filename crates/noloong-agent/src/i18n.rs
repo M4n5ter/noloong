@@ -412,6 +412,15 @@ impl Catalog {
             (Locale::Zh, ManifestPatch::UpdateFileEditToolPolicy { policy }) => {
                 format!("更新文件编辑工具策略为 {}", policy.as_str())
             }
+            (Locale::Zh, ManifestPatch::RegisterPlugin { plugin }) => {
+                format!("注册插件 {}", plugin.summary())
+            }
+            (Locale::Zh, ManifestPatch::SetPluginEnabled { plugin_id, enabled }) => {
+                format!("设置插件 {plugin_id} enabled={enabled}")
+            }
+            (Locale::Zh, ManifestPatch::RemovePlugin { plugin_id }) => {
+                format!("移除插件 {plugin_id}")
+            }
             (Locale::Zh, ManifestPatch::ReservedPhaseProfile { description, .. }) => {
                 format!("保留的阶段配置补丁：{description}")
             }
@@ -426,6 +435,12 @@ impl Catalog {
             }
             (Locale::Zh, ManifestError::UnknownTool(tool_name)) => {
                 format!("未知内置工具：{tool_name}")
+            }
+            (Locale::Zh, ManifestError::UnknownPlugin(plugin_id)) => {
+                format!("未知插件：{plugin_id}")
+            }
+            (Locale::Zh, ManifestError::PluginAlreadyExists(plugin_id)) => {
+                format!("插件已存在：{plugin_id}")
             }
             (Locale::Zh, ManifestError::UnknownProposal(proposal_id)) => {
                 format!("未知 manifest 提案：{proposal_id}")

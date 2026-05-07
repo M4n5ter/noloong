@@ -20,6 +20,8 @@ npm run start
 
 The extension implements the full standard conformance capability set and should pass `noloong-extension-conformance --profile strict`.
 
+To load a TypeScript extension through the product plugin layer, declare it in a root profile `plugins` entry with a stdio `command`, `args`, explicit env mapping, and `allowedCapabilities`. The Python profile at `../../profile-configs/plugin-stdio-example.json` shows the same product-level shape.
+
 ## Handler Mapping
 
 `src/full-conformance-extension.ts` registers handlers by JSON-RPC method name:

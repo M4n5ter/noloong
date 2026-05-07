@@ -1,4 +1,4 @@
-use crate::{ApprovalPolicy, Locale};
+use crate::{AgentPluginDeclaration, ApprovalPolicy, Locale};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,6 +19,8 @@ pub struct AgentManifest {
     pub file_edit_tool_policy: FileEditToolPolicy,
     pub approval_policy: ApprovalPolicy,
     #[serde(default)]
+    pub plugins: BTreeMap<String, AgentPluginDeclaration>,
+    #[serde(default)]
     pub reserved_phase_profile: BTreeMap<String, serde_json::Value>,
 }
 
@@ -30,6 +32,7 @@ impl AgentManifest {
             enabled_tools: BTreeSet::new(),
             file_edit_tool_policy: FileEditToolPolicy::default(),
             approval_policy: ApprovalPolicy::RequireApproval,
+            plugins: BTreeMap::new(),
             reserved_phase_profile: BTreeMap::new(),
         }
     }
@@ -42,6 +45,24 @@ impl AgentManifest {
     pub fn with_file_edit_tool_policy(mut self, policy: FileEditToolPolicy) -> Self {
         self.file_edit_tool_policy = policy;
         self
+    }
+
+    pub fn with_plugin(mut self, plugin: AgentPluginDeclaration) -> Result<Self, ManifestError> {
+        self.register_plugin(plugin)?;
+        Ok(self)
+    }
+
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        for (plugin_id, plugin) in &self.plugins {
+            if plugin_id != &plugin.plugin_id {
+                return Err(ManifestError::Invalid(format!(
+                    "plugin map key `{plugin_id}` does not match pluginId `{}`",
+                    plugin.plugin_id
+                )));
+            }
+            validate_plugin(plugin)?;
+        }
+        Ok(())
     }
 
     pub fn apply_patch(&mut self, patch: ManifestPatch) -> Result<(), ManifestError> {
@@ -65,12 +86,36 @@ impl AgentManifest {
             ManifestPatch::UpdateFileEditToolPolicy { policy } => {
                 self.file_edit_tool_policy = policy;
             }
+            ManifestPatch::RegisterPlugin { plugin } => {
+                self.register_plugin(plugin)?;
+            }
+            ManifestPatch::SetPluginEnabled { plugin_id, enabled } => {
+                let plugin = self
+                    .plugins
+                    .get_mut(&plugin_id)
+                    .ok_or_else(|| ManifestError::UnknownPlugin(plugin_id.clone()))?;
+                plugin.enabled = enabled;
+            }
+            ManifestPatch::RemovePlugin { plugin_id } => {
+                self.plugins
+                    .remove(&plugin_id)
+                    .ok_or_else(|| ManifestError::UnknownPlugin(plugin_id.clone()))?;
+            }
             ManifestPatch::ReservedPhaseProfile { .. } => {
                 return Err(ManifestError::Unsupported(
                     "phase profile patches are reserved for a later version".into(),
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn register_plugin(&mut self, plugin: AgentPluginDeclaration) -> Result<(), ManifestError> {
+        validate_plugin(&plugin)?;
+        if self.plugins.contains_key(&plugin.plugin_id) {
+            return Err(ManifestError::PluginAlreadyExists(plugin.plugin_id));
+        }
+        self.plugins.insert(plugin.plugin_id.clone(), plugin);
         Ok(())
     }
 }
@@ -102,6 +147,16 @@ pub enum ManifestPatch {
     UpdateFileEditToolPolicy {
         policy: FileEditToolPolicy,
     },
+    RegisterPlugin {
+        plugin: AgentPluginDeclaration,
+    },
+    SetPluginEnabled {
+        plugin_id: String,
+        enabled: bool,
+    },
+    RemovePlugin {
+        plugin_id: String,
+    },
     ReservedPhaseProfile {
         description: String,
         #[serde(default)]
@@ -118,6 +173,10 @@ impl ManifestPatch {
             Self::ReservedPhaseProfile { .. } => Err(ManifestError::Unsupported(
                 "phase profile patches are reserved for a later version".into(),
             )),
+            Self::RegisterPlugin { plugin } => validate_plugin(plugin),
+            Self::SetPluginEnabled { plugin_id, .. } | Self::RemovePlugin { plugin_id } => {
+                validate_non_empty("pluginId", plugin_id)
+            }
             _ => Ok(()),
         }
     }
@@ -132,6 +191,11 @@ impl ManifestPatch {
             Self::UpdateFileEditToolPolicy { policy } => {
                 format!("update file edit tool policy to {}", policy.as_str())
             }
+            Self::RegisterPlugin { plugin } => format!("register {}", plugin.summary()),
+            Self::SetPluginEnabled { plugin_id, enabled } => {
+                format!("set plugin {plugin_id} enabled={enabled}")
+            }
+            Self::RemovePlugin { plugin_id } => format!("remove plugin {plugin_id}"),
             Self::ReservedPhaseProfile { description, .. } => {
                 format!("reserved phase profile patch: {description}")
             }
@@ -333,6 +397,8 @@ impl ManifestProposalStore {
 pub enum ManifestError {
     Invalid(String),
     UnknownTool(String),
+    UnknownPlugin(String),
+    PluginAlreadyExists(String),
     UnknownProposal(String),
     Unsupported(String),
 }
@@ -342,6 +408,10 @@ impl std::fmt::Display for ManifestError {
         match self {
             Self::Invalid(message) => write!(formatter, "invalid manifest patch: {message}"),
             Self::UnknownTool(tool_name) => write!(formatter, "unknown built-in tool: {tool_name}"),
+            Self::UnknownPlugin(plugin_id) => write!(formatter, "unknown plugin: {plugin_id}"),
+            Self::PluginAlreadyExists(plugin_id) => {
+                write!(formatter, "plugin already exists: {plugin_id}")
+            }
             Self::UnknownProposal(proposal_id) => {
                 write!(formatter, "unknown manifest proposal: {proposal_id}")
             }
@@ -353,3 +423,16 @@ impl std::fmt::Display for ManifestError {
 }
 
 impl std::error::Error for ManifestError {}
+
+fn validate_plugin(plugin: &AgentPluginDeclaration) -> Result<(), ManifestError> {
+    plugin
+        .validate()
+        .map_err(|error| ManifestError::Invalid(error.to_string()))
+}
+
+fn validate_non_empty(field: &str, value: &str) -> Result<(), ManifestError> {
+    if value.trim().is_empty() {
+        return Err(ManifestError::Invalid(format!("{field} must not be empty")));
+    }
+    Ok(())
+}

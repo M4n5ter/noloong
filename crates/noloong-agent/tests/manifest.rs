@@ -1,7 +1,10 @@
 use noloong_agent::{
-    AgentManifest, ApprovalPolicy, BuiltInToolName, FileEditToolPolicy, Locale, ManifestPatch,
-    ManifestProposalStore,
+    AgentManifest, AgentPluginDeclaration, ApprovalPolicy, BuiltInToolName, FileEditToolPolicy,
+    Locale, ManifestPatch, ManifestProposalStore, PluginEnvSource, PluginLoadFailurePolicy,
+    PluginTransport, StdioPluginTransport,
 };
+use noloong_agent_core::ExtensionCapabilitySelector;
+use std::collections::BTreeMap;
 
 #[test]
 fn manifest_patch_applies_prompt_tools_policy() {
@@ -151,4 +154,163 @@ fn manifest_proposal_store_approves_pending_proposals() {
     assert_eq!(approved.proposal_id, proposal.proposal_id);
     assert_eq!(store.pending_len(), 0);
     assert_eq!(store.approved_len(), 1);
+}
+
+#[test]
+fn manifest_plugin_declaration_round_trips_and_defaults() {
+    let manifest: AgentManifest = serde_json::from_value(serde_json::json!({
+        "locale": "en",
+        "systemPrompt": "test",
+        "approvalPolicy": {"mode": "require_approval"},
+        "plugins": {
+            "echo": {
+                "pluginId": "echo",
+                "displayName": "Echo",
+                "transport": {
+                    "type": "stdio",
+                    "command": "node",
+                    "args": ["examples/extensions/echo.mjs"],
+                    "env": {
+                        "OPENAI_API_KEY": {
+                            "type": "host_env",
+                            "name": "OPENAI_API_KEY"
+                        }
+                    }
+                },
+                "allowedCapabilities": [
+                    {"type": "tool", "name": "echo.run"}
+                ],
+                "enabled": true
+            }
+        }
+    }))
+    .unwrap();
+
+    manifest.validate().unwrap();
+    let plugin = &manifest.plugins["echo"];
+    assert!(plugin.enabled);
+    assert_eq!(
+        plugin.on_load_failure,
+        PluginLoadFailurePolicy::DisableForRun
+    );
+    assert_eq!(
+        plugin.allowed_capabilities,
+        vec![ExtensionCapabilitySelector::Tool {
+            name: "echo.run".into(),
+        }]
+    );
+}
+
+#[test]
+fn manifest_plugin_patches_apply_and_reject_invalid_state() {
+    let mut manifest = AgentManifest::default();
+    let plugin = test_plugin("echo");
+
+    manifest
+        .apply_patch(ManifestPatch::RegisterPlugin {
+            plugin: plugin.clone(),
+        })
+        .unwrap();
+    assert_eq!(manifest.plugins["echo"], plugin);
+
+    let duplicate = manifest
+        .apply_patch(ManifestPatch::RegisterPlugin { plugin })
+        .unwrap_err();
+    assert!(duplicate.to_string().contains("already exists"));
+
+    manifest
+        .apply_patch(ManifestPatch::SetPluginEnabled {
+            plugin_id: "echo".into(),
+            enabled: false,
+        })
+        .unwrap();
+    assert!(!manifest.plugins["echo"].enabled);
+
+    manifest
+        .apply_patch(ManifestPatch::RemovePlugin {
+            plugin_id: "echo".into(),
+        })
+        .unwrap();
+    assert!(!manifest.plugins.contains_key("echo"));
+
+    let missing = manifest
+        .apply_patch(ManifestPatch::SetPluginEnabled {
+            plugin_id: "echo".into(),
+            enabled: true,
+        })
+        .unwrap_err();
+    assert!(missing.to_string().contains("unknown plugin"));
+}
+
+#[test]
+fn manifest_plugin_patch_summary_is_auditable_without_secret_values() {
+    let mut plugin = test_plugin("auth");
+    match &mut plugin.transport {
+        PluginTransport::Stdio(transport) => {
+            transport.env.insert(
+                "API_KEY".into(),
+                PluginEnvSource::HostEnv {
+                    name: "SECRET_API_KEY".into(),
+                },
+            );
+        }
+    }
+
+    let summary = ManifestPatch::RegisterPlugin { plugin }.summary();
+
+    assert!(summary.contains("register plugin auth"));
+    assert!(summary.contains("node"));
+    assert!(summary.contains("SECRET_API_KEY"));
+    assert!(!summary.contains("secret-value"));
+}
+
+#[test]
+fn manifest_plugin_validation_rejects_empty_ids_and_commands() {
+    let mut plugin = test_plugin("echo");
+    plugin.plugin_id = " ".into();
+    let error = ManifestPatch::RegisterPlugin { plugin }
+        .validate()
+        .unwrap_err();
+    assert!(error.to_string().contains("pluginId"));
+
+    let mut plugin = test_plugin("echo");
+    match &mut plugin.transport {
+        PluginTransport::Stdio(transport) => {
+            transport.command = " ".into();
+        }
+    }
+    let error = ManifestPatch::RegisterPlugin { plugin }
+        .validate()
+        .unwrap_err();
+    assert!(error.to_string().contains("command"));
+
+    let mut plugin = test_plugin("echo");
+    plugin
+        .allowed_capabilities
+        .push(plugin.allowed_capabilities[0].clone());
+    let error = ManifestPatch::RegisterPlugin { plugin }
+        .validate()
+        .unwrap_err();
+    assert!(error.to_string().contains("duplicate allowed capability"));
+}
+
+fn test_plugin(plugin_id: &str) -> AgentPluginDeclaration {
+    AgentPluginDeclaration {
+        plugin_id: plugin_id.into(),
+        display_name: "Echo".into(),
+        description: None,
+        transport: PluginTransport::Stdio(StdioPluginTransport {
+            command: "node".into(),
+            args: vec!["examples/extensions/echo.mjs".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            request_timeout_secs: None,
+            stream_timeout_secs: None,
+        }),
+        allowed_capabilities: vec![ExtensionCapabilitySelector::Tool {
+            name: "echo.run".into(),
+        }],
+        enabled: true,
+        on_load_failure: PluginLoadFailurePolicy::DisableForRun,
+    }
 }

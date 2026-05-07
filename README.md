@@ -7,6 +7,7 @@
 - Kernel: `AgentRuntime`, typed phase graph, `AgentEvent`, `AgentEffect`, reducer, and `EventStore`.
 - Native extensions: Rust `ModelProvider`, `ToolProvider`, `ContextProvider`, `PhaseNode`, and `ToolCallHook`.
 - Process extensions: newline-delimited JSON-RPC 2.0 over stdio.
+- Product plugins: `noloong-agent` manifest/profile declarations that start stdio extensions with approval, env isolation, and capability allowlists.
 - UX layer: `Agent` with persistent state, subscriptions, `prompt`, `continue_run`, `reset`, `abort`, `wait_for_idle`, steering, and follow-up queues.
 
 Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md). Extension authoring details live in [`crates/noloong-agent-core/docs/EXTENSIONS.md`](crates/noloong-agent-core/docs/EXTENSIONS.md).
@@ -161,6 +162,18 @@ The Rust side for launching that provider is:
 ```bash
 cargo run -p noloong-agent-core --example stdio_ai_sdk
 ```
+
+## Product Plugins
+
+The core JSON-RPC extension bridge is also exposed as a safer product plugin layer in `noloong-agent`. A plugin declaration lives in a profile or session manifest, starts a stdio extension with direct `command + args`, maps only named host environment variables into the child process, and registers only `allowedCapabilities`.
+
+The example profile loads the Python conformance extension as a plugin and allows only its echo tool:
+
+```bash
+cargo run -p noloong -- telegram --profile-config examples/profile-configs/plugin-stdio-example.json
+```
+
+Agents cannot silently install plugins. They can only propose `register_plugin`, `set_plugin_enabled`, or `remove_plugin` manifest patches through `agent.manifest.propose_patch`; a bridge or human then approves and applies the proposal. Plugin changes take effect on the next runtime build/run, not by hot reloading an already running runtime.
 
 ## Thinking
 

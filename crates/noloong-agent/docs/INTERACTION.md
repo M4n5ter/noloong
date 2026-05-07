@@ -215,6 +215,75 @@ Resume timed-out approvals:
 
 `manifest/apply_approved` drains approved proposals and applies supported manifest patches. Reserved phase profile patches remain rejected.
 
+Product plugins use the same manifest proposal flow. A bridge should not start plugin processes or send provider credentials itself; it asks the agent to propose a manifest patch, lets a human approve it, then calls `manifest/apply_approved`. Enabled plugins are loaded the next time a live runtime is built for a run or mutation. Read-only `session/list` and `session/get` descriptor operations do not start plugin processes, and v1 does not hot-reload an already running runtime.
+
+Register a stdio plugin:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 130,
+  "method": "agent/prompt",
+  "params": {
+    "sessionId": "root",
+    "input": {
+      "type": "message",
+      "message": {
+        "id": "plugin-register-1",
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Propose registering this plugin through agent.manifest.propose_patch."
+          }
+        ],
+        "metadata": {
+          "patchExample": {
+            "op": "register_plugin",
+            "plugin": {
+              "pluginId": "python-conformance",
+              "displayName": "Python conformance plugin",
+              "enabled": true,
+              "onLoadFailure": "disable_for_run",
+              "transport": {
+                "type": "stdio",
+                "command": "python3",
+                "args": [
+                  "examples/extensions/python-conformance/full_conformance_extension.py"
+                ],
+                "env": {
+                  "PATH": {
+                    "type": "host_env",
+                    "name": "PATH"
+                  }
+                },
+                "requestTimeoutSecs": 5,
+                "streamTimeoutSecs": 30
+              },
+              "allowedCapabilities": [
+                {
+                  "type": "tool",
+                  "name": "conformance_echo"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The approval summary displays `command`, `args`, `cwd`, mapped environment variable names, enabled state, load-failure policy, and allowed capabilities. Environment mapping stores only host env var names, never secret literal values.
+
+Enable, disable, or remove an existing plugin:
+
+```json
+{"op":"set_plugin_enabled","pluginId":"python-conformance","enabled":false}
+{"op":"remove_plugin","pluginId":"python-conformance"}
+```
+
 ## Process Control
 
 Background jobs are started by agent tools. Bridges can display and control them through the process methods:

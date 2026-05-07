@@ -5,7 +5,7 @@ use noloong_agent_core::{
     InMemoryEventStore, ModelStreamEvent, Result, RunReport, RunStatus, StdioExtension,
     ToolPermissionOutcome, reduce_events, run_extension_conformance,
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use tokio::{
     sync::mpsc,
     time::{sleep, timeout},
@@ -44,6 +44,7 @@ const MODE_MALFORMED_TOOL_RESULT: &str = "malformed-tool-result";
 const MODE_MISSING_RESULT: &str = "missing-result";
 const MODE_MODEL_JSONRPC_ERROR: &str = "model-jsonrpc-error";
 const MODE_RESPONSE_BUFFERED_EVENTS: &str = "response-buffered-events";
+const MODE_REQUIRE_EXPLICIT_ENV: &str = "require-explicit-env";
 const MODE_STDOUT_CLOSE: &str = "stdout-close";
 const MODE_STREAM_HANGS: &str = "stream-hangs";
 const MODE_STREAM_NO_RESPONSE: &str = "stream-no-response";
@@ -118,6 +119,52 @@ async fn capabilities_duplicate_ids_fail_registration() {
         let error = builder_error(&[mode]).await;
         assert_contains(&error, "duplicate");
     }
+}
+
+#[tokio::test]
+async fn capability_allowlist_filters_before_registration() -> Result<()> {
+    let runtime = AgentRuntime::builder()
+        .with_stdio_extension(config(&[MODE_ALL_CAPABILITIES]).allowed_capabilities(
+            BTreeSet::from([
+                noloong_agent_core::ExtensionCapabilitySelector::ModelProvider {
+                    id: "conformance-model".into(),
+                },
+            ]),
+        ))
+        .await?
+        .build()?;
+
+    assert!(runtime.tool("conformance_echo").is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_allowlist_filters_unselected_duplicates_before_validation() -> Result<()> {
+    AgentRuntime::builder()
+        .with_stdio_extension(config(&[MODE_DUPLICATE_TOOL]).allowed_capabilities(BTreeSet::new()))
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_config_clear_env_keeps_only_explicit_env() -> Result<()> {
+    AgentRuntime::builder()
+        .with_stdio_extension(
+            config(&[MODE_REQUIRE_EXPLICIT_ENV])
+                .clear_env(true)
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("NOLOONG_PLUGIN_TEST_ENV", "allowed")
+                .allowed_capabilities(BTreeSet::from([
+                    noloong_agent_core::ExtensionCapabilitySelector::ModelProvider {
+                        id: "conformance-model".into(),
+                    },
+                ])),
+        )
+        .await?
+        .build()?;
+
+    Ok(())
 }
 
 #[tokio::test]

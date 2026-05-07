@@ -4,6 +4,7 @@ use crate::{
     HostProcessCompletion, HostProcessEvent, HostProcessManager, HostProcessSubscription,
     ManifestProposalStore, ToolOutputOverflowConfig, WriteFileTool,
     approval::{ApprovalCache, cache_key_from_approval_resolution},
+    plugin::{PluginLoadError, PluginLoadFailurePolicy, PluginLoadWarning},
     text,
     tools::{
         APPLY_PATCH_TOOL_NAME, HostExecListTool, HostExecReadTool, HostExecStartTool,
@@ -20,6 +21,7 @@ use noloong_agent_core::{
 use serde_json::{Map, json};
 use std::{
     collections::BTreeMap,
+    env,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -58,6 +60,7 @@ pub struct AgentSessionRuntimeBuilder {
     catalog: Catalog,
     model_names_by_id: BTreeMap<String, String>,
     default_model_provider: Option<String>,
+    plugin_load_warnings: Vec<PluginLoadWarning>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +149,7 @@ impl AgentSession {
             catalog,
             model_names_by_id: BTreeMap::new(),
             default_model_provider: None,
+            plugin_load_warnings: Vec::new(),
         }
     }
 
@@ -493,6 +497,68 @@ impl AgentSessionRuntimeBuilder {
         self.core = self.core.with_stdio_extension(config).await?;
         self.sync_model_provider_metadata_from_core();
         Ok(self)
+    }
+
+    pub async fn with_manifest_plugins(mut self) -> Result<Self> {
+        let plugins = self
+            .manifest
+            .plugins
+            .values()
+            .filter(|plugin| plugin.enabled)
+            .cloned()
+            .collect::<Vec<_>>();
+        for plugin in plugins {
+            let plugin_id = plugin.plugin_id.clone();
+            let on_load_failure = plugin.on_load_failure;
+            let config = match plugin.to_stdio_extension_config(|name| env::var(name).ok()) {
+                Ok(config) => config,
+                Err(error) => match on_load_failure {
+                    PluginLoadFailurePolicy::DisableForRun => {
+                        self.plugin_load_warnings.push(PluginLoadWarning {
+                            plugin_id,
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                    PluginLoadFailurePolicy::FailRun => {
+                        return Err(noloong_agent_core::AgentCoreError::Provider(
+                            error.to_string(),
+                        ));
+                    }
+                },
+            };
+            match self.core.add_stdio_extension(config).await {
+                Ok(()) => {
+                    self.sync_model_provider_metadata_from_core();
+                }
+                Err(error) => match on_load_failure {
+                    PluginLoadFailurePolicy::DisableForRun => {
+                        let error = PluginLoadError::Startup {
+                            plugin_id: plugin_id.clone(),
+                            message: format!("{}: {error}", plugin.summary()),
+                        };
+                        self.plugin_load_warnings.push(PluginLoadWarning {
+                            plugin_id,
+                            message: error.to_string(),
+                        });
+                    }
+                    PluginLoadFailurePolicy::FailRun => {
+                        return Err(noloong_agent_core::AgentCoreError::Provider(
+                            PluginLoadError::Startup {
+                                plugin_id,
+                                message: format!("{}: {error}", plugin.summary()),
+                            }
+                            .to_string(),
+                        ));
+                    }
+                },
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn plugin_load_warnings(&self) -> &[PluginLoadWarning] {
+        &self.plugin_load_warnings
     }
 
     pub fn build(mut self) -> Result<AgentRuntime> {

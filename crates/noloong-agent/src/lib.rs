@@ -5,6 +5,7 @@ pub mod interaction;
 pub mod manifest;
 #[cfg(feature = "openai")]
 pub mod openai;
+pub mod plugin;
 pub mod process;
 pub mod session;
 pub mod tools;
@@ -17,6 +18,10 @@ pub use i18n::{Catalog, MessageKey};
 pub use manifest::{
     AgentManifest, BuiltInToolName, FileEditToolPolicy, ManifestPatch, ManifestPatchProposal,
     ManifestProposalStore,
+};
+pub use plugin::{
+    AgentPluginDeclaration, PluginEnvSource, PluginLoadError, PluginLoadFailurePolicy,
+    PluginLoadWarning, PluginTransport, StdioPluginTransport,
 };
 pub use process::{
     HostProcessCompletion, HostProcessEvent, HostProcessManager, HostProcessSubscription, JobId,

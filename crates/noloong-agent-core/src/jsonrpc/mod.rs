@@ -2,12 +2,16 @@ mod adapters;
 mod process;
 mod wire;
 
-use crate::{AgentCoreError, ExtensionCapability, ExtensionManifest, ModelStreamEvent, Result};
+use crate::{
+    AgentCoreError, ExtensionCapability, ExtensionCapabilitySelector, ExtensionManifest,
+    ModelStreamEvent, Result,
+};
 use crate::{CancellationToken, ModelStreamSink};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
     process::Stdio,
     sync::{
         Arc,
@@ -34,6 +38,10 @@ const MODEL_STREAM_EVENT_BUFFER_CAPACITY: usize = 128;
 pub struct StdioExtensionConfig {
     pub command: String,
     pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+    pub clear_env: bool,
+    pub allowed_capabilities: Option<BTreeSet<ExtensionCapabilitySelector>>,
     pub request_timeout: Duration,
     pub stream_timeout: Duration,
 }
@@ -43,6 +51,10 @@ impl StdioExtensionConfig {
         Self {
             command: command.into(),
             args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            clear_env: false,
+            allowed_capabilities: None,
             request_timeout: Duration::from_secs(5),
             stream_timeout: Duration::from_secs(30),
         }
@@ -55,6 +67,40 @@ impl StdioExtensionConfig {
 
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn envs(
+        mut self,
+        env: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.env.extend(
+            env.into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        self
+    }
+
+    pub fn clear_env(mut self, clear_env: bool) -> Self {
+        self.clear_env = clear_env;
+        self
+    }
+
+    pub fn allowed_capabilities(
+        mut self,
+        allowed_capabilities: BTreeSet<ExtensionCapabilitySelector>,
+    ) -> Self {
+        self.allowed_capabilities = Some(allowed_capabilities);
         self
     }
 
@@ -92,8 +138,15 @@ struct ModelStreamRegistration {
 impl StdioExtension {
     pub async fn connect(config: StdioExtensionConfig) -> Result<Self> {
         let mut command = Command::new(&config.command);
+        if let Some(cwd) = &config.cwd {
+            command.current_dir(cwd);
+        }
+        if config.clear_env {
+            command.env_clear();
+        }
         command
             .args(&config.args)
+            .envs(&config.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

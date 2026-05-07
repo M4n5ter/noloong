@@ -705,6 +705,8 @@ spawn process
   -> wrap capabilities into Rust trait adapters
 ```
 
+`StdioExtensionConfig` 是 core 侧的最低层启动配置。它表达 `command`、`args`、可选 `cwd`、显式 `env`、`clear_env`、request/stream timeout，以及可选的 capability allowlist。allowlist 为 `None` 表示 Rust 调用方显式信任并注册该 extension 声明的所有 capability；`Some(empty)` 表示连接 extension 但不注册任何 capability；非空集合按 capability kind 和 id/tool name 精确匹配，并在 duplicate validation 前过滤。
+
 当前支持的 capability：
 
 - `ModelProvider { id }`
@@ -790,6 +792,30 @@ noloong-extension-conformance --profile strict --json -- node ./conformance-exte
 CLI text mode 输出 total / passed / failed / skipped 和每个 case 的结果；`--json` 输出 `ExtensionConformanceReport`，适合 CI 或第三方测试框架消费。进程退出码只在所有非 skipped case 通过时为 0。
 
 内部 suite 仍位于 `tests/jsonrpc_conformance.rs`，并使用 dedicated fixture `tests/fixtures/jsonrpc-conformance-extension.mjs` 覆盖 malformed result、duplicate capability、wrong response id、stdout close、cancellation 和 stream timeout 等 bridge robustness 场景。这些 fixture-only negative modes 不属于第三方 runner 的必跑 contract。
+
+## Product Plugin Layer
+
+`noloong-agent-core` 只定义 extension bridge，不定义产品级插件系统。产品插件在 `noloong-agent` 层实现：`AgentManifest` 持久化 `AgentPluginDeclaration`，profile config 可以提供默认插件，agent 只能通过 `agent.manifest.propose_patch` 提出 `register_plugin`、`set_plugin_enabled` 和 `remove_plugin`，审批通过并 `manifest/apply_approved` 后才写入 session manifest。
+
+这一层和 core extension bridge 的关系是：
+
+```text
+profile config defaults
+  -> default manifest patches
+  -> AgentManifest.plugins in session snapshot
+  -> AgentSessionRuntimeBuilder::with_manifest_plugins()
+  -> StdioExtensionConfig
+  -> noloong-agent-core JSON-RPC bridge
+```
+
+产品插件的安全边界不在 JSON-RPC extension 自身，而在加载声明：
+
+- 插件命令是 direct exec，不接受 shell string。
+- 插件环境默认 `clear_env = true`，只通过 `host_env` 显式映射宿主环境变量名，不保存 secret literal。
+- `allowedCapabilities` 是产品层的注册边界；extension 可以声明更多 capability，但 runtime 只注册 allowlist 中的精确匹配项。
+- `onLoadFailure = disable_for_run` 会跳过本轮插件加载并记录 warning；`fail_run` 会让 runtime build 失败。
+- `session/list`、`session/get` 这类只读 descriptor 操作不会恢复 live runtime，也不会启动插件进程；真正 run/mutation 恢复 live session 时，才按 snapshot manifest 重建插件 runtime profile。
+- v1 不支持 hot reload。启用、禁用或移除插件后，在下一次 runtime build/run 生效。
 
 ## Built-in HTTP SSE Client
 
@@ -1382,6 +1408,7 @@ cargo test -p noloong-openai --test live_chatgpt -- --ignored --nocapture
 - `AnthropicMessagesProvider` 是内置 provider，但仍只是 `ModelProvider`。
 - `noloong-openai` 是 core 外的 OpenAI integration crate；ChatGPT/Codex 私有协议不能进入 `noloong-agent-core`。
 - `noloong-agent` 的 `openai` feature 只是 product wiring；默认不会改变 core 或 agent 的行为。
+- 产品级插件声明、安装审批、enable/disable/remove 和 session 恢复策略在 `noloong-agent`，不进入 `noloong-agent-core`。
 - phase graph 是主要 loop 扩展点，不把所有扩展都压进 callback。
 - event log 是状态事实来源，`AgentState` 是 event replay 的结果。
 - thinking replay 只在同 provider/model scope 内发生。
@@ -1398,6 +1425,9 @@ cargo test -p noloong-openai --test live_chatgpt -- --ignored --nocapture
 4. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 5. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
 6. approval UX adapters：core 已内置 event-sourced pause/resume/timeout 状态机；具体的人机审批 UI、通知、队列持久化和组织策略应作为 hook/应用层适配器实现。
-7. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
+7. plugin marketplace / signature / version lock：基于当前 product plugin declaration 增加分发、签名校验和可复现版本解析，而不是改变 core JSON-RPC wire contract。
+8. MCP adapter：作为 `noloong-agent` 或独立 extension/plugin 实现，把 MCP server 映射到现有 `ToolProvider`/`ContextProvider`，不直接进入 core runtime。
+9. plugin hot reload：需要先定义 run 边界、capability diff、tool availability event 和失败回滚策略；v1 只做下一次 runtime build 生效。
+10. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
 
 这些方向应该继续遵守当前核心原则：状态变更通过 effect，外部行为通过 trait 或 JSON-RPC，provider-specific 细节留在调用方配置或 provider 实现内，不泄漏到 runtime。

@@ -266,8 +266,17 @@ impl AgentRuntimeBuilder {
     }
 
     pub async fn with_stdio_extension(mut self, config: StdioExtensionConfig) -> Result<Self> {
+        self.add_stdio_extension(config).await?;
+        Ok(self)
+    }
+
+    pub async fn add_stdio_extension(&mut self, config: StdioExtensionConfig) -> Result<()> {
+        let allowed_capabilities = config.allowed_capabilities.clone();
         let extension = Arc::new(StdioExtension::connect(config).await?);
-        let capabilities = extension.capabilities().await?;
+        let capabilities = filter_extension_capabilities(
+            extension.capabilities().await?,
+            allowed_capabilities.as_ref(),
+        );
         self.validate_extension_capabilities(&capabilities)?;
         for capability in capabilities {
             match capability {
@@ -338,7 +347,7 @@ impl AgentRuntimeBuilder {
             }
         }
         self.stdio_extensions.push(extension);
-        Ok(self)
+        Ok(())
     }
 
     fn validate_extension_capabilities(
@@ -484,6 +493,23 @@ fn insert_before_phase(
     } else {
         phases.push(phase);
     }
+}
+
+fn filter_extension_capabilities(
+    capabilities: Vec<crate::ExtensionCapability>,
+    allowed_capabilities: Option<&BTreeSet<crate::ExtensionCapabilitySelector>>,
+) -> Vec<crate::ExtensionCapability> {
+    let Some(allowed_capabilities) = allowed_capabilities else {
+        return capabilities;
+    };
+    capabilities
+        .into_iter()
+        .filter(|capability| {
+            allowed_capabilities
+                .iter()
+                .any(|selector| selector.matches(capability))
+        })
+        .collect()
 }
 
 fn ensure_unique_capability<'a>(

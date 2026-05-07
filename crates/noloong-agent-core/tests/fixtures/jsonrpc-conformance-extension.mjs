@@ -37,6 +37,7 @@ const Mode = Object.freeze({
   modelJsonrpcError: "model-jsonrpc-error",
   partialConformance: "partial-conformance",
   responseBufferedEvents: "response-buffered-events",
+  requireExplicitEnv: "require-explicit-env",
   stdoutClose: "stdout-close",
   streamHangs: "stream-hangs",
   streamNoResponse: "stream-no-response",
@@ -389,6 +390,10 @@ for await (const line of rl) {
   if (method === "initialize") {
     if (!assertOrError(id, request.jsonrpc === "2.0", "jsonrpc version mismatch")) continue;
     if (!assertOrError(id, params?.protocolVersion === 1, "protocolVersion mismatch")) continue;
+    if (hasMode(Mode.requireExplicitEnv)) {
+      if (!assertOrError(id, process.env.NOLOONG_PLUGIN_TEST_ENV === "allowed", "explicit env missing")) continue;
+      if (!assertOrError(id, process.env.HOME === undefined, "clear env did not remove HOME")) continue;
+    }
     if (hasMode(Mode.malformedManifest)) {
       result(id, { manifest: { name: 42, version: "0.1.0" } });
       continue;
