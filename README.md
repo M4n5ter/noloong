@@ -111,6 +111,23 @@ async fn main() -> noloong_agent_core::Result<()> {
 
 Anthropic-compatible routers should also stay caller-owned config. For example, OpenRouter's Anthropic Messages endpoint can use `base_url("https://openrouter.ai/api")`, `api_key_env("OPENROUTER_API_KEY")`, `auth_scheme(AnthropicAuthScheme::Bearer)`, and `without_anthropic_version()` without adding an OpenRouter preset to core.
 
+## ChatGPT Subscription
+
+The root `noloong` binary can use a ChatGPT subscription through the ChatGPT Codex Responses backend. Login writes a local token file at `~/.agents/noloong/chatgpt/token.json` by default. Set `NOLOONG_CHATGPT_TOKEN_FILE` or pass `--token-file` to use another path.
+
+```bash
+cargo run -p noloong -- chatgpt login --flow browser
+cargo run -p noloong -- chatgpt status
+```
+
+The profile example below uses token-file auth by default, uses `gpt-5.4-mini`, and enables Codex compact automatically:
+
+```bash
+cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json
+```
+
+Set `"compaction": {"type": "none"}` in the profile to disable the ChatGPT Codex compact endpoint.
+
 ## Extension Authoring
 
 The deterministic conformance examples are the fastest way to learn the stdio JSON-RPC extension contract. They do not call a real model; they exist to validate the bridge surface and pass `noloong-extension-conformance --profile strict`.

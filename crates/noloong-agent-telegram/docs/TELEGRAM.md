@@ -32,6 +32,20 @@ TELEGRAM_LOCALE=zh \
 noloong telegram
 ```
 
+ChatGPT subscription mode:
+
+```sh
+noloong chatgpt login --flow browser
+NOLOONG_PROFILE_CONFIG=examples/profile-configs/chatgpt-codex-subscription.json \
+TELEGRAM_BOT_TOKEN=... \
+TELEGRAM_BOT_USERNAME=noloong_bot \
+TELEGRAM_ALLOWED_USERS=123456789 \
+TELEGRAM_LOCALE=zh \
+noloong telegram
+```
+
+The ChatGPT profile reads `~/.agents/noloong/chatgpt/token.json` by default and uses `gpt-5.4-mini`. Use `NOLOONG_CHATGPT_TOKEN_FILE` or `noloong chatgpt login --token-file <path>` when a different token location is needed. Codex compact is enabled automatically for `chatgpt_responses`; set `"compaction": {"type": "none"}` in the profile to disable it.
+
 Split host:
 
 ```sh

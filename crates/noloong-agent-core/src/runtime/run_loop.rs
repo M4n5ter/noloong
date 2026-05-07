@@ -199,6 +199,12 @@ impl AgentRuntime {
         &self.context_providers
     }
 
+    pub fn context_compaction_config(&self) -> Option<&crate::ContextCompactionConfig> {
+        self.context_compaction
+            .as_ref()
+            .map(|compaction| &compaction.config)
+    }
+
     pub fn tool_specs(&self) -> Vec<Arc<dyn ToolProvider>> {
         self.tools.values().cloned().collect()
     }

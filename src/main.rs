@@ -1,3 +1,4 @@
+mod chatgpt;
 mod config;
 mod host;
 
@@ -61,6 +62,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
         CliCommand::Serve(ServeCommand {
             command: ServeSubcommand::Interaction(options),
         }) => run_serve_interaction(options).await,
+        CliCommand::ChatGpt(options) => chatgpt::run_chatgpt(options).await.map_err(Into::into),
         CliCommand::TelegramBridge(options) => run_telegram_bridge(options).await,
         CliCommand::Telegram(options) => run_telegram(options).await,
     }
@@ -595,6 +597,8 @@ struct Cli {
 #[derive(Clone, Debug, Subcommand, PartialEq, Eq)]
 enum CliCommand {
     Serve(ServeCommand),
+    #[command(name = "chatgpt")]
+    ChatGpt(chatgpt::ChatGptOptions),
     #[command(name = "telegram-bridge")]
     TelegramBridge(TelegramBridgeOptions),
     Telegram(TelegramOptions),
@@ -617,6 +621,8 @@ enum CliError {
     Config(#[from] config::CliConfigError),
     #[error("{0}")]
     Host(#[from] host::HostBuildError),
+    #[error("{0}")]
+    ChatGpt(#[from] chatgpt::ChatGptCliError),
     #[error("interaction transport failed: {0}")]
     Interaction(#[from] noloong_agent::interaction::InteractionError),
     #[error("interaction client failed: {0}")]

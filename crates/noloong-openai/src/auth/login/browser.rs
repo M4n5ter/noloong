@@ -31,21 +31,27 @@ impl BrowserLoginServer {
     }
 
     pub async fn wait_for_callback(self) -> Result<BrowserCallback> {
-        let (mut stream, _) = self.listener.accept().await?;
-        let mut buffer = vec![0; 8192];
-        let read = stream.read(&mut buffer).await?;
-        let request = String::from_utf8_lossy(&buffer[..read]);
-        let callback = parse_http_request_callback(&request, &self.session.state);
-        let response = match callback {
-            Ok(_) => {
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 22\r\n\r\nLogin completed.\n"
+        loop {
+            let (mut stream, _) = self.listener.accept().await?;
+            let mut buffer = vec![0; 8192];
+            let read = stream.read(&mut buffer).await?;
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let callback = parse_http_request_callback(&request, &self.session.state);
+            let response = match callback {
+                Ok(_) => {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 22\r\n\r\nLogin completed.\n"
+                }
+                Err(_) => {
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 14\r\n\r\nLogin failed.\n"
+                }
+            };
+            stream.write_all(response.as_bytes()).await?;
+            match callback {
+                Ok(callback) => return Ok(callback),
+                Err(OpenAiIntegrationError::OAuthStateMismatch) => continue,
+                Err(error) => return Err(error),
             }
-            Err(_) => {
-                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 14\r\n\r\nLogin failed.\n"
-            }
-        };
-        stream.write_all(response.as_bytes()).await?;
-        callback
+        }
     }
 }
 

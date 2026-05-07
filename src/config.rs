@@ -1,7 +1,12 @@
 use noloong_agent::ManifestPatch;
+use noloong_agent_core::ContextCompactionMode;
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::{collections::BTreeMap, env, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 pub const DEFAULT_PROFILE_CONFIG_ENV: &str = "NOLOONG_PROFILE_CONFIG";
@@ -17,6 +22,9 @@ pub const DEFAULT_TELEGRAM_FALLBACK_IPS_ENV: &str = "TELEGRAM_FALLBACK_IPS";
 pub const DEFAULT_TELEGRAM_DISABLE_FALLBACK_IPS_ENV: &str = "TELEGRAM_DISABLE_FALLBACK_IPS";
 pub const DEFAULT_TELEGRAM_DISABLE_ENV_PROXY_ENV: &str = "TELEGRAM_DISABLE_ENV_PROXY";
 pub const DEFAULT_TELEGRAM_LOCALE_ENV: &str = "TELEGRAM_LOCALE";
+pub const DEFAULT_CHATGPT_TOKEN_FILE_ENV: &str = "NOLOONG_CHATGPT_TOKEN_FILE";
+const DEFAULT_CHATGPT_TOKEN_FILE_RELATIVE: &[&str] =
+    &[".agents", "noloong", "chatgpt", "token.json"];
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +70,8 @@ pub struct RuntimeProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub provider: BuiltInProviderConfig,
+    #[serde(default)]
+    pub compaction: ProfileCompactionConfig,
     #[serde(default)]
     pub manifest_patches: Vec<ManifestPatch>,
     #[serde(default)]
@@ -124,7 +134,8 @@ pub enum BuiltInProviderConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_id: Option<String>,
         model: String,
-        auth: EnvAuthProviderConfig,
+        #[serde(default)]
+        auth: ChatGptAuthConfig,
     },
 }
 
@@ -134,11 +145,26 @@ pub enum BuiltInProviderConfig {
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
-pub enum EnvAuthProviderConfig {
+pub enum ChatGptAuthConfig {
+    TokenFile {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_file_env: Option<String>,
+    },
     EnvHeaders {
         id: String,
         headers: Vec<EnvHeaderConfig>,
     },
+}
+
+impl Default for ChatGptAuthConfig {
+    fn default() -> Self {
+        Self::TokenFile {
+            token_file: None,
+            token_file_env: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -148,6 +174,34 @@ pub struct EnvHeaderConfig {
     pub env: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_prefix: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ProfileCompactionConfig {
+    #[default]
+    Auto,
+    None,
+    OpenaiResponses {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reserve_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_recent_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<ContextCompactionMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_timeout_secs: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -190,6 +244,8 @@ pub enum CliConfigError {
     ParseConfig(String),
     #[error("required environment variable is missing: {0}")]
     MissingEnv(String),
+    #[error("home directory is required to resolve the default ChatGPT token file")]
+    MissingHome,
 }
 
 pub fn env_or_value(value: Option<String>, env_name: &str) -> Option<String> {
@@ -226,6 +282,69 @@ pub fn parse_bool_env(value: Option<String>, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+pub fn resolve_chatgpt_token_file(
+    token_file: Option<&str>,
+    token_file_env: Option<&str>,
+) -> Result<PathBuf, CliConfigError> {
+    resolve_chatgpt_token_file_with_env(token_file, token_file_env, process_env)
+}
+
+pub fn resolve_chatgpt_token_file_with_env(
+    token_file: Option<&str>,
+    token_file_env: Option<&str>,
+    env_source: impl Fn(&str) -> Option<String>,
+) -> Result<PathBuf, CliConfigError> {
+    if let Some(token_file) = non_empty_str(token_file) {
+        return expand_home_path(token_file, &env_source);
+    }
+    if let Some(env_name) = non_empty_str(token_file_env) {
+        let token_file = env_source(env_name)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CliConfigError::MissingEnv(env_name.to_string()))?;
+        return expand_home_path(&token_file, &env_source);
+    }
+    if let Some(token_file) =
+        env_source(DEFAULT_CHATGPT_TOKEN_FILE_ENV).filter(|value| !value.trim().is_empty())
+    {
+        return expand_home_path(&token_file, &env_source);
+    }
+    let mut path = home_dir(&env_source)?;
+    for component in DEFAULT_CHATGPT_TOKEN_FILE_RELATIVE {
+        path.push(component);
+    }
+    Ok(path)
+}
+
+fn process_env(name: &str) -> Option<String> {
+    env::var(name).ok()
+}
+
+fn expand_home_path(
+    value: &str,
+    env_source: &impl Fn(&str) -> Option<String>,
+) -> Result<PathBuf, CliConfigError> {
+    let value = value.trim();
+    if value == "~" {
+        return home_dir(env_source);
+    }
+    if let Some(stripped) = value.strip_prefix("~/") {
+        return Ok(home_dir(env_source)?.join(stripped));
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn home_dir(env_source: &impl Fn(&str) -> Option<String>) -> Result<PathBuf, CliConfigError> {
+    env_source("HOME")
+        .or_else(|| env_source("USERPROFILE"))
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or(CliConfigError::MissingHome)
+}
+
+fn non_empty_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 fn parse_csv<T>(
     value: Option<String>,
     parse: impl Fn(&str) -> Result<T, CliConfigError>,
@@ -241,7 +360,12 @@ fn parse_csv<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BuiltInProviderConfig, HostProfileConfig};
+    use super::{
+        BuiltInProviderConfig, ChatGptAuthConfig, HostProfileConfig, ProfileCompactionConfig,
+        resolve_chatgpt_token_file_with_env,
+    };
+    use noloong_agent_core::ContextCompactionMode;
+    use std::path::PathBuf;
 
     #[test]
     fn profile_config_loads_chat_completions() {
@@ -298,5 +422,157 @@ mod tests {
         .unwrap();
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn profile_config_loads_chatgpt_responses_with_default_token_file_auth() {
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::ChatgptResponses { auth, .. } = &config.profiles[0].provider
+        else {
+            panic!("expected ChatGPT responses provider");
+        };
+        assert_eq!(auth, &ChatGptAuthConfig::default());
+        assert_eq!(config.profiles[0].compaction, ProfileCompactionConfig::Auto);
+    }
+
+    #[test]
+    fn profile_config_loads_chatgpt_env_headers_escape_hatch() {
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {
+                        "type": "chatgpt_responses",
+                        "model": "gpt-5.4-mini",
+                        "auth": {
+                            "type": "env_headers",
+                            "id": "custom-auth",
+                            "headers": [{
+                                "name": "Authorization",
+                                "env": "CHATGPT_ACCESS_TOKEN",
+                                "valuePrefix": "Bearer "
+                            }]
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::ChatgptResponses { auth, .. } = &config.profiles[0].provider
+        else {
+            panic!("expected ChatGPT responses provider");
+        };
+        assert!(matches!(auth, ChatGptAuthConfig::EnvHeaders { .. }));
+    }
+
+    #[test]
+    fn profile_config_loads_openai_responses_compaction() {
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
+                    "compaction": {
+                        "type": "openai_responses",
+                        "model": "gpt-5.4-mini",
+                        "contextWindowTokens": 200000,
+                        "reserveTokens": 32000,
+                        "keepRecentTokens": 64000,
+                        "mode": "request_only",
+                        "requestTimeoutSecs": 120
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let ProfileCompactionConfig::OpenaiResponses {
+            model,
+            context_window_tokens,
+            reserve_tokens,
+            keep_recent_tokens,
+            mode,
+            request_timeout_secs,
+            ..
+        } = &config.profiles[0].compaction
+        else {
+            panic!("expected OpenAI responses compaction");
+        };
+        assert_eq!(model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(*context_window_tokens, Some(200_000));
+        assert_eq!(*reserve_tokens, Some(32_000));
+        assert_eq!(*keep_recent_tokens, Some(64_000));
+        assert_eq!(*mode, Some(ContextCompactionMode::RequestOnly));
+        assert_eq!(*request_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn chatgpt_token_file_resolver_uses_default_home_path() {
+        let path = resolve_chatgpt_token_file_with_env(None, None, |name| match name {
+            "HOME" => Some("/home/alice".into()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/home/alice/.agents/noloong/chatgpt/token.json")
+        );
+    }
+
+    #[test]
+    fn chatgpt_token_file_resolver_prefers_explicit_path() {
+        let path = resolve_chatgpt_token_file_with_env(
+            Some("~/custom-token.json"),
+            Some("CUSTOM_TOKEN"),
+            |name| match name {
+                "HOME" => Some("/home/alice".into()),
+                "CUSTOM_TOKEN" => Some("/ignored/token.json".into()),
+                "NOLOONG_CHATGPT_TOKEN_FILE" => Some("/ignored/default-token.json".into()),
+                _ => None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(path, PathBuf::from("/home/alice/custom-token.json"));
+    }
+
+    #[test]
+    fn chatgpt_token_file_resolver_uses_named_env_before_default_env() {
+        let path =
+            resolve_chatgpt_token_file_with_env(None, Some("CUSTOM_TOKEN"), |name| match name {
+                "HOME" => Some("/home/alice".into()),
+                "CUSTOM_TOKEN" => Some("~/from-custom-env.json".into()),
+                "NOLOONG_CHATGPT_TOKEN_FILE" => Some("/ignored/default-token.json".into()),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(path, PathBuf::from("/home/alice/from-custom-env.json"));
+    }
+
+    #[test]
+    fn chatgpt_token_file_resolver_uses_default_env_before_home_default() {
+        let path = resolve_chatgpt_token_file_with_env(None, None, |name| match name {
+            "HOME" => Some("/home/alice".into()),
+            "NOLOONG_CHATGPT_TOKEN_FILE" => Some("/tmp/token.json".into()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(path, PathBuf::from("/tmp/token.json"));
     }
 }

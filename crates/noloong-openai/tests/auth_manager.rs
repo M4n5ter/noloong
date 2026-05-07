@@ -31,6 +31,24 @@ async fn auth_manager_headers_include_bearer_account_and_fedramp() -> noloong_op
 }
 
 #[tokio::test]
+async fn auth_manager_missing_token_error_points_to_login() -> noloong_openai::Result<()> {
+    let storage = Arc::new(ChatGptEphemeralTokenStorage::new());
+    let manager = ChatGptAuthManager::new(storage);
+
+    let error = manager
+        .auth_headers()
+        .await
+        .expect_err("missing token should be reported");
+
+    assert!(
+        error
+            .to_string()
+            .contains("noloong chatgpt login --flow browser")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn auth_manager_proactively_refreshes_expired_access_token() -> noloong_openai::Result<()> {
     let refreshed_id_token = id_token("account-123", true);
     let server = MockHttpServer::spawn(vec![MockResponse::json(

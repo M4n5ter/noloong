@@ -11,6 +11,32 @@
 
 实现细节按 OpenAI Codex 当前实现对齐：OAuth client id、PKCE S256、browser callback ports、device-code endpoints、token refresh/revoke endpoints、ChatGPT account/FedRAMP headers，以及 compact path `responses/compact`。
 
+## Root CLI
+
+推荐用户通过 root `noloong` binary 登录，而不是直接调用本 crate 的 examples。默认 token file 是 `~/.agents/noloong/chatgpt/token.json`；可以通过 `NOLOONG_CHATGPT_TOKEN_FILE` 或 `--token-file` 覆盖。
+
+```bash
+cargo run -p noloong -- chatgpt login --flow browser
+cargo run -p noloong -- chatgpt status
+cargo run -p noloong -- chatgpt logout
+```
+
+Browser flow 会打印 authorization URL，等待用户在真实浏览器完成验证，然后把 token 写入 token file。远程或 headless 环境可以使用 device flow：
+
+```bash
+cargo run -p noloong -- chatgpt login --flow device
+```
+
+使用 ChatGPT 订阅的 root profile 示例在 `examples/profile-configs/chatgpt-codex-subscription.json`。该配置不包含 secret，默认读取 token file，使用 `gpt-5.4-mini`，并在 `chatgpt_responses` profile 上启用 Codex `responses/compact`。需要关闭 compact 时显式配置：
+
+```json
+{
+  "compaction": {
+    "type": "none"
+  }
+}
+```
+
 ## Browser Login
 
 调用方负责把 `authorization_url` 展示给用户；library 只绑定本地 callback server 并等待回调。

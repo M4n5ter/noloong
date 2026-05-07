@@ -1,0 +1,34 @@
+{
+  "defaultProfileId": "chatgpt-codex",
+  "registryStore": {
+    "type": "memory"
+  },
+  "profiles": [
+    {
+      "profileId": "chatgpt-codex",
+      "displayName": "ChatGPT Codex",
+      "description": "ChatGPT subscription through the Codex Responses backend.",
+      "provider": {
+        "type": "chatgpt_responses",
+        "model": "gpt-5.4-mini"
+      },
+      "compaction": {
+        "type": "auto"
+      },
+      "manifestPatches": [
+        {
+          "op": "set_locale",
+          "locale": "zh"
+        },
+        {
+          "op": "update_file_edit_tool_policy",
+          "policy": "auto_by_model"
+        }
+      ],
+      "metadata": {
+        "channel": "telegram",
+        "example": true
+      }
+    }
+  ]
+}

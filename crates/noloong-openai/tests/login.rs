@@ -10,6 +10,7 @@ use noloong_openai::auth::{
 };
 use serde_json::json;
 use support::{MockHttpServer, MockResponse, unsigned_jwt};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[test]
 fn login_browser_session_builds_codex_compatible_authorize_url() -> noloong_openai::Result<()> {
@@ -74,6 +75,30 @@ async fn login_browser_server_falls_back_when_preferred_port_is_busy() -> noloon
     Ok(())
 }
 
+#[tokio::test]
+async fn login_browser_server_ignores_state_mismatch_then_accepts_current_state()
+-> noloong_openai::Result<()> {
+    let config = ChatGptLoginConfig::new()
+        .preferred_callback_port(0)
+        .fallback_callback_port(0);
+    let server = BrowserLoginServer::bind(config).await?;
+    let port = server.session().port;
+    let expected_state = server.session().state.clone();
+    let callback = tokio::spawn(async move { server.wait_for_callback().await });
+
+    let stale_response = send_browser_callback(port, "code=stale-code&state=stale-state").await?;
+    assert!(stale_response.starts_with("HTTP/1.1 400 Bad Request"));
+
+    let current_response =
+        send_browser_callback(port, &format!("code=current-code&state={expected_state}")).await?;
+    assert!(current_response.starts_with("HTTP/1.1 200 OK"));
+    let callback = callback.await.expect("callback task should not panic")?;
+
+    assert_eq!(callback.code, "current-code");
+    assert_eq!(callback.state, expected_state);
+    Ok(())
+}
+
 #[test]
 fn login_browser_callback_rejects_state_mismatch() {
     let error = BrowserCallback::from_redirect_url(
@@ -83,6 +108,17 @@ fn login_browser_callback_rejects_state_mismatch() {
     .expect_err("mismatched callback state must be rejected");
 
     assert!(matches!(error, OpenAiIntegrationError::OAuthStateMismatch));
+}
+
+async fn send_browser_callback(port: u16, query: &str) -> noloong_openai::Result<String> {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    let request = format!(
+        "GET /auth/callback?{query} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    Ok(response)
 }
 
 #[tokio::test]

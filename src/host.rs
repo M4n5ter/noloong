@@ -1,6 +1,6 @@
 use crate::config::{
-    BuiltInProviderConfig, CliConfigError, EnvAuthProviderConfig, HostProfileConfig,
-    RegistryStoreConfig, RuntimeProfileConfig,
+    BuiltInProviderConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig, HostProfileConfig,
+    ProfileCompactionConfig, RegistryStoreConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
 };
 use noloong_agent::{
     AgentManifest, AgentSession,
@@ -15,15 +15,25 @@ use noloong_agent::{
 use noloong_agent_core::{
     AgentCoreError, AgentRuntime, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
     BoxFuture, CancellationToken, ChatCompletionsProvider, ChatCompletionsProviderConfig,
-    HttpAuthContext, HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, ModelProvider,
-    ResponsesApiProvider, ResponsesApiProviderConfig,
+    ContextCompactionConfig, ContextCompactionMode, ContextCompactor, HttpAuthContext,
+    HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, ModelProvider, ResponsesApiProvider,
+    ResponsesApiProviderConfig,
+};
+use noloong_openai::{
+    auth::{ChatGptAuthManager, ChatGptTokenStorage, ChatGptTokenStore},
+    compact::{OpenAiResponsesCompactor, OpenAiResponsesCompactorConfig},
 };
 use opendal::{
     Operator,
     services::{Fs, Memory},
 };
-use std::{env, sync::Arc};
+use serde_json::json;
+use std::{env, sync::Arc, time::Duration};
 use thiserror::Error;
+
+const DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS: u64 = 128_000;
+const DEFAULT_CHATGPT_COMPACTION_RESERVE_TOKENS: u64 = 16_384;
+const DEFAULT_CHATGPT_COMPACTION_KEEP_RECENT_TOKENS: u64 = 20_000;
 
 pub async fn build_registry(
     config: &HostProfileConfig,
@@ -81,6 +91,7 @@ async fn build_registry_store(
 struct RuntimeProfile {
     descriptor: InteractionProfileDescriptor,
     provider: Arc<dyn ModelProvider>,
+    compaction: Option<RuntimeCompaction>,
 }
 
 impl RuntimeProfile {
@@ -93,6 +104,12 @@ impl RuntimeProfile {
                     HostBuildError::Config(CliConfigError::ParseConfig(error.to_string()))
                 })?;
         }
+        let provider = build_provider(&config.profile_id, &config.provider)?;
+        let compaction = build_profile_compaction(
+            &config.profile_id,
+            &config.compaction,
+            provider.chatgpt_compact.as_ref(),
+        )?;
         Ok(Self {
             descriptor: InteractionProfileDescriptor {
                 profile_id: config.profile_id.clone(),
@@ -101,7 +118,8 @@ impl RuntimeProfile {
                 default_manifest_patches: config.manifest_patches.clone(),
                 metadata: config.metadata.clone(),
             },
-            provider: build_provider(&config.profile_id, &config.provider)?,
+            provider: provider.provider,
+            compaction,
         })
     }
 }
@@ -117,19 +135,51 @@ impl AgentRuntimeProfile for RuntimeProfile {
         _manifest: &'a AgentManifest,
     ) -> InteractionFuture<'a, AgentRuntime> {
         Box::pin(async move {
-            session
+            let mut builder = session
                 .runtime_builder()
-                .with_model_provider(Arc::clone(&self.provider))
-                .build()
-                .map_err(InteractionError::from)
+                .with_model_provider(Arc::clone(&self.provider));
+            if let Some(compaction) = &self.compaction {
+                builder = builder.with_context_compactor(
+                    compaction.config.clone(),
+                    Arc::clone(&compaction.compactor),
+                );
+            }
+            builder.build().map_err(InteractionError::from)
         })
     }
+}
+
+#[derive(Clone)]
+struct RuntimeCompaction {
+    config: ContextCompactionConfig,
+    compactor: Arc<dyn ContextCompactor>,
+}
+
+struct BuiltProvider {
+    provider: Arc<dyn ModelProvider>,
+    chatgpt_compact: Option<ChatGptCompactSource>,
+}
+
+impl BuiltProvider {
+    fn model(provider: Arc<dyn ModelProvider>) -> Self {
+        Self {
+            provider,
+            chatgpt_compact: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ChatGptCompactSource {
+    provider_id: String,
+    model: String,
+    auth_provider: Arc<dyn HttpAuthProvider>,
 }
 
 fn build_provider(
     profile_id: &str,
     config: &BuiltInProviderConfig,
-) -> Result<Arc<dyn ModelProvider>, HostBuildError> {
+) -> Result<BuiltProvider, HostBuildError> {
     match config {
         BuiltInProviderConfig::ChatCompletions {
             provider_id,
@@ -159,7 +209,9 @@ fn build_provider(
             if let Some(max_completion_tokens) = max_completion_tokens {
                 provider = provider.max_completion_tokens(*max_completion_tokens);
             }
-            Ok(Arc::new(ChatCompletionsProvider::new(provider)?))
+            Ok(BuiltProvider::model(Arc::new(
+                ChatCompletionsProvider::new(provider)?,
+            )))
         }
         BuiltInProviderConfig::Responses {
             provider_id,
@@ -189,7 +241,9 @@ fn build_provider(
             if let Some(max_output_tokens) = max_output_tokens {
                 provider = provider.max_output_tokens(*max_output_tokens);
             }
-            Ok(Arc::new(ResponsesApiProvider::new(provider)?))
+            Ok(BuiltProvider::model(Arc::new(ResponsesApiProvider::new(
+                provider,
+            )?)))
         }
         BuiltInProviderConfig::AnthropicMessages {
             provider_id,
@@ -219,22 +273,155 @@ fn build_provider(
             if let Some(max_tokens) = max_tokens {
                 provider = provider.max_tokens(*max_tokens);
             }
-            Ok(Arc::new(AnthropicMessagesProvider::new(provider)?))
+            Ok(BuiltProvider::model(Arc::new(
+                AnthropicMessagesProvider::new(provider)?,
+            )))
         }
         BuiltInProviderConfig::ChatgptResponses {
             provider_id,
             model,
             auth,
         } => {
-            let auth_provider = Arc::new(EnvHttpAuthProvider::from_config(auth.clone()));
+            let provider_id = provider_id.clone().unwrap_or_else(|| profile_id.into());
+            let auth_provider = build_chatgpt_auth_provider(auth)?;
             let provider = noloong_openai::provider::chatgpt_responses_provider(
-                provider_id.clone().unwrap_or_else(|| profile_id.into()),
+                provider_id.clone(),
                 model,
-                auth_provider,
+                Arc::clone(&auth_provider),
             )?;
-            Ok(Arc::new(provider))
+            Ok(BuiltProvider {
+                provider: Arc::new(provider),
+                chatgpt_compact: Some(ChatGptCompactSource {
+                    provider_id,
+                    model: model.clone(),
+                    auth_provider,
+                }),
+            })
         }
     }
+}
+
+fn build_chatgpt_auth_provider(
+    config: &ChatGptAuthConfig,
+) -> Result<Arc<dyn HttpAuthProvider>, HostBuildError> {
+    match config {
+        ChatGptAuthConfig::TokenFile {
+            token_file,
+            token_file_env,
+        } => {
+            let token_file =
+                resolve_chatgpt_token_file(token_file.as_deref(), token_file_env.as_deref())?;
+            let storage =
+                Arc::new(ChatGptTokenStorage::file(token_file)) as Arc<dyn ChatGptTokenStore>;
+            Ok(Arc::new(ChatGptAuthManager::new(storage)))
+        }
+        ChatGptAuthConfig::EnvHeaders { id, headers } => Ok(Arc::new(
+            EnvHttpAuthProvider::from_env_headers(id.clone(), headers.clone()),
+        )),
+    }
+}
+
+fn build_profile_compaction(
+    profile_id: &str,
+    config: &ProfileCompactionConfig,
+    chatgpt_source: Option<&ChatGptCompactSource>,
+) -> Result<Option<RuntimeCompaction>, HostBuildError> {
+    match config {
+        ProfileCompactionConfig::Auto => chatgpt_source
+            .map(|source| {
+                openai_responses_runtime_compaction(
+                    profile_id,
+                    source,
+                    OpenAiResponsesCompactionOptions::default(),
+                )
+            })
+            .transpose(),
+        ProfileCompactionConfig::None => Ok(None),
+        ProfileCompactionConfig::OpenaiResponses {
+            id,
+            model,
+            context_window_tokens,
+            reserve_tokens,
+            keep_recent_tokens,
+            mode,
+            request_timeout_secs,
+        } => {
+            let source = chatgpt_source.ok_or_else(|| {
+                CliConfigError::ParseConfig(
+                    "openai_responses compaction requires a chatgpt_responses provider".into(),
+                )
+            })?;
+            openai_responses_runtime_compaction(
+                profile_id,
+                source,
+                OpenAiResponsesCompactionOptions {
+                    id: id.clone(),
+                    model: model.clone(),
+                    context_window_tokens: *context_window_tokens,
+                    reserve_tokens: *reserve_tokens,
+                    keep_recent_tokens: *keep_recent_tokens,
+                    mode: *mode,
+                    request_timeout_secs: *request_timeout_secs,
+                },
+            )
+            .map(Some)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct OpenAiResponsesCompactionOptions {
+    id: Option<String>,
+    model: Option<String>,
+    context_window_tokens: Option<u64>,
+    reserve_tokens: Option<u64>,
+    keep_recent_tokens: Option<u64>,
+    mode: Option<ContextCompactionMode>,
+    request_timeout_secs: Option<u64>,
+}
+
+fn openai_responses_runtime_compaction(
+    profile_id: &str,
+    source: &ChatGptCompactSource,
+    options: OpenAiResponsesCompactionOptions,
+) -> Result<RuntimeCompaction, HostBuildError> {
+    let reserve_tokens = options
+        .reserve_tokens
+        .unwrap_or(DEFAULT_CHATGPT_COMPACTION_RESERVE_TOKENS);
+    let context_window_tokens = options
+        .context_window_tokens
+        .unwrap_or(DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS.saturating_add(reserve_tokens));
+    let keep_recent_tokens = options
+        .keep_recent_tokens
+        .unwrap_or(DEFAULT_CHATGPT_COMPACTION_KEEP_RECENT_TOKENS);
+    let context_config = ContextCompactionConfig::new(context_window_tokens)
+        .reserve_tokens(reserve_tokens)
+        .keep_recent_tokens(keep_recent_tokens)
+        .mode(options.mode.unwrap_or_default())
+        .metadata("source", json!("openai_responses"))
+        .metadata("profileId", json!(profile_id))
+        .metadata("providerId", json!(source.provider_id.clone()));
+    let compactor_id = options
+        .id
+        .unwrap_or_else(|| format!("{}.compact", source.provider_id));
+    let model = options.model.unwrap_or_else(|| source.model.clone());
+    let mut compactor_config = OpenAiResponsesCompactorConfig::new(compactor_id, model)
+        .auth_provider(Arc::clone(&source.auth_provider));
+    if let Some(request_timeout_secs) = options.request_timeout_secs {
+        if request_timeout_secs == 0 {
+            return Err(CliConfigError::ParseConfig(
+                "compaction requestTimeoutSecs must be greater than zero".into(),
+            )
+            .into());
+        }
+        compactor_config =
+            compactor_config.request_timeout(Duration::from_secs(request_timeout_secs));
+    }
+    let compactor = OpenAiResponsesCompactor::new(compactor_config)?;
+    Ok(RuntimeCompaction {
+        config: context_config,
+        compactor: Arc::new(compactor),
+    })
 }
 
 #[derive(Clone)]
@@ -244,19 +431,17 @@ struct EnvHttpAuthProvider {
 }
 
 impl EnvHttpAuthProvider {
-    fn from_config(config: EnvAuthProviderConfig) -> Self {
-        match config {
-            EnvAuthProviderConfig::EnvHeaders { id, headers } => Self {
-                id,
-                headers: headers
-                    .into_iter()
-                    .map(|header| EnvAuthHeader {
-                        name: header.name,
-                        env: header.env,
-                        value_prefix: header.value_prefix,
-                    })
-                    .collect(),
-            },
+    fn from_env_headers(id: String, headers: Vec<EnvHeaderConfig>) -> Self {
+        Self {
+            id,
+            headers: headers
+                .into_iter()
+                .map(|header| EnvAuthHeader {
+                    name: header.name,
+                    env: header.env,
+                    value_prefix: header.value_prefix,
+                })
+                .collect(),
         }
     }
 }
@@ -313,8 +498,10 @@ fn opendal_error(error: opendal::Error) -> HostBuildError {
 
 #[cfg(test)]
 mod tests {
-    use super::build_registry;
-    use crate::config::HostProfileConfig;
+    use super::{DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS, RuntimeProfile, build_registry};
+    use crate::config::{HostProfileConfig, RuntimeProfileConfig};
+    use noloong_agent::{AgentManifest, AgentSession, interaction::AgentRuntimeProfile};
+    use noloong_agent_core::ContextCompactionMode;
 
     #[tokio::test]
     async fn profile_config_builds_registry_store() {
@@ -348,5 +535,101 @@ mod tests {
             registry.profile_descriptors()[0].profile_id,
             "telegram-openrouter-free"
         );
+    }
+
+    #[tokio::test]
+    async fn example_chatgpt_codex_subscription_profile_builds_registry() {
+        let config = serde_json::from_str::<HostProfileConfig>(include_str!(
+            "../examples/profile-configs/chatgpt-codex-subscription.json"
+        ))
+        .unwrap();
+
+        let registry = build_registry(&config).await.unwrap();
+
+        assert_eq!(
+            registry.profile_descriptors()[0].profile_id,
+            "chatgpt-codex"
+        );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_profile_auto_compaction_registers_codex_compactor() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "chatgpt",
+                "displayName": "ChatGPT",
+                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"}
+            }"#,
+        )
+        .unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let session = AgentSession::builder().build();
+        let manifest = AgentManifest::default();
+
+        let runtime = profile.build_runtime(&session, &manifest).await.unwrap();
+        let compaction = runtime
+            .context_compaction_config()
+            .expect("auto ChatGPT profile should register compaction");
+
+        assert_eq!(
+            compaction.trigger_threshold(),
+            DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS
+        );
+        assert_eq!(compaction.mode, ContextCompactionMode::PersistentState);
+        assert_eq!(compaction.metadata["source"], "openai_responses");
+        assert_eq!(compaction.metadata["profileId"], "chatgpt");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_profile_can_disable_auto_compaction() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "chatgpt",
+                "displayName": "ChatGPT",
+                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
+                "compaction": {"type": "none"}
+            }"#,
+        )
+        .unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let session = AgentSession::builder().build();
+        let manifest = AgentManifest::default();
+
+        let runtime = profile.build_runtime(&session, &manifest).await.unwrap();
+
+        assert!(runtime.context_compaction_config().is_none());
+    }
+
+    #[tokio::test]
+    async fn chatgpt_profile_openai_responses_compaction_honors_overrides() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "chatgpt",
+                "displayName": "ChatGPT",
+                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
+                "compaction": {
+                    "type": "openai_responses",
+                    "contextWindowTokens": 200000,
+                    "reserveTokens": 32000,
+                    "keepRecentTokens": 64000,
+                    "mode": "request_only",
+                    "requestTimeoutSecs": 120
+                }
+            }"#,
+        )
+        .unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let session = AgentSession::builder().build();
+        let manifest = AgentManifest::default();
+
+        let runtime = profile.build_runtime(&session, &manifest).await.unwrap();
+        let compaction = runtime
+            .context_compaction_config()
+            .expect("explicit compaction should be registered");
+
+        assert_eq!(compaction.context_window_tokens, 200_000);
+        assert_eq!(compaction.reserve_tokens, 32_000);
+        assert_eq!(compaction.keep_recent_tokens, 64_000);
+        assert_eq!(compaction.mode, ContextCompactionMode::RequestOnly);
     }
 }

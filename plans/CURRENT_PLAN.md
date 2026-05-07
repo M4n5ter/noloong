@@ -1,180 +1,366 @@
-# 实施计划：Telegram Interaction Client v1
+# 实施计划：ChatGPT/Codex 订阅一等公民支持
 
-> 状态：已完成实现与本地验证。Telegram 已作为 noloong 的第一个第一方用户交互通道接入：Rust 实现、root CLI 使用 `clap`、支持单二进制 loopback 模式，也支持 interaction server 与 Telegram bridge 分进程部署。
+> 状态：已完成实现、本地验证、browser/device flow 登录验证、真实 ChatGPT/Codex `gpt-5.4-mini` live smoke 和 Telegram 端到端 smoke。
 
-## 目标
+## 概览
 
-在现有 `InteractionControlHandler`、HTTP/WebSocket JSON-RPC transport 和 display events 之上，新增内置 Telegram interaction client。Telegram client 只负责用户交互通道，不决定 agent profile、provider 或 credential；这些仍由 host/binary 层通过 profile config 构造。
-
-v1 聚焦：
-
-- Telegram long polling。
-- 文本对话输入。
-- streaming delta edit 和 final reply。
-- tool lifecycle display。
-- Telegram inline approval buttons。
-- 默认安全 allowlist。
-- 可复用 `InteractionWsClient`。
-- 单进程 `noloong telegram` 和分进程 `noloong serve interaction` + `noloong telegram-bridge`。
-
-不在本轮范围：
-
-- Telegram webhook。
-- 图像/视频/音频 Telegram 消息输入输出。
-- per-chat profile mapping。
-- DM topic 自动管理。
-- 真实 Telegram Bot live smoke 自动化。
+当前 `noloong-openai` 已经具备 ChatGPT OAuth、browser/device login、token storage、auth refresh、ChatGPT Codex Responses provider 和 `responses/compact` compactor；但 root `noloong` 的 profile config 仍要求手写 `env_headers`，用户体验不够好。本轮要把它提升为可直接使用的产品能力：root CLI 能登录并写入 token file，profile config 默认读取 `~/.agents/noloong/chatgpt/token.json`，启用 ChatGPT Responses 时默认启用 Codex compact，并提供可复制运行的示例配置与用法。
 
 ## 架构决策
 
-- 不修改 `noloong-agent-core`；Telegram 属于 application/interaction 层。
-- Telegram bridge 必须通过 WebSocket JSON-RPC 调用 interaction control plane；即使 `noloong telegram` 单进程模式也走 loopback WS，避免绕过协议。
-- 新增第一方 crate `crates/noloong-agent-telegram`，负责 Telegram 平台适配、消息渲染、long polling、access policy、approval callback 和 display event 投递。
-- 在 `noloong-agent` 中新增 feature-gated `InteractionWsClient`，供 Telegram 和未来 Web/TUI/其它第一方 interaction clients 复用。
-- root `noloong` binary 负责 profile config loading、provider/runtime 构造、interaction server 启动和 Telegram bridge 组合。
-- Telegram bridge 不包含 provider/model/credential 字段；它只持有可选 `profileId`，未配置时使用 `profile/list` 的默认 profile。
-- 默认要求 allowlist；未配置 allowed users/chats 且未显式 allow all 时启动失败。
-- group/supergroup mention gating 使用配置的 bot username 判断 `@bot` 和 reply-to-bot。
-- Bot API 使用 direct `reqwest` adapter；没有保留未使用的 Telegram framework 依赖，便于精确控制 long polling、fallback network、错误处理和 fake API 测试。
-- root CLI 使用 `clap` derive，一次性覆盖 `serve interaction`、`telegram-bridge`、`telegram` 三个入口。
+- `noloong-agent-core` 保持不变；ChatGPT 订阅是 `noloong` binary 与 `noloong-openai` 的装配能力。
+- token file 默认路径为 `~/.agents/noloong/chatgpt/token.json`，允许通过 CLI、profile config 和 `NOLOONG_CHATGPT_TOKEN_FILE` 覆盖。
+- `chatgpt_responses` 的 `auth` 改为可选；未配置时默认使用 token file auth，不再要求用户手写 header/env。
+- 保留 `env_headers` auth 作为高级逃生口，便于第三方 auth provider 或临时调试，但默认路径不使用它。
+- root CLI 新增 `noloong chatgpt login/status/logout`；browser flow 默认打印 URL 并等待本地 callback，不主动打开浏览器。
+- 启用 `chatgpt_responses` 时，`compaction: auto` 默认启用 Codex `responses/compact`；用户可以显式配置 `compaction: none` 关闭。
+- compact 使用同一个 `ChatGptAuthManager`，避免 provider 和 compactor 各自刷新 token 造成行为不一致。
+- 示例配置不写入 secret，不写入机器私有 token 路径；默认路径与环境变量承担本地差异。
 
-## 已完成改动
+## 任务列表
 
-### 1. Workspace 和 feature 边界
+### 阶段 1：配置与 auth 基础
 
-- [x] 新增 workspace crate `crates/noloong-agent-telegram`。
-- [x] `noloong-agent` 新增可选 feature `interaction-client`。
-- [x] `InteractionWsClient` 依赖 `tokio-tungstenite`、`futures-util`，并保持 feature-gated。
-- [x] `noloong-agent-telegram` 通过 `noloong-agent` 的 `interaction-client` feature 使用 interaction client。
-- [x] 未引入 `teloxide`；Telegram Bot API 通过 direct `reqwest` adapter 实现。
+#### 任务 1：扩展 ChatGPT auth 配置模型
 
-### 2. 可复用 WebSocket JSON-RPC client
+**描述：** 扩展 root profile config 中的 `chatgpt_responses` provider，使 `auth` 可选，并新增 token-file auth 配置。默认路径解析规则需要稳定、可测试、无 secret 泄漏。
 
-- [x] 新增 `InteractionWsClientConfig`、`InteractionWsClient`、`InteractionWsNotification`、`InteractionClientError`。
-- [x] 支持 bearer auth、request id、typed `request_as`、JSON-RPC error 映射和 request timeout。
-- [x] notifications 使用 bounded broadcast channel 暴露，不阻塞 response dispatch。
-- [x] connection close 会唤醒 pending requests。
-- [x] client 不依赖 Telegram 类型。
+**验收标准：**
+- [x] `{"type":"chatgpt_responses","model":"gpt-5.4-mini"}` 可以被解析并默认使用 token file auth。
+- [x] 默认 token file 路径解析为 `~/.agents/noloong/chatgpt/token.json`。
+- [x] 支持 profile 显式 token file path、token file env override 和 `NOLOONG_CHATGPT_TOKEN_FILE`。
+- [x] 现有 `env_headers` 配置仍然可用，且只作为显式配置路径。
 
-### 3. Telegram 配置、权限与 session 映射
+**验证：**
+- [x] 测试通过：`cargo test -p noloong config::`
+- [x] 测试通过：`cargo test -p noloong`
 
-- [x] 新增 `TelegramBridgeConfig`、`TelegramAccessPolicy`、`TelegramNetworkConfig`、`TelegramSessionMapper`。
-- [x] 支持 bot token、interaction URL/token、可选 profile id、UX 权限、batch/edit throttle 和 network config。
-- [x] 默认要求 allowed users/chats；显式 allow all 才能关闭 allowlist。
-- [x] DM、group、forum topic 映射为稳定 session id：`telegram:{chatId}` 或 `telegram:{chatId}:thread:{threadId}`。
-- [x] session metadata 记录 `channel=telegram`、`chatId`、`threadId`、`chatType`。
+**依赖：** 无
 
-### 4. Telegram 到 interaction control plane 的 lifecycle
-
-- [x] bridge 初始化请求 `agent.run`、`agent.queue`、`approval.resolve` authority。
-- [x] bridge 请求 `displayEvents=true`、`streamText=true`、`editMessage=true`、`markdown=true`。
-- [x] 未配置 profile id 时使用 interaction server 返回的默认 profile。
-- [x] 首次收到 chat/thread 消息时创建 session 并订阅 display events。
-- [x] idle/completed/failed/aborted session 使用 `agent/prompt`。
-- [x] running/paused session 使用 `agent/follow_up`。
-
-### 5. 输入聚合与 group gating
-
-- [x] DM 文本无需 mention。
-- [x] group/supergroup 默认要求 mention 或 reply-to-bot。
-- [x] 支持 `TELEGRAM_BOT_USERNAME` / `--telegram-bot-username`。
-- [x] 支持关闭 group mention gating。
-- [x] 同一 chat/thread/user 的连续文本默认 600ms 后合并提交。
-- [x] 接近 Telegram 4096 UTF-16 split threshold 时延长等待窗口。
-- [x] 空白消息忽略，不调用 interaction。
-
-### 6. Telegram 输出、渲染与 delivery
-
-- [x] MarkdownV2 escaping。
-- [x] fenced code block 保持可读。
-- [x] GFM pipe table 转换为 Telegram 可读行。
-- [x] 按 Telegram UTF-16 长度限制拆分 outgoing text。
-- [x] send/edit 遇到 parse error 时 fallback plain text。
-- [x] edit 遇到 `message is not modified` 时视为成功。
-
-### 7. Display event 和 approval 投递
-
-- [x] assistant delta 创建或编辑 preview message。
-- [x] assistant final 立即 flush。
-- [x] final 太长或 edit 失败时发送 fresh final message，不丢内容。
-- [x] tool lifecycle 可渲染为简短 status。
-- [x] approval request 渲染为 inline allow/deny buttons。
-- [x] callback data 使用短 key，避免超过 Telegram callback data 限制。
-- [x] callback query 解析后调用 interaction `approval/resolve`。
-
-### 8. Telegram network 和 polling
-
-- [x] 支持 proxy mode。
-- [x] 支持 fallback IP discovery 和 static fallback IP。
-- [x] 拒绝 private、loopback、link-local、unspecified fallback IP。
-- [x] long polling 支持 offset advance。
-- [x] transient network error 会 backoff retry。
-- [x] 409 conflict 到达重试上限后变成 fatal error。
-
-### 9. Root host、profile config 和 CLI
-
-- [x] 新增 root profile config loader。
-- [x] 支持 chat completions、responses、anthropic messages、ChatGPT responses provider 配置。
-- [x] 支持 memory、SQLite、PostgreSQL、object memory、object fs registry store 配置。
-- [x] 新增 `noloong serve interaction`。
-- [x] 新增 `noloong telegram-bridge`。
-- [x] 新增 `noloong telegram`，在同一进程启动 loopback interaction server 和 Telegram bridge。
-- [x] root CLI 已迁移到 `clap` derive。
-
-### 10. 文档
-
-- [x] 更新 `crates/noloong-agent/docs/ARCHITECTURE.md`，加入第一方 Telegram client 架构。
-- [x] 更新 `crates/noloong-agent/docs/INTERACTION.md`，加入 Telegram client 使用入口。
-- [x] 新增 `crates/noloong-agent-telegram/docs/TELEGRAM.md`。
-- [x] 新增 `examples/profile-configs/telegram-openrouter-free.json` 作为无凭据示例配置。
-
-## 主要文件
-
-- `src/main.rs`
+**预计涉及文件：**
 - `src/config.rs`
 - `src/host.rs`
-- `crates/noloong-agent/src/interaction/client.rs`
-- `crates/noloong-agent/tests/interaction_ws_client.rs`
-- `crates/noloong-agent-telegram/src/access.rs`
-- `crates/noloong-agent-telegram/src/approval.rs`
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/config.rs`
-- `crates/noloong-agent-telegram/src/delivery.rs`
-- `crates/noloong-agent-telegram/src/display.rs`
-- `crates/noloong-agent-telegram/src/input.rs`
-- `crates/noloong-agent-telegram/src/network.rs`
-- `crates/noloong-agent-telegram/src/polling.rs`
-- `crates/noloong-agent-telegram/src/render.rs`
-- `crates/noloong-agent-telegram/src/session.rs`
-- `crates/noloong-agent-telegram/src/telegram_api.rs`
+
+**预计范围：** M
+
+#### 任务 2：用 ChatGptAuthManager 构造 provider auth
+
+**描述：** 在 root host 装配层把 token-file auth 转成 `ChatGptTokenStorage::file` + `ChatGptAuthManager`，再传给 `chatgpt_responses_provider`。缺少 token 时给出可执行的登录提示。
+
+**验收标准：**
+- [x] `chatgpt_responses` 默认 auth 路径构造的是 `ChatGptAuthManager`，而不是硬编码 header。
+- [x] 缺失 token 或 token 文件不可读时，错误信息提示运行 `noloong chatgpt login --flow browser`。
+- [x] token 和 Authorization header 不会出现在 `Debug`、error 或 CLI 输出中。
+- [x] 仍支持 401 后由 `ChatGptAuthManager` refresh 并让 provider retry。
+
+**验证：**
+- [x] 测试通过：`cargo test -p noloong-openai --test auth_manager`
+- [x] 测试通过：`cargo test -p noloong-openai --test provider`
+- [x] 测试通过：`cargo test -p noloong`
+
+**依赖：** 任务 1
+
+**预计涉及文件：**
+- `src/host.rs`
+- `crates/noloong-openai/src/auth/manager.rs`
+
+**预计范围：** M
+
+### 检查点：认证基础
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-openai`
+- [x] `cargo test -p noloong`
+- [x] Profile config 可以在没有任何 secret 的情况下构造 ChatGPT provider，运行时按 token file 取凭据。
+
+### 阶段 2：root CLI 登录体验
+
+#### 任务 3：新增 `noloong chatgpt login`
+
+**描述：** 在 root CLI 增加 ChatGPT 登录入口。默认 browser flow 绑定本地 callback server，打印 authorization URL，等待用户在真实浏览器完成验证，然后交换 token 并写入 token file。device flow 作为 fallback，同样写入 token file。
+
+**验收标准：**
+- [x] 支持 `noloong chatgpt login --flow browser`，默认 flow 也是 `browser`。
+- [x] browser flow 打印 authorization URL 和 token file path，并等待 callback 完成。
+- [x] 支持 `noloong chatgpt login --flow device`，打印 verification URL 和 user code。
+- [x] 支持 `--token-file <path>` 覆盖写入路径。
+- [x] token file 使用现有 `ChatGptFileTokenStorage` 写入，Unix 下权限保持 `0600`。
+
+**验证：**
+- [x] 测试通过：`cargo test -p noloong chatgpt`
+- [x] 手动 smoke：`cargo run -p noloong -- chatgpt login --flow browser`
+- [x] 手动 smoke：`cargo run -p noloong -- chatgpt login --flow device`
+
+**依赖：** 任务 1
+
+**预计涉及文件：**
+- `src/main.rs`
+- `src/chatgpt.rs`
+- `src/config.rs`
+
+**预计范围：** M
+
+#### 任务 4：新增 `status/logout` 与错误体验
+
+**描述：** 补齐 token file 的生命周期操作。`status` 只显示是否已登录、账号摘要和 token 文件路径，不输出 token；`logout` 删除 token file。provider 构造失败、token 缺失、refresh 失败时统一给出下一步命令。
+
+**验收标准：**
+- [x] 支持 `noloong chatgpt status`，不会输出 access token、refresh token 或 id token。
+- [x] 支持 `noloong chatgpt logout`，重复执行保持幂等。
+- [x] 交互入口如 `noloong telegram` 使用 ChatGPT profile 但缺 token 时，错误信息能直接指向 login 命令。
+- [x] `src/main.rs` 不继续膨胀；ChatGPT CLI 逻辑拆入专门模块，`mod.rs` 不放业务逻辑。
+
+**验证：**
+- [x] 测试通过：`cargo test -p noloong chatgpt`
+- [x] 手动 smoke：`cargo run -p noloong -- chatgpt status`
+- [x] 手动 smoke：`cargo run -p noloong -- chatgpt logout`
+
+**依赖：** 任务 3
+
+**预计涉及文件：**
+- `src/main.rs`
+- `src/chatgpt.rs`
+- `src/config.rs`
+
+**预计范围：** S
+
+### 检查点：CLI 登录体验
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong`
+- [x] `cargo test -p noloong-openai`
+- [x] 真实 browser login 可写入 `~/.agents/noloong/chatgpt/token.json`。
+- [x] 真实 device login fallback 可写入同一 token file。
+
+### 阶段 3：Codex compact 默认接入
+
+#### 任务 5：新增 root profile compaction 配置
+
+**描述：** 给 `RuntimeProfileConfig` 增加可选 `compaction` 字段，支持 `auto`、`none` 和显式 `openai_responses` 配置。`auto` 在普通 provider 上保持关闭，在 `chatgpt_responses` 上默认启用 Codex compact。
+
+**验收标准：**
+- [x] 未配置 `compaction` 时等价于 `auto`。
+- [x] `chatgpt_responses + auto` 自动注册 `OpenAiResponsesCompactor`。
+- [x] `compaction: {"type":"none"}` 明确关闭 compact。
+- [x] 显式 compact 配置可以覆盖 model、threshold、reserve tokens、keep recent tokens 和 mode。
+- [x] compact 共享 provider 的 `ChatGptAuthManager`，不创建第二套 token storage。
+
+**验证：**
+- [x] 测试通过：`cargo test -p noloong compaction`
+- [x] 测试通过：`cargo test -p noloong-openai --test compact`
+- [x] 测试通过：`cargo test -p noloong-agent-core --test compaction`
+
+**依赖：** 任务 2
+
+**预计涉及文件：**
+- `src/config.rs`
+- `src/host.rs`
+- `crates/noloong-openai/src/compact.rs`
+
+**预计范围：** M
+
+#### 任务 6：把 compactor 接入 runtime builder
+
+**描述：** 当前 `RuntimeProfile::build_runtime` 只注册 model provider，需要扩展为根据 profile compaction 配置向 `AgentRuntimeBuilder` 注册 context compactor。保留 core 现有 phase hook 与 compaction phase，不新增 ChatGPT-specific phase。
+
+**验收标准：**
+- [x] `RuntimeProfile` 可以携带 model provider 与可选 compactor registration。
+- [x] 启用 compact 后，runtime builder 注册 context compaction phase。
+- [x] `auto` compact 的默认 context window 使用 Codex 级别的大上下文阈值，避免过早压缩。
+- [x] compact output 使用 existing replacement history 行为，不把 summary-only 当默认。
+
+**验证：**
+- [x] 测试通过：`cargo test -p noloong`
+- [x] 集成测试：profile build 后 runtime 中存在 context compaction。
+- [x] 集成测试：`compaction: none` 时 runtime 中不存在 context compaction。
+
+**依赖：** 任务 5
+
+**预计涉及文件：**
+- `src/host.rs`
+- `src/config.rs`
+
+**预计范围：** M
+
+### 检查点：Compact 接入
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong`
+- [x] `cargo test -p noloong-agent-core --test compaction`
+- [x] `cargo test -p noloong-openai --test compact`
+- [x] 真实 ChatGPT compact smoke 可通过 `NOLOONG_OPENAI_LIVE_CHATGPT=1` 手动执行。
+
+### 阶段 4：示例、文档与端到端验证
+
+#### 任务 7：新增 ChatGPT/Codex profile 示例
+
+**描述：** 新增一个无 secret 的示例配置，展示 `chatgpt_responses` 默认 token-file auth 与默认 compact 行为。该配置应能直接用于 `noloong telegram` 或未来其它 interaction clients。
+
+**验收标准：**
+- [x] 新增 `examples/profile-configs/chatgpt-codex-subscription.json`。
+- [x] 示例默认模型使用 `gpt-5.4-mini`。
+- [x] 示例不包含 token、Authorization header 或用户本地绝对路径。
+- [x] 示例通过 host registry build test。
+
+**验证：**
+- [x] 测试通过：`cargo test -p noloong example_chatgpt_codex_subscription_profile_builds_registry`
+- [x] 手动 smoke：`cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json`
+
+**依赖：** 任务 1、任务 5
+
+**预计涉及文件：**
+- `examples/profile-configs/chatgpt-codex-subscription.json`
+- `src/host.rs`
+
+**预计范围：** S
+
+#### 任务 8：更新文档和使用说明
+
+**描述：** 把登录、token file、profile 示例、Telegram 用法、compact 默认行为和禁用方式写入文档。重点是让用户不需要理解 OAuth header 细节就能跑起来。
+
+**验收标准：**
+- [x] `crates/noloong-openai/README.md` 说明 root CLI login，而不仅是 crate examples。
+- [x] `crates/noloong-agent-telegram/docs/TELEGRAM.md` 增加 ChatGPT subscription profile 用法。
+- [x] root README 或 interaction 文档给出最短路径命令。
+- [x] 文档明确 `NOLOONG_CHATGPT_TOKEN_FILE` 与 `~/.agents/noloong/chatgpt/token.json` 的关系。
+- [x] 文档明确 `compaction: none` 可关闭 Codex compact。
+
+**验证：**
+- [x] Markdown 示例使用现有命令名。
+- [x] 检查文档与示例：不能包含真实 token、真实 Authorization header、旧的 ChatGPT 默认模型或要求用户手写 ChatGPT header 的路径。
+
+**依赖：** 任务 3、任务 5、任务 7
+
+**预计涉及文件：**
+- `README.md`
+- `crates/noloong-openai/README.md`
+- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
+- `crates/noloong-agent/docs/INTERACTION.md`
+
+**预计范围：** S
+
+#### 任务 9：真实订阅路径 smoke
+
+**描述：** 在实现完成后，用真实浏览器完成登录，再用 root profile 和 Telegram interaction client 做一次最小端到端验证。真实外部动作只在用户明确许可后执行；默认先给出命令和等待用户在浏览器侧完成认证。
+
+**验收标准：**
+- [x] browser login 可以拿到 token 并写入默认 token file。
+- [x] `chatgpt status` 可以识别登录状态且不输出 secret。
+- [x] `noloong telegram` 使用 ChatGPT profile 能收到用户消息并返回模型回复。
+- [x] compact live smoke 在长上下文测试中可手动执行，失败时错误能定位到 auth、endpoint 或模型权限。
+
+**验证：**
+- [x] 手动 smoke：`cargo run -p noloong -- chatgpt login --flow browser`
+- [x] 手动 smoke：`cargo run -p noloong -- chatgpt status`
+- [x] 手动 smoke：`cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json`
+- [x] 可选 live test：`NOLOONG_OPENAI_LIVE_CHATGPT=1 cargo test -p noloong-openai --test live_chatgpt -- --ignored`
+
+**依赖：** 任务 7、任务 8
+
+**预计涉及文件：**
+- 无，除非 smoke 暴露 bug。
+
+**预计范围：** S
+
+### 检查点：完成
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-openai`
+- [x] `cargo test -p noloong-agent-core --test compaction`
+- [x] `cargo test -p noloong`
+- [x] `cargo test --workspace`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `git diff --check`
+- [x] examples/docs/tests 中没有泄漏凭据。
+- [x] 已准备好进入 review。
+
+## 目标示例配置
+
+```json
+{
+  "defaultProfileId": "chatgpt-codex",
+  "registryStore": {
+    "type": "memory"
+  },
+  "profiles": [
+    {
+      "profileId": "chatgpt-codex",
+      "displayName": "ChatGPT Codex",
+      "provider": {
+        "type": "chatgpt_responses",
+        "model": "gpt-5.4-mini"
+      },
+      "compaction": {
+        "type": "auto"
+      },
+      "manifestPatches": [
+        {
+          "op": "set_locale",
+          "locale": "zh"
+        },
+        {
+          "op": "update_file_edit_tool_policy",
+          "policy": "auto_by_model"
+        }
+      ],
+      "metadata": {
+        "channel": "telegram",
+        "example": true
+      }
+    }
+  ]
+}
+```
+
+## 目标用法
+
+```bash
+cargo run -p noloong -- chatgpt login --flow browser
+cargo run -p noloong -- chatgpt status
+cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json
+```
+
+## 风险与缓解
+
+| 风险 | 影响 | 缓解 |
+|------|--------|------------|
+| ChatGPT OAuth/browser flow 与上游 Codex 行为漂移 | 高 | 复用 `noloong-openai` 中已按 Codex 对齐的 login 模块；保留 device flow fallback；live smoke 使用真实浏览器确认。 |
+| token file 泄漏或被日志打印 | 高 | 所有 CLI/status/error 输出只显示路径和账号摘要；storage 写入 `0600`；测试覆盖 `Debug`/status 不输出 token。 |
+| 默认 compact 在不合适的 provider 上启用 | 中 | `auto` 只在 `chatgpt_responses` 上开启；其它 provider 默认关闭；显式 `none` 可禁用。 |
+| provider 与 compactor 分别刷新 token 导致竞态 | 中 | 在 host 装配中共享同一个 `Arc<ChatGptAuthManager>`。 |
+| root `main.rs` 继续膨胀 | 中 | 新增 `src/chatgpt.rs` 承载 CLI 子命令逻辑；`main.rs` 只保留路由。 |
+| 真实订阅模型名不可用 | 中 | 默认文档使用 `gpt-5.4-mini`；真实 smoke 固定验证该模型，错误信息保留 provider/model context。 |
+
+## 可并行点
+
+- 任务 1、任务 3 不能完全并行，因为 CLI login 依赖 token path resolver。
+- 任务 5、任务 7 可以在任务 1 完成后并行推进。
+- 任务 8 可在接口名稳定后独立推进。
+- 任务 9 必须最后执行，因为它依赖完整登录、provider、compact 和示例配置。
+
+## 待确认问题
+
+- 无。当前决策采用：root CLI 登录、默认 token file 路径 `~/.agents/noloong/chatgpt/token.json`、所有 interaction clients 可复用、ChatGPT profile 默认开启 Codex compact。
 
 ## 已执行验证
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo test --workspace`
+- [x] `cargo test -p noloong-openai`
+- [x] `cargo test -p noloong-openai --test login`
+- [x] `cargo test -p noloong-agent-core --test compaction`
 - [x] `cargo test -p noloong`
-- [x] `cargo test -p noloong-agent-telegram`
-- [x] `cargo test -p noloong-agent --features interaction-client,interaction-http --test interaction_ws_client`
+- [x] `cargo test --workspace`
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo clippy -p noloong-agent --features interaction-client,interaction-http --all-targets -- -D warnings`
+- [x] `cargo run -p noloong -- chatgpt status --token-file target/tmp/noloong-chatgpt-test/token.json`
+- [x] `cargo run -p noloong -- chatgpt logout --token-file target/tmp/noloong-chatgpt-test/token.json`
+- [x] `cargo run -p noloong -- chatgpt login --flow browser`
+- [x] `cargo run -p noloong -- chatgpt login --flow device`
+- [x] `cargo run -p noloong -- chatgpt status`
+- [x] `NOLOONG_OPENAI_LIVE_CHATGPT=1 NOLOONG_CHATGPT_LIVE_MODEL=gpt-5.4-mini NOLOONG_CHATGPT_TOKEN_FILE=/Users/m4n5ter/.agents/noloong/chatgpt/token.json cargo test -p noloong-openai --test live_chatgpt -- --ignored --nocapture`
+- [x] `TELEGRAM_BOT_TOKEN=<test-bot-token> TELEGRAM_ALLOWED_USERS=<telegram-user-id> TELEGRAM_LOCALE=zh TELEGRAM_DISABLE_ENV_PROXY=1 TELEGRAM_FALLBACK_IPS=149.154.167.220 cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json`
+- [x] `git diff --check`
 - [x] `rg -n "#\\[allow\\(dead_code\\)\\]" crates src`
-- [x] `rg -n "teloxide" Cargo.toml crates`
-- [x] Telegram Bot API live smoke: `getMe` / `getUpdates` with fallback IP routing.
-- [x] `noloong telegram` live startup smoke with real Telegram credentials, real allowlist, temporary profile, and controlled shutdown after 12s.
 
-## 未执行项
+## 未完成外部验证
 
-- [ ] 未执行主动发送消息或 end-to-end user prompt smoke。原因是 bot 主动发送 Telegram 消息属于外部可见动作；需要单独确认后再执行。可在本机 shell 通过环境变量提供 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USERS`、必要时提供 `TELEGRAM_BOT_USERNAME`，再配置 provider/profile config 后手动运行：
-
-```bash
-cargo run -p noloong -- telegram
-```
-
-## 后续演进方向
-
-- Telegram webhook transport。
-- Telegram media input/output。
-- per-chat/per-topic profile mapping。
-- 更完善的 Telegram message formatting，包括图片、文件、引用、thread-aware status。
-- 多用户/多 chat 级别的 quota、rate limit 和 audit policy。
-- 将 Telegram bridge 的 fake API 测试扩展为可复用 platform conformance suite。
+- 无。

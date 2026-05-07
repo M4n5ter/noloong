@@ -29,7 +29,9 @@ pub enum OpenAiIntegrationError {
     OAuthStateMismatch,
     #[error("OAuth callback did not include an authorization code")]
     MissingAuthorizationCode,
-    #[error("ChatGPT token storage did not contain tokens")]
+    #[error(
+        "ChatGPT token storage did not contain tokens; run `noloong chatgpt login --flow browser` or set NOLOONG_CHATGPT_TOKEN_FILE"
+    )]
     MissingToken,
     #[error("permanent refresh token failure: {0}")]
     RefreshTokenPermanent(String),
