@@ -81,6 +81,8 @@ pub struct RuntimeProfileConfig {
     pub description: Option<String>,
     pub provider: BuiltInProviderConfig,
     #[serde(default)]
+    pub event_store: ProfileEventStoreConfig,
+    #[serde(default)]
     pub compaction: ProfileCompactionConfig,
     #[serde(default)]
     pub plugins: Vec<AgentPluginDeclaration>,
@@ -213,6 +215,22 @@ pub enum ProfileCompactionConfig {
         mode: Option<ContextCompactionMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_timeout_secs: Option<u64>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ProfileEventStoreConfig {
+    #[default]
+    Memory,
+    Sqlite {
+        database_url: String,
+        #[serde(default = "default_migrate_on_connect")]
+        migrate_on_connect: bool,
     },
 }
 
@@ -357,6 +375,10 @@ fn non_empty_str(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn default_migrate_on_connect() -> bool {
+    true
+}
+
 fn parse_csv<T>(
     value: Option<String>,
     parse: impl Fn(&str) -> Result<T, CliConfigError>,
@@ -374,7 +396,7 @@ fn parse_csv<T>(
 mod tests {
     use super::{
         BuiltInProviderConfig, ChatGptAuthConfig, HostProfileConfig, ProfileCompactionConfig,
-        resolve_chatgpt_token_file_with_env,
+        ProfileEventStoreConfig, RuntimeProfileConfig, resolve_chatgpt_token_file_with_env,
     };
     use noloong_agent_core::ContextCompactionMode;
     use std::path::PathBuf;
@@ -401,6 +423,59 @@ mod tests {
             config.profiles[0].provider,
             BuiltInProviderConfig::ChatCompletions { .. }
         ));
+        assert_eq!(
+            config.profiles[0].event_store,
+            ProfileEventStoreConfig::Memory
+        );
+    }
+
+    #[test]
+    fn runtime_profile_config_loads_sqlite_event_store() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                "eventStore": {
+                    "type": "sqlite",
+                    "databaseUrl": "sqlite:target/noloong-events.sqlite"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.event_store,
+            ProfileEventStoreConfig::Sqlite {
+                database_url: "sqlite:target/noloong-events.sqlite".into(),
+                migrate_on_connect: true,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_profile_config_loads_sqlite_event_store_without_migrations() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                "eventStore": {
+                    "type": "sqlite",
+                    "databaseUrl": "sqlite:target/noloong-events.sqlite",
+                    "migrateOnConnect": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.event_store,
+            ProfileEventStoreConfig::Sqlite {
+                database_url: "sqlite:target/noloong-events.sqlite".into(),
+                migrate_on_connect: false,
+            }
+        );
     }
 
     #[test]

@@ -1,352 +1,226 @@
-# 实施计划：产品级插件系统
+# 实施计划：为 Runtime Profile 增加 Event Store 配置
 
 > 状态：已完成实现、本地验证、workspace 测试和 clippy。
 
 ## 概览
 
-当前仓库已经有语言无关的 stdio JSON-RPC extension 协议、Rust 侧 `StdioExtensionConfig`、runtime 注册入口、conformance runner，以及 TypeScript/Python 示例；但这还不是产品级插件系统。现在缺的是：插件不能作为 profile/session/manifest 的一等配置被声明、审批、持久化、启用、禁用和恢复；agent 也不能通过现有 `agent.manifest.propose_patch` 工具安全地提出“安装或启用某个插件”。本轮目标是补齐这个产品层插件系统，同时继续复用已有 extension wire contract，不重新设计一套协议。
+当前 `noloong-agent` 已经通过 `AgentSessionRegistryStore` 持久化 application session snapshot，包括 `AgentManifest`、`AgentState`、steering/follow-up queue、profile id、metadata 和时间戳；但 root `noloong` host 还没有把 `noloong-agent-core` 的 run-level `EventStore` 暴露成 profile 配置。core runtime 因此默认使用 `InMemoryEventStore`，普通会话内容可以通过 snapshot 恢复，但 paused approval resume、run event replay 和严格审计顺序在进程重启后还不够闭环。本轮目标是在 root profile config 中增加 `eventStore`，v1 先支持 memory 和 SQLite，并在文档中明确它与 `registryStore` 的职责边界。
 
 ## 架构决策
 
-- 插件 v1 只支持 stdio JSON-RPC transport；这是当前最稳定、最低依赖、跨语言最清晰的边界。
-- `noloong-agent-core` 继续负责 extension 进程连接、wire contract、capability 注册和 conformance；`noloong-agent` 负责插件声明、审批、manifest patch、session 恢复和产品安全策略。
-- 插件声明进入 `AgentManifest`，这样 session snapshot 可以完整恢复插件状态；root profile config 只提供默认插件声明，创建 session 时通过 default manifest patches 或 profile defaults 落到 manifest。
-- agent 不能直接安装插件，只能通过 `agent.manifest.propose_patch` 提出 `register_plugin`、`set_plugin_enabled`、`remove_plugin` 等 patch；真正生效仍然走 human approval。
-- 插件命令使用直接 exec：`command + args + cwd`，不经过 shell，不支持内联脚本字符串。
-- 插件环境默认隔离：不继承宿主环境；只能显式映射环境变量名，配置中不能保存 secret literal。
-- 插件能力必须有显式 allowlist；extension 进程可以声明更多 capabilities，但 runtime 只注册插件声明允许的部分。
-- v1 不做远程下载、签名校验、marketplace、版本锁定、MCP adapter、热插拔；这些保留为后续演进，避免把“接入插件”与“分发插件”混成一个大系统。
+- `eventStore` 是 profile 级配置，不是全局配置；runtime 由 `AgentRuntimeProfile` 构建，session 恢复时通过 snapshot 中的 `profileId` 找回对应 profile，因此 event log 后端也应绑定到 profile。
+- `registryStore` 不改变语义：它保存 session snapshot，用于 `session/list`、`session/get`、lazy restore 和 session 目录恢复。
+- `eventStore` 保存 core `AgentEvent` append-only log，用于 run-level replay、approval resume、tool permission audit 和事件顺序审计。
+- v1 只暴露 `memory` 和 `sqlite` event store；PostgreSQL/object event store 后续应作为 core `EventStore` backend 单独实现，不复用 registry store backend。
+- `eventStore` 默认 `memory`，保持现有行为；需要跨进程恢复 paused approval 时必须使用持久 SQLite file URL，而不是 `sqlite::memory:`。
+- root crate 需要启用 `noloong-agent-core/sqlite-store` feature，否则无法在 host 层构造 `SqliteEventStore`。
 
 ## 任务列表
 
-### 阶段 1：插件声明与 manifest patch 基础
+### 阶段 1：配置模型与依赖
 
-#### 任务 1：新增插件声明数据模型
+#### 任务 1：新增 profile 级 `eventStore` 配置模型
 
-**描述：** 在 `noloong-agent` 中定义产品级插件声明，挂到 `AgentManifest`。声明需要表达插件身份、显示信息、stdio transport、环境变量映射、允许的 capability、启用状态和加载失败策略。
+**描述：** 在 root `src/config.rs` 中新增 `ProfileEventStoreConfig`，并挂到 `RuntimeProfileConfig`。配置使用 `camelCase` wire format，默认值为 memory，SQLite 配置复用 core `SqliteEventStoreConfig` 的 URL 与 migration 语义。
 
 **验收标准：**
-- [x] `AgentManifest` 新增 `plugins: BTreeMap<String, AgentPluginDeclaration>`，默认空集合。
-- [x] `AgentPluginDeclaration` 至少包含 `pluginId`、`displayName`、`description`、`transport`、`allowedCapabilities`、`enabled`、`onLoadFailure`。
-- [x] `PluginTransport::Stdio` 支持 `command`、`args`、`cwd`、`env`、`requestTimeoutSecs`、`streamTimeoutSecs`。
-- [x] `PluginEnv` 只允许把宿主环境变量名映射进插件环境，不允许 JSON 配置中保存 secret literal。
-- [x] 所有新增 manifest 字段保持 `camelCase` wire format。
+- [x] `RuntimeProfileConfig` 新增 `event_store: ProfileEventStoreConfig`，serde 字段名为 `eventStore`。
+- [x] `ProfileEventStoreConfig` 至少支持 `{"type":"memory"}` 和 `{"type":"sqlite","databaseUrl":"...","migrateOnConnect":true}`。
+- [x] `eventStore` 缺省时等价于 memory。
+- [x] `migrateOnConnect` 缺省为 `true`；配置为 `false` 时由 core SQLite store 执行现有 schema 校验。
+- [x] 配置模型不影响已有 profile config 解析。
 
 **验证：**
-- [x] 单元测试：空 manifest 反序列化保持兼容。
-- [x] 单元测试：插件声明 JSON round-trip 后字段稳定。
-- [x] 单元测试：空 `pluginId`、空 `command`、重复/空 capability 被拒绝。
+- [x] 单元测试：缺省 `eventStore` 解析为 memory。
+- [x] 单元测试：SQLite event store config round-trip/parse 字段稳定。
+- [x] 单元测试：`migrateOnConnect=false` 可以被正确解析。
 
 **依赖：** 无
 
 **预计涉及文件：**
-- `crates/noloong-agent/src/manifest.rs`
-- `crates/noloong-agent/tests/agent_session.rs`
+- `src/config.rs`
 
-**预计范围：** M
+**预计范围：** S
 
-#### 任务 2：扩展 manifest patch 和 proposal summary
+#### 任务 2：启用 root crate 的 core SQLite event store feature
 
-**描述：** 让 agent 可以通过现有 manifest proposal 工具提出插件变更。patch 本身需要严格校验，approval 摘要必须把将要启动的命令、参数、cwd、环境变量名、允许能力和启用状态展示清楚。
+**描述：** root `noloong` binary 需要能构造 `SqliteEventStore`，因此 workspace root 对 `noloong-agent-core` 的依赖要启用 `sqlite-store` feature。保持 library crates 的默认 feature 表面不扩大。
 
 **验收标准：**
-- [x] `ManifestPatch` 新增 `RegisterPlugin`、`SetPluginEnabled`、`RemovePlugin`。
-- [x] `AgentManifest::apply_patch` 可以添加、启用、禁用和移除插件声明。
-- [x] 注册已存在 `pluginId`、启用不存在插件、移除不存在插件时返回结构化错误。
-- [x] `ManifestPatch::summary()` 和 i18n catalog 展示插件命令、能力 allowlist、env var names，不展示 secret value。
-- [x] `agent.manifest.propose_patch` 的 input schema 能反映新增插件 patch 结构。
+- [x] root `Cargo.toml` 中 `noloong-agent-core` 依赖启用 `sqlite-store`。
+- [x] 不强制 `noloong-agent` 默认启用 core SQLite event store。
+- [x] workspace clippy 不出现 feature 组合下的 unused/dead code 问题。
 
 **验证：**
-- [x] 单元测试：三类 plugin patch 的 apply 成功路径。
-- [x] 单元测试：非法 patch 被拒绝且不会修改 manifest。
-- [x] 单元测试：proposal summary 不包含环境变量真实值。
+- [x] `cargo check -p noloong`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 
 **依赖：** 任务 1
 
 **预计涉及文件：**
-- `crates/noloong-agent/src/manifest.rs`
-- `crates/noloong-agent/src/tools/manifest.rs`
-- `crates/noloong-agent/src/catalog.rs`
-- `crates/noloong-agent/tests/agent_session.rs`
+- `Cargo.toml`
 
-**预计范围：** M
+**预计范围：** XS
 
-### 检查点：manifest 基础
+### 检查点：配置基础
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent manifest`
-- [x] `cargo test -p noloong-agent agent_session`
-- [x] 手工检查 manifest proposal 的 JSON schema 和 approval 文案不会误导用户授权未知命令。
-
-### 阶段 2：core extension 加固与 capability allowlist
-
-#### 任务 3：扩展 `StdioExtensionConfig` 的进程启动选项
-
-**描述：** 让 core 的 stdio extension 启动配置支持产品层插件所需的最小进程控制：工作目录、环境变量、是否清空环境，以及可选的 capability allowlist。保持手动 Rust API 仍然可用。
-
-**验收标准：**
-- [x] `StdioExtensionConfig` 新增 `cwd`、`env`、`clearEnv`、`allowedCapabilities`。
-- [x] 默认行为保持当前手动 API 兼容：不设置 `clearEnv` 时不破坏现有 extension tests。
-- [x] 插件 loader 后续可以显式使用 `clearEnv = true`。
-- [x] `Command` 启动时正确应用 cwd/env/env_clear，stderr 仍只作为日志通道。
-
-**验证：**
-- [x] 单元测试：config builder 能设置 cwd/env/clear env。
-- [x] 集成测试：fixture extension 可以读取显式传入的 env，不能读取被隔离的 env。
-- [x] 现有 JSON-RPC conformance tests 保持通过。
-
-**依赖：** 无
-
-**预计涉及文件：**
-- `crates/noloong-agent-core/src/jsonrpc/mod.rs`
-- `crates/noloong-agent-core/tests/jsonrpc_conformance.rs`
-
-**预计范围：** M
-
-#### 任务 4：实现 capability allowlist 过滤
-
-**描述：** extension 可以声明多个 capability，但插件声明必须决定哪些 capability 进入 runtime。过滤要在 duplicate validation 和注册前完成，避免未授权工具、hook、model provider 混入 runtime。
-
-**验收标准：**
-- [x] `AgentRuntimeBuilder::with_stdio_extension` 在注册前按 allowlist 过滤 capabilities。
-- [x] allowlist 支持按 capability kind 和 id/tool name 精确匹配。
-- [x] 插件未允许的 capability 不会注册，也不会影响 duplicate validation。
-- [x] 当 allowlist 为空时，产品层插件默认注册零能力；手动 Rust API 可以继续选择“全部允许”的兼容路径。
-- [x] 错误信息能区分“extension malformed”和“capability not allowed”。
-
-**验证：**
-- [x] 测试：fixture 同时声明 tool/model/hook，只 allow tool 时只注册 tool。
-- [x] 测试：未授权 model provider 不能成为 default model provider。
-- [x] 测试：未授权 capability 与已有内置能力同名时不会触发 duplicate error。
-
-**依赖：** 任务 3
-
-**预计涉及文件：**
-- `crates/noloong-agent-core/src/runtime/builder.rs`
-- `crates/noloong-agent-core/src/jsonrpc/mod.rs`
-- `crates/noloong-agent-core/tests/jsonrpc_conformance.rs`
-
-**预计范围：** M
-
-### 检查点：core 加固
-
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent-core --test jsonrpc_conformance`
-- [x] `cargo test -p noloong-agent-core --test extension_conformance`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-
-### 阶段 3：session runtime 插件加载
-
-#### 任务 5：实现 manifest 插件到 runtime 的装配
-
-**描述：** 在 `AgentSession::runtime_builder` 或相邻模块中读取 manifest 中已启用插件，转换为 `StdioExtensionConfig` 并加载进 runtime。加载失败策略由插件声明控制。
-
-**验收标准：**
-- [x] 已启用插件会在 session runtime build 时启动并注册允许的 capabilities。
-- [x] 已禁用插件不会启动进程。
-- [x] `onLoadFailure = "disable_for_run"` 时，本轮 build 记录 warning/metadata，但 runtime 仍可继续构建。
-- [x] `onLoadFailure = "fail_run"` 时，插件加载失败会阻止 runtime build 并返回结构化错误。
-- [x] 插件进程生命周期仍由 core runtime 持有，runtime drop 时进程被清理。
-
-**验证：**
-- [x] 集成测试：manifest 中启用 fixture plugin 后，runtime 能看到插件 tool。
-- [x] 集成测试：禁用插件不会启动 fixture process。
-- [x] 集成测试：失败插件在两种 `onLoadFailure` 策略下行为不同。
-
-**依赖：** 任务 1、任务 3、任务 4
-
-**预计涉及文件：**
-- `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/src/plugin.rs`
-- `crates/noloong-agent/tests/agent_session.rs`
-
-**预计范围：** M
-
-#### 任务 6：明确恢复 live session 时的插件重建策略
-
-**描述：** 已持久化 session 通过 registry store 恢复 live runtime 时，需要使用 snapshot 中的 manifest 插件声明重新启动插件，而不是依赖当前进程的临时 builder 状态。
-
-**验收标准：**
-- [x] session snapshot 中的 manifest 完整包含 plugins 字段。
-- [x] live restore 时按 snapshot manifest 重建 enabled plugins。
-- [x] 插件命令缺失、cwd 不存在、env var 缺失时错误可诊断。
-- [x] read-only `session/list` / `session/get` 不启动插件进程。
-
-**验证：**
-- [x] registry restore 测试：只读读取不会构建 runtime。
-- [x] registry restore 测试：恢复并运行时会启动 snapshot manifest 中的插件。
-- [x] registry restore 测试：缺失 env var 返回明确错误。
-
-**依赖：** 任务 5
-
-**预计涉及文件：**
-- `crates/noloong-agent/src/interaction/registry.rs`
-- `crates/noloong-agent/src/interaction/store/snapshot.rs`
-- `crates/noloong-agent/tests/interaction_registry.rs`
-
-**预计范围：** M
-
-### 检查点：runtime 装配
-
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent agent_session`
-- [x] `cargo test -p noloong-agent interaction_registry`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-
-### 阶段 4：profile config、交互协议与示例
-
-#### 任务 7：给 root profile config 增加默认插件声明
-
-**描述：** root `RuntimeProfileConfig` 应允许配置默认插件，让 `noloong telegram`、`noloong serve interaction` 等入口启动 session 时天然带有一组 host-approved 插件声明。
-
-**验收标准：**
-- [x] `RuntimeProfileConfig` 支持 `plugins` 字段，结构复用 `AgentPluginDeclaration`。
-- [x] profile build 时先校验默认插件声明，再把它们注入新 session manifest。
-- [x] profile 默认插件和 `manifestPatches` 的顺序明确：先应用 profile defaults，再应用 manifest patches。
-- [x] 示例配置中可以声明 TypeScript/Python stdio 插件，不包含 secret literal。
-
-**验证：**
 - [x] `cargo test -p noloong config::`
-- [x] `cargo test -p noloong host::`
-- [x] 示例 profile config build test 通过。
+- [x] `cargo check -p noloong`
+
+### 阶段 2：Host runtime wiring
+
+#### 任务 3：构建并注入 profile event store
+
+**描述：** 在 root `src/host.rs` 中为每个 runtime profile 构建一个 `Arc<dyn EventStore>`，并在 `RuntimeProfile::build_runtime` 中调用 `session.runtime_builder().with_event_store(...)`。profile 构建需要改为 async，以便 SQLite event store 可以在 build registry 时连接和迁移 schema。
+
+**验收标准：**
+- [x] `RuntimeProfile` 持有 `Arc<dyn EventStore>`。
+- [x] `build_registry()` 为每个 profile 构建 provider、compaction、event store 后注册 profile。
+- [x] `RuntimeProfile::build_runtime()` 在注册 model provider、compaction、plugins 前后都保持行为稳定，并注入同一个 profile event store。
+- [x] memory event store 继续保持当前默认行为。
+- [x] SQLite event store 构建失败时返回清晰 `HostBuildError`。
+
+**验证：**
+- [x] 单元测试：默认 memory event store 下现有 profile build 测试保持通过。
+- [x] 单元测试：SQLite event store file URL 能构建 registry。
+- [x] 单元测试：无效 SQLite URL 或缺失 schema 且 `migrateOnConnect=false` 返回可诊断错误。
 
 **依赖：** 任务 1、任务 2
 
 **预计涉及文件：**
-- `src/config.rs`
 - `src/host.rs`
-- `examples/profile-configs/plugin-stdio-example.json`
+- `src/config.rs`
 
 **预计范围：** M
 
-#### 任务 8：在 interaction 文档中暴露插件工作流
+#### 任务 4：补充跨重建 event replay 验证
 
-**描述：** 不新增独立 plugin RPC；v1 复用 manifest proposal/apply 流程。需要把“agent 提议、human 审批、apply 后下一次 runtime build 生效”的流程写清楚，并给出 JSON 示例。
+**描述：** 增加 host 层测试，证明 profile 配置的 SQLite event store 不只是能构建，还能跨重新连接读取已写入的 run events。这不要求自动恢复 running run，只验证 core event log 的持久化语义和 host wiring 正确。
 
 **验收标准：**
-- [x] `INTERACTION.md` 增加 plugin manifest patch 示例。
-- [x] 文档说明 read-only session 操作不会启动插件。
-- [x] 文档说明插件启用/禁用后何时生效：下一次 runtime build/run 生效，不做 hot reload。
-- [x] 文档说明外部 bridge 不能直接提交 provider credentials，只能触发 manifest proposal/approval 流程。
+- [x] 测试使用临时 SQLite 文件，第一次通过 profile event store append event。
+- [x] 第二次重新 build registry 或重新 connect 同一路径后可以 load 同一 run id 的 event。
+- [x] 测试清理 SQLite、WAL、SHM 临时文件。
+- [x] 不依赖外部数据库或网络。
 
 **验证：**
-- [x] 文档中的 JSON 字段名与 serde wire format 一致。
-- [x] 文档不出现真实 token、真实代理地址或机器私有路径。
+- [x] `cargo test -p noloong host::`
+- [x] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
 
-**依赖：** 任务 2、任务 7
+**依赖：** 任务 3
 
 **预计涉及文件：**
+- `src/host.rs`
+
+**预计范围：** S
+
+### 检查点：runtime wiring
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong host::`
+- [x] `cargo test -p noloong-agent --test interaction_registry`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+
+### 阶段 3：示例与文档
+
+#### 任务 5：更新示例 profile config
+
+**描述：** 更新至少一个 `examples/profile-configs` 文件，展示 `registryStore` 和 profile `eventStore` 同时配置。示例应避免真实 secret 和机器私有路径。
+
+**验收标准：**
+- [x] 示例中 `registryStore` 仍位于 host config 顶层。
+- [x] 示例中 `eventStore` 位于具体 profile 下。
+- [x] 示例使用安全占位路径或相对路径，不包含真实 token。
+- [x] 示例配置 build test 覆盖新增字段。
+
+**验证：**
+- [x] `cargo test -p noloong config::`
+- [x] `cargo test -p noloong host::`
+
+**依赖：** 任务 1、任务 3
+
+**预计涉及文件：**
+- `examples/profile-configs/*.json`
+- `src/config.rs`
+- `src/host.rs`
+
+**预计范围：** S
+
+#### 任务 6：更新架构与交互文档
+
+**描述：** 文档需要清楚说明 event store 的作用，以及它和 registry store 的区别，避免使用者误以为配置了 registry store 就具备完整 run-level replay 能力。
+
+**验收标准：**
+- [x] `crates/noloong-agent/docs/ARCHITECTURE.md` 明确两类 store 的职责、数据内容、恢复路径和限制。
+- [x] `crates/noloong-agent/docs/INTERACTION.md` 在 Sessions and Profiles 部分说明 `eventStore` 对 paused approval resume 的影响。
+- [x] root `README.md` 给出最小配置示例。
+- [x] 文档说明 `running` session 仍不会自动 continuation；event store 只提供 replay/resume 所需事件，不改变保守恢复策略。
+- [x] 文档说明 v1 event store 只支持 memory/SQLite，PostgreSQL/object 是后续演进。
+
+**验证：**
+- [x] 手工检查文档示例字段名与 serde wire format 一致。
+- [x] 手工检查文档没有真实 secret、真实 API key、真实 bot token。
+
+**依赖：** 任务 1、任务 3、任务 5
+
+**预计涉及文件：**
+- `crates/noloong-agent/docs/ARCHITECTURE.md`
 - `crates/noloong-agent/docs/INTERACTION.md`
 - `README.md`
 
 **预计范围：** S
 
-#### 任务 9：补充插件作者和使用者文档
-
-**描述：** 现有 `EXTENSIONS.md` 面向 extension 作者；本任务补充产品层“如何被 noloong 作为插件加载”的文档，包括 manifest 声明、profile config、allowlist、安全模型和 conformance。
-
-**验收标准：**
-- [x] 新增或更新插件使用文档，区分 extension wire contract 与 product plugin declaration。
-- [x] TypeScript/Python 示例说明如何通过 profile config 加载。
-- [x] 文档给出 `noloong-extension-conformance` 的推荐运行方式。
-- [x] 文档明确 v1 不支持 shell string、remote install、hot reload、secret literal。
-
-**验证：**
-- [x] 文档示例命令可在仓库根目录执行。
-- [x] 示例 extension 的 README 与 root docs 不互相矛盾。
-
-**依赖：** 任务 7、任务 8
-
-**预计涉及文件：**
-- `crates/noloong-agent-core/docs/EXTENSIONS.md`
-- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
-- `examples/extensions/typescript-conformance/README.md`
-- `examples/extensions/python-conformance/README.md`
-- `README.md`
-
-**预计范围：** S
-
-### 检查点：产品接入
+### 检查点：文档与示例
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong`
-- [x] `cargo test -p noloong-agent`
-- [x] `cargo test -p noloong-agent-core`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test -p noloong config::`
+- [x] `cargo test -p noloong host::`
+- [x] 手工检查示例配置和文档字段名。
 
-### 阶段 5：端到端验证与收尾
+### 阶段 4：收尾验证
 
-#### 任务 10：增加端到端插件 smoke tests
+#### 任务 7：全量验证与计划状态更新
 
-**描述：** 用现有 TypeScript/Python conformance fixture 或新增最小 fixture，验证 profile 默认插件、manifest proposal 插件、禁用插件和 capability allowlist 的完整链路。
-
-**验收标准：**
-- [x] profile 默认插件可以被加载，并暴露一个允许的 test tool。
-- [x] agent 提出的 `register_plugin` patch 经 approval/apply 后，下一轮 runtime build 能加载插件。
-- [x] `set_plugin_enabled(false)` 后插件能力从 runtime 消失。
-- [x] 未被 allowlist 允许的 tool/model/hook 不会注册。
-
-**验证：**
-- [x] `cargo test -p noloong-agent plugin`
-- [x] `cargo test -p noloong-agent-core --test extension_language_examples`
-- [x] TypeScript 示例在依赖可用时通过 strict conformance。
-- [x] Python 示例通过 strict conformance。
-
-**依赖：** 任务 5、任务 7
-
-**预计涉及文件：**
-- `crates/noloong-agent/tests/plugin.rs`
-- `crates/noloong-agent-core/tests/extension_language_examples.rs`
-- `examples/extensions/typescript-conformance/README.md`
-- `examples/extensions/python-conformance/README.md`
-
-**预计范围：** M
-
-#### 任务 11：全量检查与架构文档更新
-
-**描述：** 收尾阶段跑完整验证，更新架构文档中的后续演进方向，确保插件系统边界、非目标和未来扩展路径清晰。
+**描述：** 完成实现后跑完整本地验证，并把本计划状态从待实现更新为已完成。确认没有新增 `#[allow(dead_code)]`，没有 secret 泄漏。
 
 **验收标准：**
-- [x] `ARCHITECTURE.md` 描述 product plugin layer、extension layer、manifest approval layer 的关系。
-- [x] `ARCHITECTURE.md` 的后续演进方向更新为 marketplace/signature/version lock/MCP adapter/hot reload，而不是继续写“接入插件”本身。
+- [x] 所有任务验收项完成。
+- [x] `plans/CURRENT_PLAN.md` 状态更新为已完成。
 - [x] 没有新增 `#[allow(dead_code)]`。
-- [x] 没有把 secret、真实 bot token、真实 API key 写入仓库。
+- [x] 没有把真实 secret 写入仓库。
 
 **验证：**
 - [x] `cargo fmt --all --check`
 - [x] `cargo test --workspace`
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `git diff --check`
-- [x] 手工 review 文档与示例配置中的 secret 泄漏风险。
+- [x] `rg -n "#\\[allow\\(dead_code\\)\\]" crates src`
+- [x] 使用已知敏感凭据片段执行仓库扫描，确认除扫描命令本身外无命中；计划文件不保留真实片段。
 
-**依赖：** 任务 1-10
+**依赖：** 任务 1-6
 
 **预计涉及文件：**
-- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
 - `plans/CURRENT_PLAN.md`
-- 其它被实现任务实际触及的文件
 
-**预计范围：** S
+**预计范围：** XS
 
 ## 风险与缓解
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 插件命令被 agent 轻易注册后执行任意代码 | 高 | agent 只能 proposal；human approval 必须展示 command/args/cwd/env/capabilities；默认不继承 env |
-| extension 声明了超出预期的工具或 hooks | 高 | capability allowlist 在注册前过滤；默认产品插件不允许任何能力 |
-| session 恢复时意外启动插件进程 | 中 | read-only descriptor 操作不构建 runtime；只有 run/mutation 恢复 live session 时启动 |
-| 插件加载失败导致产品不可用 | 中 | 插件级 `onLoadFailure` 策略，默认 `disable_for_run`；关键插件可配置 `fail_run` |
-| profile defaults、manifest patches、snapshot 恢复顺序混乱 | 中 | 明确顺序并加 registry/session restore 测试 |
-| 为未来 marketplace 过早设计过多结构 | 中 | v1 只做本地 arbitrary command 插件声明；远程分发、签名、版本锁后置 |
+| 使用者误以为 registry store 等于完整运行时恢复 | 高 | 文档明确 snapshot store 和 event log store 分层职责 |
+| SQLite event store 配了 `sqlite::memory:` 但期待跨进程恢复 | 中 | 文档和示例强调需要 file URL 才能跨进程持久化 |
+| profile 构建改为 async 影响现有 build_registry 测试 | 中 | 保持 public `build_registry` async API 不变，只调整内部 profile 构建 |
+| event store 与 registry store 使用不同生命周期导致 paused approval 无法恢复 | 中 | 文档说明同一 profile 必须稳定指向同一持久 event store |
+| 过早扩展 PostgreSQL/object event store | 中 | v1 只接入已有 core SQLite event store，后续 backend 单独规划 |
 
 ## 并行化机会
 
-- 任务 1 和任务 3 可以并行：一个在 `noloong-agent` 数据模型层，一个在 `noloong-agent-core` 进程配置层。
-- 任务 8 和任务 9 可以在任务 2/7 的 schema 稳定后并行。
-- 任务 10 的 TypeScript/Python fixture 验证可以与文档收尾并行，但必须等任务 5/7 的 runtime 装配完成。
+- 任务 1 和任务 6 可以部分并行：先确定配置字段名后即可写文档草案。
+- 任务 3 和任务 5 不能并行完成：示例 build test 依赖 host wiring。
+- 任务 4 可以在任务 3 完成后独立验证，不影响文档更新。
 
-## 已定决策
+## 开放问题
 
-- v1 不新增 `noloong plugin list` / `noloong plugin validate` CLI；先通过 profile config 和 manifest proposal 暴露，保持表面积小。
-- 插件 allowlist 不支持 wildcard，只做 capability kind + id/tool name 精确匹配，降低审批误解风险。
-- 插件加载失败的 warning 记录在 `AgentSessionRuntimeBuilder` 本轮 build 结果中；`fail_run` 策略会返回结构化 build error。后续若需要 UI 主动展示，可把 warning 投射到 display/event 层。
+- 无需额外产品决策。默认采用 profile 级 `eventStore`、v1 memory/SQLite、`migrateOnConnect=true`、不改变 running session 保守恢复策略。

@@ -1,6 +1,7 @@
 use crate::config::{
     BuiltInProviderConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig, HostProfileConfig,
-    ProfileCompactionConfig, RegistryStoreConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
+    ProfileCompactionConfig, ProfileEventStoreConfig, RegistryStoreConfig, RuntimeProfileConfig,
+    resolve_chatgpt_token_file,
 };
 use noloong_agent::{
     AgentManifest, AgentSession, ManifestPatch,
@@ -15,9 +16,9 @@ use noloong_agent::{
 use noloong_agent_core::{
     AgentCoreError, AgentRuntime, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
     BoxFuture, CancellationToken, ChatCompletionsProvider, ChatCompletionsProviderConfig,
-    ContextCompactionConfig, ContextCompactionMode, ContextCompactor, HttpAuthContext,
-    HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, ModelProvider, ResponsesApiProvider,
-    ResponsesApiProviderConfig,
+    ContextCompactionConfig, ContextCompactionMode, ContextCompactor, EventStore, HttpAuthContext,
+    HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, InMemoryEventStore, ModelProvider,
+    ResponsesApiProvider, ResponsesApiProviderConfig, SqliteEventStore, SqliteEventStoreConfig,
 };
 use noloong_openai::{
     auth::{ChatGptAuthManager, ChatGptTokenStorage, ChatGptTokenStore},
@@ -39,14 +40,13 @@ pub async fn build_registry(
     config: &HostProfileConfig,
 ) -> Result<AgentSessionRegistry, HostBuildError> {
     config.validate()?;
-    let profiles = config
-        .profiles
-        .iter()
-        .map(RuntimeProfile::try_from_config)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|profile| Arc::new(profile) as Arc<dyn AgentRuntimeProfile>)
-        .collect::<Vec<_>>();
+    let mut profiles = Vec::with_capacity(config.profiles.len());
+    for profile_config in &config.profiles {
+        profiles.push(
+            Arc::new(RuntimeProfile::try_from_config(profile_config).await?)
+                as Arc<dyn AgentRuntimeProfile>,
+        );
+    }
     let default_profile_id = config
         .default_profile_id
         .clone()
@@ -87,15 +87,35 @@ async fn build_registry_store(
     }
 }
 
+async fn build_event_store(
+    config: &ProfileEventStoreConfig,
+) -> Result<Arc<dyn EventStore>, HostBuildError> {
+    match config {
+        ProfileEventStoreConfig::Memory => Ok(Arc::new(InMemoryEventStore::new())),
+        ProfileEventStoreConfig::Sqlite {
+            database_url,
+            migrate_on_connect,
+        } => {
+            let mut config = SqliteEventStoreConfig::new(database_url);
+            if !*migrate_on_connect {
+                config = config.without_migrations();
+            }
+            let store = SqliteEventStore::connect(config).await?;
+            Ok(Arc::new(store))
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RuntimeProfile {
     descriptor: InteractionProfileDescriptor,
     provider: Arc<dyn ModelProvider>,
+    event_store: Arc<dyn EventStore>,
     compaction: Option<RuntimeCompaction>,
 }
 
 impl RuntimeProfile {
-    fn try_from_config(config: &RuntimeProfileConfig) -> Result<Self, HostBuildError> {
+    async fn try_from_config(config: &RuntimeProfileConfig) -> Result<Self, HostBuildError> {
         let mut validated_manifest = AgentManifest::default();
         let mut default_manifest_patches = config
             .plugins
@@ -117,6 +137,7 @@ impl RuntimeProfile {
             &config.compaction,
             provider.chatgpt_compact.as_ref(),
         )?;
+        let event_store = build_event_store(&config.event_store).await?;
         Ok(Self {
             descriptor: InteractionProfileDescriptor {
                 profile_id: config.profile_id.clone(),
@@ -126,6 +147,7 @@ impl RuntimeProfile {
                 metadata: config.metadata.clone(),
             },
             provider: provider.provider,
+            event_store,
             compaction,
         })
     }
@@ -144,6 +166,7 @@ impl AgentRuntimeProfile for RuntimeProfile {
         Box::pin(async move {
             let mut builder = session
                 .runtime_builder()
+                .with_event_store(Arc::clone(&self.event_store))
                 .with_model_provider(Arc::clone(&self.provider));
             if let Some(compaction) = &self.compaction {
                 builder = builder.with_context_compactor(
@@ -510,11 +533,26 @@ fn opendal_error(error: opendal::Error) -> HostBuildError {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS, RuntimeProfile, build_registry};
-    use crate::config::{HostProfileConfig, RuntimeProfileConfig};
+    use crate::config::{
+        BuiltInProviderConfig, HostProfileConfig, ProfileEventStoreConfig, RuntimeProfileConfig,
+    };
     use noloong_agent::{
         AgentManifest, AgentSession, ManifestPatch, interaction::AgentRuntimeProfile,
     };
-    use noloong_agent_core::ContextCompactionMode;
+    use noloong_agent_core::{
+        AgentEvent, AgentEventKind, BoxFuture, CancellationToken, ContextCompactionMode,
+        EventStore as _, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
+        SqliteEventStore, SqliteEventStoreConfig, StopReason,
+    };
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
+    static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn profile_config_builds_registry_store() {
@@ -533,6 +571,79 @@ mod tests {
         let registry = build_registry(&config).await.unwrap();
 
         assert_eq!(registry.profile_descriptors()[0].profile_id, "default");
+    }
+
+    #[tokio::test]
+    async fn profile_config_builds_sqlite_event_store() {
+        let db = TempSqliteDb::new("profile-event-store");
+        let config = runtime_profile_config(sqlite_event_store(&db.path, true));
+
+        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+
+        profile
+            .event_store
+            .append(event("persistent-run", 1, AgentEventKind::RunStarted))
+            .await
+            .unwrap();
+        let loaded = profile.event_store.load("persistent-run").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_event_store_reloads_events_across_profile_rebuilds() {
+        let db = TempSqliteDb::new("profile-event-reload");
+        let config = runtime_profile_config(sqlite_event_store(&db.path, true));
+
+        let first_profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        first_profile
+            .event_store
+            .append(event("reloaded-run", 1, AgentEventKind::RunStarted))
+            .await
+            .unwrap();
+        drop(first_profile);
+
+        let second_profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let loaded = second_profile
+            .event_store
+            .load("reloaded-run")
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].kind, AgentEventKind::RunStarted));
+    }
+
+    #[tokio::test]
+    async fn profile_runtime_writes_events_to_configured_event_store() {
+        let db = TempSqliteDb::new("profile-event-runtime");
+        let config = runtime_profile_config(sqlite_event_store(&db.path, true));
+        let mut profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        profile.provider = Arc::new(TextModelProvider);
+        let session = AgentSession::builder().build();
+        let manifest = AgentManifest::default();
+
+        let runtime = profile.build_runtime(&session, &manifest).await.unwrap();
+        let report = runtime.run("hello").await.unwrap();
+        let reloaded_store =
+            SqliteEventStore::connect(SqliteEventStoreConfig::new(sqlite_database_url(&db.path)))
+                .await
+                .unwrap();
+        let loaded = reloaded_store.load(&report.run_id).await.unwrap();
+
+        assert_eq!(loaded, report.events);
+    }
+
+    #[tokio::test]
+    async fn sqlite_event_store_without_migration_reports_missing_schema() {
+        let db = TempSqliteDb::new("profile-event-no-schema");
+        let config = runtime_profile_config(sqlite_event_store(&db.path, false));
+
+        let error = match RuntimeProfile::try_from_config(&config).await {
+            Ok(_) => panic!("event store without schema should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("schema is missing"));
     }
 
     #[tokio::test]
@@ -567,10 +678,12 @@ mod tests {
 
     #[tokio::test]
     async fn example_plugin_stdio_profile_builds_registry() {
-        let config = serde_json::from_str::<HostProfileConfig>(include_str!(
+        let mut config = serde_json::from_str::<HostProfileConfig>(include_str!(
             "../examples/profile-configs/plugin-stdio-example.json"
         ))
         .unwrap();
+        let db = TempSqliteDb::new("plugin-stdio-example");
+        config.profiles[0].event_store = sqlite_event_store(&db.path, true);
 
         let registry = build_registry(&config).await.unwrap();
 
@@ -580,8 +693,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn profile_default_plugins_become_default_manifest_patches() {
+    #[tokio::test]
+    async fn profile_default_plugins_become_default_manifest_patches() {
         let config = serde_json::from_str::<RuntimeProfileConfig>(
             r#"{
                 "profileId": "default",
@@ -608,7 +721,7 @@ mod tests {
         )
         .unwrap();
 
-        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
         let descriptor = profile.descriptor();
 
         assert!(matches!(
@@ -632,7 +745,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
 
@@ -661,7 +774,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
 
@@ -688,7 +801,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let profile = RuntimeProfile::try_from_config(&config).unwrap();
+        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
 
@@ -701,5 +814,110 @@ mod tests {
         assert_eq!(compaction.reserve_tokens, 32_000);
         assert_eq!(compaction.keep_recent_tokens, 64_000);
         assert_eq!(compaction.mode, ContextCompactionMode::RequestOnly);
+    }
+
+    fn runtime_profile_config(event_store: ProfileEventStoreConfig) -> RuntimeProfileConfig {
+        RuntimeProfileConfig {
+            profile_id: "default".into(),
+            display_name: "Default".into(),
+            description: None,
+            provider: responses_provider(),
+            event_store,
+            compaction: Default::default(),
+            plugins: Vec::new(),
+            manifest_patches: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    fn responses_provider() -> BuiltInProviderConfig {
+        serde_json::from_value(serde_json::json!({
+            "type": "responses",
+            "model": "gpt-5.5-mini"
+        }))
+        .unwrap()
+    }
+
+    fn sqlite_event_store(path: &Path, migrate_on_connect: bool) -> ProfileEventStoreConfig {
+        ProfileEventStoreConfig::Sqlite {
+            database_url: sqlite_database_url(path),
+            migrate_on_connect,
+        }
+    }
+
+    fn sqlite_database_url(path: &Path) -> String {
+        format!("sqlite:{}", path.display())
+    }
+
+    fn event(run_id: &str, sequence: u64, kind: AgentEventKind) -> AgentEvent {
+        AgentEvent {
+            run_id: run_id.into(),
+            sequence,
+            turn_id: None,
+            phase: None,
+            kind,
+        }
+    }
+
+    struct TempSqliteDb {
+        path: PathBuf,
+    }
+
+    impl TempSqliteDb {
+        fn new(name: &str) -> Self {
+            let id = NEXT_DB_ID.fetch_add(1, Ordering::SeqCst);
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "noloong-profile-event-store-{name}-{}-{id}.sqlite",
+                    std::process::id()
+                )),
+            }
+        }
+    }
+
+    impl Drop for TempSqliteDb {
+        fn drop(&mut self) {
+            remove_if_exists(&self.path);
+            remove_if_exists(&self.path.with_extension("sqlite-shm"));
+            remove_if_exists(&self.path.with_extension("sqlite-wal"));
+        }
+    }
+
+    fn remove_if_exists(path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    struct TextModelProvider;
+
+    impl ModelProvider for TextModelProvider {
+        fn id(&self) -> &str {
+            "test-model"
+        }
+
+        fn model_name(&self) -> Option<&str> {
+            Some("gpt-5.5-mini")
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            _request: ModelRequest,
+            sink: ModelStreamSink,
+            _cancellation: CancellationToken,
+        ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+            Box::pin(async move {
+                let events = vec![
+                    ModelStreamEvent::TextDelta {
+                        text: "hello".into(),
+                    },
+                    ModelStreamEvent::Finished {
+                        stop_reason: StopReason::Stop,
+                    },
+                ];
+                for event in &events {
+                    sink(event.clone()).await?;
+                }
+                Ok(events)
+            })
+        }
     }
 }

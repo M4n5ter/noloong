@@ -50,7 +50,7 @@ workspace = true
 
 [dependencies]
 noloong-agent = { workspace = true, features = ["interaction-http", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
-noloong-agent-core.workspace = true
+noloong-agent-core = { workspace = true, features = ["sqlite-store"] }
 noloong-agent-telegram.workspace = true
 noloong-openai.workspace = true
 getrandom.workspace = true

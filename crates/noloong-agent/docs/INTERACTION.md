@@ -83,6 +83,8 @@ Profiles are registered by the Rust host. A bridge can select a `profileId` but 
 
 Session descriptors may come from a persisted registry store without a live runtime loaded in memory. `session/get` and `session/list` are read-only descriptor operations: they can return SQLite/PostgreSQL/OpenDAL-backed snapshots without constructing a provider, tools, or background process runtime. Run and mutation methods restore the live session lazily from the snapshot using the currently registered `AgentRuntimeProfile` with the same `profileId`.
 
+The registry store is not the core event log. It stores application session snapshots for descriptors and lazy restore. Profile-level `eventStore` stores core `AgentEvent` entries for run replay, approval resume, permission audit ordering, and diagnostics. A bridge cannot provide an event store over interaction JSON-RPC; it is selected by the Rust host profile. Use a persistent SQLite file event store when a paused approval must survive a process restart. `sqlite::memory:` and the default memory event store are process-local.
+
 If a persisted snapshot was `running` when the previous process stopped, the registry reports it as `failed` and writes that interrupted status back to the store. Persisted `paused` sessions remain paused so approval and human workflows can be resumed by the host.
 
 ```json

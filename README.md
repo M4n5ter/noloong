@@ -175,6 +175,24 @@ cargo run -p noloong -- telegram --profile-config examples/profile-configs/plugi
 
 Agents cannot silently install plugins. They can only propose `register_plugin`, `set_plugin_enabled`, or `remove_plugin` manifest patches through `agent.manifest.propose_patch`; a bridge or human then approves and applies the proposal. Plugin changes take effect on the next runtime build/run, not by hot reloading an already running runtime.
 
+## Session Stores
+
+The root `noloong` profile config has two separate persistence layers. `registryStore` is a host-level session snapshot store for `AgentManifest`, `AgentState`, steering/follow-up queues, profile ids, metadata, and session descriptors. Profile-level `eventStore` is the core run event log for `AgentEvent` replay, tool approval resume, permission audit ordering, and run-level diagnostics.
+
+```json
+{
+  "registryStore": {"type": "sqlite", "databaseUrl": "sqlite:target/noloong-sessions.sqlite"},
+  "profiles": [{
+    "profileId": "default",
+    "displayName": "Default",
+    "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+    "eventStore": {"type": "sqlite", "databaseUrl": "sqlite:target/noloong-events.sqlite"}
+  }]
+}
+```
+
+`eventStore` defaults to `{"type":"memory"}`. Use a SQLite file URL, not `sqlite::memory:`, when a profile needs paused approval resume or event replay across process restarts. A persisted event store does not make interrupted `running` sessions continue automatically; they are still marked failed on restore.
+
 ## Thinking
 
 Thinking is represented as structured data instead of plain text. `ContentBlock::Thinking` contains a `ThinkingBlock` with a kind, optional display text, optional raw provider payload, optional replay descriptor, and metadata. `ModelStreamEvent::ThinkingDelta` carries a `ThinkingDelta`, so providers can stream visible summaries while preserving JSON/object reasoning details for same-provider replay.
