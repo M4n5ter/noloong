@@ -21,6 +21,10 @@
           "X-Title": "noloong telegram JSONC example",
         },
         "maxCompletionTokens": 1024,
+        "reasoning": {
+          "enabled": true,
+          "effort": "medium",
+        },
       },
       "manifestPatches": [
         {
@@ -36,22 +40,6 @@
         {
           "op": "update_file_edit_tool_policy",
           "policy": "auto_by_model",
-        },
-        {
-          "op": "enable_tool",
-          "toolName": "host.exec.start",
-        },
-        {
-          "op": "enable_tool",
-          "toolName": "host.exec.read",
-        },
-        {
-          "op": "enable_tool",
-          "toolName": "host.exec.wait",
-        },
-        {
-          "op": "enable_tool",
-          "toolName": "host.exec.list",
         },
       ],
       "metadata": {

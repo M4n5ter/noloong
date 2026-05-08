@@ -235,6 +235,40 @@ fn manifest_default_file_edit_policy_is_auto_by_model() {
 }
 
 #[test]
+fn manifest_default_enables_built_in_tools() {
+    let manifest = AgentManifest::default();
+
+    for tool_name in BuiltInToolName::ALL {
+        assert!(manifest.enabled_tools.contains(tool_name), "{tool_name}");
+    }
+}
+
+#[test]
+fn manifest_missing_enabled_tools_uses_default_built_ins() {
+    let manifest: AgentManifest = serde_json::from_value(serde_json::json!({
+        "locale": "en",
+        "systemPrompt": {"source": "custom", "prompt": "test"},
+        "approvalPolicy": {"mode": "require_approval"}
+    }))
+    .unwrap();
+
+    assert_eq!(manifest.enabled_tools, BuiltInToolName::default_enabled());
+}
+
+#[test]
+fn manifest_explicit_empty_enabled_tools_disables_built_ins() {
+    let manifest: AgentManifest = serde_json::from_value(serde_json::json!({
+        "locale": "en",
+        "systemPrompt": {"source": "custom", "prompt": "test"},
+        "enabledTools": [],
+        "approvalPolicy": {"mode": "require_approval"}
+    }))
+    .unwrap();
+
+    assert!(manifest.enabled_tools.is_empty());
+}
+
+#[test]
 fn manifest_patch_rejects_invalid_changes() {
     let mut manifest = AgentManifest::default();
     let before = manifest.clone();
@@ -278,16 +312,16 @@ fn manifest_proposal_store_records_without_applying() {
     let manifest = AgentManifest::default();
 
     let proposal = store
-        .record_pending_proposal(ManifestPatch::EnableTool {
+        .record_pending_proposal(ManifestPatch::DisableTool {
             tool_name: BuiltInToolName::HostExecStart,
         })
         .unwrap();
 
     assert_eq!(store.pending_len(), 1);
     assert_eq!(store.approved_len(), 0);
-    assert_eq!(proposal.summary, "enable tool host.exec.start");
+    assert_eq!(proposal.summary, "disable tool host.exec.start");
     assert!(
-        !manifest
+        manifest
             .enabled_tools
             .contains(&BuiltInToolName::HostExecStart)
     );

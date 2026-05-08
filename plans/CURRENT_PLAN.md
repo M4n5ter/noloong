@@ -1,248 +1,265 @@
-# 实施计划：统一诊断日志到 `log` + `env_logger`
+# 实施计划：默认启用内置工具与 Provider Reasoning 配置
 
-> 状态：已完成实现、本地验证、workspace 测试和 clippy。诊断类输出已迁移到 `log`，root CLI 使用 `env_logger` 与 `human-panic`，机器可读 stdout、CLI 错误和交互式提示保持原有输出语义。
+> 状态：已完成实现、本地验证、schema check、clippy 和 workspace tests。目标是让 `noloong-agent` 的 Rust built-in tools 默认可用，同时为 root profile config 增加 provider-aware `reasoning` 配置，避免用户为了常见推理开关与推理强度手写 `extraBody`。
 
 ## 概览
 
-当前仓库里仍有一批 `eprintln!` 被用于运行时诊断、启动状态、重试提示和 live test skip 信息。下一步将这些诊断输出统一迁移到 `log` facade，并由二进制入口使用 `env_logger` 初始化。默认日志级别为 `info`，允许用户通过 `RUST_LOG` 覆盖。同时引入 `human-panic`，让 release panic 给出更适合用户提交问题的崩溃报告。
+实施前 `AgentManifest::default()` 的 `enabledTools` 是空集合，导致普通内置工具默认不会进入模型上下文；文件编辑工具因为不走 `BuiltInToolName` 集合，而是在 runtime build 阶段按 `fileEditToolPolicy` 特殊挂载，所以看起来已经被单独启用。
 
-本计划只迁移“诊断日志”。命令承诺的 stdout、机器可读输出、交互式登录提示、示例程序演示输出继续保持普通 `println!` / `eprintln!`，避免日志污染 CLI contract。
+本实施已将普通 built-in tools 改为默认启用，并保留文件编辑工具现有特殊处理：`apply_patch` / `write_file` 永远不会同时暴露，默认仍按模型名自动选择。Provider 配置层新增 typed `reasoning` 字段：Chat Completions 负责映射常见 thinking extra body 与 `reasoning_effort`，Responses / ChatGPT Responses 映射到已有 Responses reasoning config，Anthropic Messages 按当前 Claude API 使用 `output_config.effort`，不把已不推荐的 `budget_tokens` 作为 profile 主路径。
 
 ## 架构决策
 
-- workspace 统一依赖：新增 `log = "0.4"`、`env_logger = "0.11"`、`human-panic = "2.0"`。
-- `log` 是库与二进制共享的诊断 facade；`env_logger` 只在二进制或测试初始化处使用。
-- root `noloong` CLI 在入口最早位置初始化 logger 与 `human-panic`；`noloong-extension-conformance` 保持轻量 CLI，不把 logger backend 或 panic reporter 下沉进 core library 依赖。
-- logger 使用 `env_logger::Env::default().default_filter_or("info")`，`RUST_LOG` 仍然具有最高优先级。
-- logger 初始化使用 `try_init` 或同等幂等封装，避免测试或嵌入场景重复初始化 panic。
-- 日志级别约定：
-  - `info!`：正常启动、监听地址、网络模式、预期的 live test skip。
-  - `warn!`：可恢复的重试，例如 Telegram polling retry。
-  - `error!`：真正的运行时诊断错误。
-- 不迁移以下输出：root CLI fatal error、conformance CLI error/usage、`build-info`、profile schema、conformance JSON/text report、ChatGPT browser/device login 提示、examples 演示输出。
+- “默认启用 built-in tools” 只覆盖 `BuiltInToolName::ALL` 中的 Rust product-layer tools；第三方 plugins 仍保持 opt-in。
+- `enabledTools` 缺省时使用默认 built-ins；显式配置空数组时表示关闭全部普通 built-ins。
+- `ManifestPatch::DisableTool` 是关闭默认内置工具的方式；`EnableTool` 对默认已启用工具保持幂等。
+- 文件编辑工具继续由 `fileEditToolPolicy` 控制，不加入 `BuiltInToolName::ALL`。
+- Root profile config 暴露 provider-aware `reasoning`，而不是在 `noloong-agent-core` 中硬编码 OpenRouter、DeepSeek、Anthropic model preset。
+- `extraBody` 仍是最高优先级 escape hatch：先应用 typed `reasoning` 映射，再应用用户显式 `extraBody`，同名 top-level 字段由 `extraBody` 覆盖。
+- Anthropic Messages 使用官方当前推荐的 `output_config.effort`；`budget_tokens` 只保留为 core provider 低层 legacy/manual thinking 能力，不从 root profile 主配置暴露。参考：`https://platform.claude.com/docs/en/build-with-claude/effort`。
 
 ## 任务列表
 
-### 阶段 1：依赖与初始化基础
+### 阶段 1：默认启用普通内置工具
 
-#### 任务 1：添加 workspace 日志与 panic 依赖
+#### 任务 1：定义默认 built-in tool 集合
 
-**描述：** 在 workspace 统一管理 `log`、`env_logger`、`human-panic` 版本，并只把依赖加到实际需要的 crate。root `noloong` 需要三者；测试中写日志的 crate 使用 dev-dependencies；`noloong-agent-core` 不为 conformance binary 下沉 logger backend 或 panic reporter。
+**描述：** 为 `BuiltInToolName` 增加默认启用集合 helper，并让 `AgentManifest::new()`、`AgentManifest::default()`、serde 缺省反序列化都使用该集合。显式 `enabledTools: []` 必须保留关闭普通 built-ins 的语义。
 
 **验收标准：**
-- [x] workspace dependencies 包含 `log = "0.4"`、`env_logger = "0.11"`、`human-panic = "2.0"`。
-- [x] root `noloong` crate 可使用 `log`、`env_logger`、`human-panic`。
-- [x] `noloong-agent-core` 仅在 dev-dependencies 中使用 `log`、`env_logger`，不把 `env_logger` 或 `human-panic` 作为 library runtime dependency。
-- [x] 仅测试需要日志的 crate 使用 dev-dependencies，不给无关库 crate 增加 runtime logging backend。
+- [x] `AgentManifest::default().enabled_tools` 包含 `BuiltInToolName::ALL` 的所有成员。
+- [x] 缺省反序列化 manifest 时 `enabledTools` 使用默认集合。
+- [x] 显式反序列化 `{"enabledTools":[]}` 时集合保持为空。
+- [x] `FileEditToolPolicy::AutoByModel` 仍是默认值，且不受普通 built-in tool 默认集合影响。
 
 **验证：**
-- [x] `cargo metadata --no-deps`
-- [x] `cargo check -p noloong`
-- [x] `cargo check -p noloong-agent-core --bins`
+- [x] `cargo test -p noloong-agent --test manifest`
+- [x] `cargo test -p noloong-agent --test agent_session`
 
 **依赖：** 无
 
 **预计涉及文件：**
-- `Cargo.toml`
-- `crates/noloong-agent-core/Cargo.toml`
-- `crates/noloong-agent/Cargo.toml`
-- `crates/noloong-openai/Cargo.toml`
-- `Cargo.lock`
+- `crates/noloong-agent/src/manifest.rs`
+- `crates/noloong-agent/tests/manifest.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
 
 **预计范围：** S
 
-#### 任务 2：实现二进制入口初始化
+#### 任务 2：更新 session/runtime 默认工具行为
 
-**描述：** 为 root CLI 增加早期初始化逻辑。初始化顺序为先注册 `human-panic`，再初始化 logger，然后进入原有 CLI 解析与运行流程。conformance CLI 不初始化 logger backend，避免污染 core library dependency graph。
+**描述：** 更新依赖旧行为的 session 测试和 manifest proposal 测试。默认 runtime 应能直接看到普通 built-in tools；测试“patch 下一轮生效”时改用先 `DisableTool` 再 `EnableTool`，或选择其它能体现状态变化的工具。
 
 **验收标准：**
-- [x] root `src/main.rs` 的 `main` 开头调用 `human_panic::setup_panic!();`。
-- [x] `noloong-extension-conformance` binary 不依赖 `env_logger` 或 `human-panic`。
-- [x] root CLI 初始化 `env_logger`，默认 filter 为 `info`。
-- [x] `RUST_LOG=debug`、`RUST_LOG=warn` 等环境变量能覆盖默认 filter。
-- [x] 重复初始化不会 panic。
+- [x] 默认 runtime 暴露 `host.exec.start/read/wait/write/terminate/list` 和 `agent.manifest.propose_patch`。
+- [x] `DisableTool` 后重建 runtime 会隐藏目标工具。
+- [x] `EnableTool` 后重建 runtime 会恢复目标工具。
+- [x] `write_file` / `apply_patch` 仍由 runtime builder 移除后按策略重新选择，never-both 测试继续覆盖。
 
 **验证：**
-- [x] `cargo run -p noloong -- build-info command`
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile bad -- echo`
-- [x] `RUST_LOG=warn cargo run -p noloong -- build-info command`
+- [x] `cargo test -p noloong-agent --test agent_session`
+- [x] `cargo test -p noloong-agent --test interaction_control`
 
 **依赖：** 任务 1
 
 **预计涉及文件：**
-- `src/main.rs`
-- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
+- `crates/noloong-agent/tests/interaction_control.rs`
 
-**预计范围：** S
+**预计范围：** M
 
-### 检查点：初始化可用
+### 检查点：默认工具语义稳定
 
 - [x] `cargo fmt --all --check`
-- [x] `cargo check -p noloong`
-- [x] `cargo check -p noloong-agent-core --bins`
+- [x] `cargo test -p noloong-agent --test manifest`
+- [x] `cargo test -p noloong-agent --test agent_session`
 
-### 阶段 2：迁移运行时诊断输出
+### 阶段 2：Provider reasoning 配置模型
 
-#### 任务 3：迁移 root CLI 诊断输出
+#### 任务 3：为 root profile config 增加 typed reasoning 类型
 
-**描述：** 将 root CLI 中真正属于诊断信息的 `eprintln!` 替换为 `log` 宏。保持 stdout 命令输出不变，尤其是 schema、build-info manifest、source cat/list、ChatGPT 登录提示等用户可见 contract。
+**描述：** 在 root config 层为每类 built-in provider 增加 `reasoning` 字段。字段 shape 按 provider 类型区分，但都保持 JSON schema 可生成、JSONC 可编辑、缺省不改变 provider 行为。
 
 **验收标准：**
-- [x] 顶层 `run_cli` error 保持直接 stderr，避免被 `RUST_LOG` 隐藏。
-- [x] interaction server listening 使用 `log::info!`。
-- [x] Telegram bridge initialized 使用 `log::info!`。
-- [x] Telegram network mode 使用 `log::info!`。
-- [x] Telegram polling retry 使用 `log::warn!`。
-- [x] `build-info`、profile schema、ChatGPT login/logout/status 输出不改成日志。
+- [x] `chat_completions.reasoning` 支持 `enabled: bool` 和 `effort: low|medium|high|xhigh`。
+- [x] `responses.reasoning` 和 `chatgpt_responses.reasoning` 支持 `enabled`、`effort: minimal|low|medium|high|xhigh`、`summary: auto|concise|detailed|none`、`includeEncrypted`。
+- [x] `anthropic_messages.reasoning` 支持 `effort: low|medium|high|xhigh|max` 与 `thinking: adaptive|disabled|omit`。
+- [x] 省略 `reasoning` 时保持现有请求体行为。
+- [x] `enabled=false` 时不发送 Responses typed reasoning；Chat Completions 发送 common disable switches；Anthropic 仅在 `thinking=disabled` 时发送 disabled thinking。
 
 **验证：**
-- [x] `cargo run -p noloong -- build-info command` stdout 仍只包含 build command。
+- [x] `cargo test -p noloong --lib config`
+- [x] `cargo test -p noloong --lib schema`
+
+**依赖：** 无
+
+**预计涉及文件：**
+- `src/config.rs`
+- `src/schema.rs`
+- `schemas/profile-config.schema.json`
+
+**预计范围：** M
+
+#### 任务 4：扩展 Anthropic Messages core provider 的 effort 支持
+
+**描述：** 在 `noloong-agent-core` 的 Anthropic Messages provider 中增加一等 `output_config.effort` 支持，并把 thinking config 从只支持 manual `budget_tokens` 扩展为 adaptive / disabled / manual。Root profile 主路径只使用 effort 与 adaptive/disabled/omit。
+
+**验收标准：**
+- [x] `AnthropicMessagesProviderConfig` 可设置 `output_config.effort`。
+- [x] request body 正确渲染 `output_config: {"effort": "medium"}`。
+- [x] adaptive thinking 渲染为 `thinking: {"type":"adaptive"}`。
+- [x] disabled thinking 渲染为 `thinking: {"type":"disabled"}`。
+- [x] legacy manual thinking 仍可通过 core builder 渲染 `thinking: {"type":"enabled","budget_tokens": N}`，但 root profile 不新增 `budgetTokens`。
+
+**验证：**
+- [x] `cargo test -p noloong-agent-core --test anthropic_messages`
+
+**依赖：** 无
+
+**预计涉及文件：**
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+- `crates/noloong-agent-core/tests/anthropic_messages.rs`
+
+**预计范围：** M
+
+### 阶段 3：Provider 映射与 host wiring
+
+#### 任务 5：实现 Chat Completions reasoning extra body 映射
+
+**描述：** 在 root host provider 构建路径中，将 `chat_completions.reasoning` 转换为 common compatibility extra body，再叠加用户 `extraBody`。不要把 provider/model 名字写死到 core provider。
+
+**验收标准：**
+- [x] `enabled=true` 写入 `enable_thinking=true`。
+- [x] `enabled=true` 写入 `thinking: {"type":"enabled"}`。
+- [x] `enabled=true` 写入 `reasoning: {"enabled": true}`。
+- [x] `enabled=true` 写入 `reasoning_split=true`。
+- [x] `enabled=true` 写入 `chat_template_kwargs: {"enable_thinking": true}`。
+- [x] `enabled=false` 写入对应 false / disabled 值。
+- [x] `effort` 写入 top-level `reasoning_effort`，支持 `low|medium|high|xhigh`。
+- [x] 用户 `extraBody` 可覆盖 typed mapping 的同名 top-level 字段。
+
+**验证：**
+- [x] `cargo test -p noloong --lib host`
+- [x] `cargo test -p noloong-agent-core --test chat_completions`
+
+**依赖：** 任务 3
+
+**预计涉及文件：**
+- `src/host.rs`
+- `src/config.rs`
+- `crates/noloong-agent-core/tests/chat_completions.rs`
+
+**预计范围：** M
+
+#### 任务 6：实现 Responses、ChatGPT Responses、Anthropic 映射
+
+**描述：** 将 root profile typed reasoning 映射到已有 provider config。Responses 与 ChatGPT Responses 复用 `ResponsesReasoningConfig`；Anthropic 使用新加的 `output_config.effort` 和 thinking mode。
+
+**验收标准：**
+- [x] Responses provider 根据 `effort` / `summary` 渲染 `reasoning` object。
+- [x] Responses provider 根据 `includeEncrypted` 渲染 encrypted reasoning include。
+- [x] ChatGPT Responses provider 使用同一套 Responses reasoning 映射，并保留 Codex compact auth/provider 行为。
+- [x] Anthropic provider 根据 `effort` 渲染 `output_config.effort`。
+- [x] Anthropic provider 根据 `thinking` 渲染 adaptive / disabled / omit。
+- [x] `extraBody` 在所有 provider 中仍最后叠加。
+
+**验证：**
+- [x] `cargo test -p noloong --lib host`
+- [x] `cargo test -p noloong-agent-core --test responses`
+- [x] `cargo test -p noloong-agent-core --test anthropic_messages`
+
+**依赖：** 任务 3、任务 4
+
+**预计涉及文件：**
+- `src/host.rs`
+- `crates/noloong-openai/src/provider.rs`
+- `crates/noloong-agent-core/src/responses.rs`
+- `crates/noloong-agent-core/src/anthropic_messages.rs`
+
+**预计范围：** M
+
+### 检查点：Provider reasoning 请求体可验证
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong --lib host`
+- [x] `cargo test -p noloong-agent-core --test chat_completions`
+- [x] `cargo test -p noloong-agent-core --test responses`
+- [x] `cargo test -p noloong-agent-core --test anthropic_messages`
+
+### 阶段 4：示例、文档与完整验证
+
+#### 任务 7：更新 profile examples 与 schema
+
+**描述：** 更新 checked-in profile examples，让默认工具启用后的配置更简洁，并展示新的 typed reasoning 用法。重新生成 JSON schema，确保编辑器提示覆盖新字段。
+
+**验收标准：**
+- [x] `telegram-openrouter-free.jsonc` 移除冗余 `enable_tool` patches。
+- [x] `telegram-openrouter-free.jsonc` 展示 Chat Completions `reasoning.enabled` 和 `reasoning.effort`。
+- [x] `chatgpt-codex-subscription.json` 展示 Responses-style `reasoning.effort`。
+- [x] `schemas/profile-config.schema.json` 与 Rust 类型一致。
+- [x] 所有 profile examples 通过 schema validation。
+
+**验证：**
+- [x] `cargo run -p noloong -- profile-config schema --output schemas/profile-config.schema.json`
 - [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-- [x] `RUST_LOG=warn cargo run -p noloong -- build-info command` 不输出 info 日志。
+- [x] `cargo test -p noloong --lib schema`
+- [x] `cargo test -p noloong --lib config`
 
-**依赖：** 任务 2
+**依赖：** 任务 1、任务 3、任务 5、任务 6
 
 **预计涉及文件：**
-- `src/main.rs`
+- `examples/profile-configs/telegram-openrouter-free.jsonc`
+- `examples/profile-configs/telegram-openrouter-free.json`
+- `examples/profile-configs/chatgpt-codex-subscription.json`
+- `schemas/profile-config.schema.json`
 
 **预计范围：** S
 
-#### 任务 4：迁移 conformance CLI 诊断输出
+#### 任务 8：更新架构文档与 README
 
-**描述：** 将 extension conformance runner 的报告输出和用户可见错误边界保持清晰：错误与 usage 仍直写 stderr，conformance report 仍写 stdout，避免破坏第三方扩展作者依赖的 JSON/text 输出，也避免 `RUST_LOG` 隐藏 CLI 错误。
-
-**验收标准：**
-- [x] runtime error 使用直接 stderr，确保用户必见。
-- [x] CLI parse error 和 usage 使用直接 stderr，确保用户必见。
-- [x] `--json` 输出仍是纯 JSON，不混入日志。
-- [x] text report 仍写 stdout。
-
-**验证：**
-- [x] `cargo test -p noloong-agent-core --test extension_conformance_cli`
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --json -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs` stdout 可被 `serde_json` 解析。
-- [x] invalid profile 测试仍能在 stderr 中看到可诊断错误。
-
-**依赖：** 任务 2
-
-**预计涉及文件：**
-- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
-- `crates/noloong-agent-core/tests/extension_conformance_cli.rs`
-
-**预计范围：** S
-
-### 检查点：运行时日志迁移完成
-
-- [x] `rg -n "eprintln!" src crates --glob '*.rs'` 只剩用户输出、示例输出或交互提示。
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent-core --test extension_conformance_cli`
-
-### 阶段 3：迁移测试诊断输出
-
-#### 任务 5：为测试增加幂等 logger 初始化
-
-**描述：** 为会打印 skip 信息的测试增加最小 logger 初始化 helper。测试 logger 使用 `env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).is_test(true).try_init()`，保证 `cargo test` 输出可控且不会因重复初始化失败。
+**描述：** 文档需要明确默认内置工具、文件编辑工具例外、provider reasoning 映射、`extraBody` 覆盖关系，以及 Anthropic 当前推荐使用 effort 而不是 profile-level `budgetTokens`。
 
 **验收标准：**
-- [x] `noloong-agent-core` live test support 有可复用测试 logger 初始化。
-- [x] `noloong-agent` PostgreSQL registry store live test 初始化 logger。
-- [x] `noloong-openai` ChatGPT live test 初始化 logger。
-- [x] helper 不引入全局可变复杂状态，不因并发测试 panic。
+- [x] README profile config 段落包含 `reasoning` 示例。
+- [x] `crates/noloong-agent/docs/ARCHITECTURE.md` 说明默认工具与 manifest patch disable 语义。
+- [x] `crates/noloong-agent-core/docs/ARCHITECTURE.md` 的 Anthropic provider 章节说明 `output_config.effort` 与 adaptive thinking。
+- [x] 文档说明 Chat Completions common thinking switches 属于 root profile convenience mapping，不是 core vendor preset。
+- [x] 文档说明 `extraBody` 覆盖 typed mapping。
 
 **验证：**
-- [x] `cargo test -p noloong-agent-core --tests`
-- [x] `cargo test -p noloong-agent --tests`
-- [x] `cargo test -p noloong-openai --tests`
+- [x] `rg -n "reasoning|reasoning_effort|output_config|default.*tool|enabledTools" README.md crates/noloong-agent/docs crates/noloong-agent-core/docs`
 
-**依赖：** 任务 1
-
-**预计涉及文件：**
-- `crates/noloong-agent-core/tests/support/mod.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_postgres.rs`
-- `crates/noloong-openai/tests/live_chatgpt.rs`
-
-**预计范围：** M
-
-#### 任务 6：迁移 live test skip 诊断
-
-**描述：** 将测试中的 expected skip 信息从 `eprintln!` 改为 `log::info!`。这些 skip 属于预期环境缺失，不应使用 `warn!` 或 `error!`。
-
-**验收标准：**
-- [x] `OPENROUTER_API_KEY`、ChatGPT live env、PostgreSQL env 等缺失提示使用 `log::info!`。
-- [x] TypeScript example dependency 缺失提示使用 `log::info!`。
-- [x] 测试逻辑和 skip 条件不改变。
-- [x] 不使用关键词断言新增低价值测试。
-
-**验证：**
-- [x] `cargo test -p noloong-agent-core --tests`
-- [x] `cargo test -p noloong-agent --tests`
-- [x] `cargo test -p noloong-openai --tests`
-
-**依赖：** 任务 5
-
-**预计涉及文件：**
-- `crates/noloong-agent-core/tests/support/mod.rs`
-- `crates/noloong-agent-core/tests/extension_language_examples.rs`
-- `crates/noloong-agent-core/tests/anthropic_live.rs`
-- `crates/noloong-agent-core/tests/responses_live.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_postgres.rs`
-- `crates/noloong-openai/tests/live_chatgpt.rs`
-
-**预计范围：** M
-
-### 检查点：测试日志迁移完成
-
-- [x] `rg -n "eprintln!" src crates --glob '*.rs'` 输出已人工分类。
-- [x] `cargo test --workspace`
-
-### 阶段 4：文档、清理与完整验证
-
-#### 任务 7：补充 diagnostics 文档
-
-**描述：** 在 README 或现有 CLI 文档中补充诊断日志行为：默认 `info`、`RUST_LOG` 覆盖、release panic 报告和 `RUST_BACKTRACE=1` 的关系。文档要明确日志不会写入机器可读 stdout。
-
-**验收标准：**
-- [x] 文档说明默认日志级别是 `info`。
-- [x] 文档说明可用 `RUST_LOG=noloong=debug` 或 `RUST_LOG=warn` 控制输出。
-- [x] 文档说明 release panic 会由 `human-panic` 生成用户友好的 crash report。
-- [x] 文档说明 `RUST_BACKTRACE=1` 可查看传统 backtrace。
-- [x] 文档说明 JSON/schema/build-info 等 stdout contract 不混入日志。
-
-**验证：**
-- [x] `rg -n "RUST_LOG|human-panic|RUST_BACKTRACE|diagnostic" README.md crates`
-
-**依赖：** 任务 2、任务 3、任务 4
+**依赖：** 任务 1、任务 3、任务 4、任务 5、任务 6
 
 **预计涉及文件：**
 - `README.md`
+- `crates/noloong-agent/docs/ARCHITECTURE.md`
+- `crates/noloong-agent-core/docs/ARCHITECTURE.md`
 
-**预计范围：** XS
+**预计范围：** S
 
-#### 任务 8：最终清理与 clippy
+#### 任务 9：最终验证与 clippy
 
-**描述：** 检查剩余 print 宏和 lint 状态，确保迁移没有把用户输出误改为日志，也没有留下未使用依赖或 clippy warning。
+**描述：** 跑完整 workspace 验证，确保默认工具行为、schema、provider payload 和 docs 更新没有引入 lint warning 或测试回归。
 
 **验收标准：**
-- [x] `rg -n "eprintln!|println!|print!" src crates --glob '*.rs'` 的剩余项均有明确用户输出、机器输出或 example 输出用途。
-- [x] 无 `#[allow(dead_code)]` 或新增 lint 规避。
+- [x] workspace format check 通过。
 - [x] workspace clippy 无 warning。
 - [x] workspace tests 通过。
+- [x] schema check 通过。
+- [x] 无新增 `#[allow(dead_code)]`。
 
 **验证：**
 - [x] `cargo fmt --all --check`
 - [x] `cargo clippy --workspace --all-targets --all-features`
 - [x] `cargo test --workspace`
-- [x] `cargo run -p noloong -- build-info command`
-- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --json -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
+- [x] `rg -n "#\\[allow\\(dead_code\\)\\]" src crates`
 
-**依赖：** 任务 1-7
+**依赖：** 任务 1-8
 
 **预计涉及文件：**
-- `Cargo.toml`
-- `Cargo.lock`
-- `src/main.rs`
-- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
-- live test files
-- `README.md`
+- 全部已修改文件
 
 **预计范围：** S
 
@@ -250,15 +267,18 @@
 
 | 风险 | 影响 | 缓解 |
 |---|---:|---|
-| 日志污染 JSON/stdout contract | 高 | 只把诊断写入 `log`/stderr，保留 report/schema/build-info stdout，并增加 CLI smoke 验证 |
-| 测试重复初始化 logger | 中 | 统一使用 `try_init`，测试 logger 使用 `is_test(true)` |
-| 把交互提示误改为日志 | 中 | ChatGPT login/device/browser prompts 和 examples 明确保留普通输出 |
-| `human-panic` 改变 debug panic 体验 | 低 | 文档说明 `RUST_BACKTRACE=1` 可查看传统 backtrace；仅在二进制入口注册 |
+| 默认启用 `host.exec.write` / `host.exec.terminate` 增加模型可见工具面 | 高 | 依赖现有 approval classifier，危险或控制类操作仍进入 approval；测试覆盖默认可见但不可绕过审批 |
+| 缺省 `enabledTools` 与显式空数组语义混淆 | 中 | serde 使用自定义 default helper；测试同时覆盖字段缺省和显式空数组 |
+| Chat Completions unknown fields 被少数 provider 拒绝 | 中 | typed mapping 只在用户显式配置 `reasoning` 时启用；`extraBody` 可覆盖或移除；文档说明兼容性边界 |
+| Anthropic `thinking=disabled` 对部分新模型可能被拒绝 | 中 | 不把 `enabled=false` 自动映射为 disabled thinking；只有用户显式 `thinking=disabled` 才发送 |
+| `extraBody` 深层 merge 语义复杂化 | 低 | v1 只承诺 top-level override，避免引入难以解释的深层合并规则 |
 
 ## 完成标准
 
-- [x] 所有诊断类输出已迁移到 `log`。
-- [x] `env_logger` 默认 `info`，且 `RUST_LOG` 可覆盖。
-- [x] root CLI 已接入 `human-panic`；conformance CLI 保持轻量 stderr/ stdout contract。
-- [x] 用户输出与机器可读 stdout 未被日志污染。
+- [x] 普通 built-in tools 默认进入新 session runtime。
+- [x] 文件编辑工具仍按现有策略特殊选择，永不同时暴露。
+- [x] Root profile config 可 typed 配置 Chat Completions / Responses / ChatGPT Responses / Anthropic reasoning。
+- [x] Chat Completions 支持 `reasoning_effort` 的 `low|medium|high|xhigh` 映射。
+- [x] Anthropic profile 主路径使用 `output_config.effort`，不新增 profile-level `budgetTokens`。
+- [x] Schema、examples、README、架构文档与实现一致。
 - [x] `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --all-features`、`cargo test --workspace` 全部通过。

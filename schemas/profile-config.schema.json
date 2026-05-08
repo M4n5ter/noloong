@@ -40,6 +40,49 @@
       ],
       "type": "object"
     },
+    "AnthropicProviderReasoningConfig": {
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnthropicProviderReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnthropicProviderThinkingMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AnthropicProviderReasoningEffort": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "type": "string"
+    },
+    "AnthropicProviderThinkingMode": {
+      "enum": [
+        "adaptive",
+        "disabled",
+        "omit"
+      ],
+      "type": "string"
+    },
     "ApprovalPolicy": {
       "oneOf": [
         {
@@ -129,6 +172,16 @@
                 "null"
               ]
             },
+            "reasoning": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChatCompletionsReasoningConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "type": {
               "const": "chat_completions",
               "type": "string"
@@ -181,6 +234,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "reasoning": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResponsesProviderReasoningConfig"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "type": {
@@ -237,6 +300,16 @@
                 "null"
               ]
             },
+            "reasoning": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicProviderReasoningConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "type": {
               "const": "anthropic_messages",
               "type": "string"
@@ -260,6 +333,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "reasoning": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResponsesProviderReasoningConfig"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "type": {
@@ -292,6 +375,34 @@
         "host.exec.terminate",
         "host.exec.list",
         "agent.manifest.propose_patch"
+      ],
+      "type": "string"
+    },
+    "ChatCompletionsReasoningConfig": {
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChatCompletionsReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ChatCompletionsReasoningEffort": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
       ],
       "type": "string"
     },
@@ -1077,6 +1188,58 @@
           "type": "object"
         }
       ]
+    },
+    "ResponsesProviderReasoningConfig": {
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponsesProviderReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "includeEncrypted": {
+          "default": false,
+          "type": "boolean"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponsesProviderReasoningSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ResponsesProviderReasoningEffort": {
+      "enum": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "type": "string"
+    },
+    "ResponsesProviderReasoningSummary": {
+      "enum": [
+        "auto",
+        "concise",
+        "detailed",
+        "none"
+      ],
+      "type": "string"
     },
     "RuntimeProfileConfig": {
       "properties": {

@@ -1,7 +1,8 @@
 use crate::config::{
-    BuiltInProviderConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig, HostProfileConfig,
-    ProfileCompactionConfig, ProfileEventStoreConfig, RegistryStoreConfig, RuntimeProfileConfig,
-    resolve_chatgpt_token_file,
+    AnthropicProviderReasoningConfig, AnthropicProviderThinkingMode, BuiltInProviderConfig,
+    ChatCompletionsReasoningConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig,
+    HostProfileConfig, ProfileCompactionConfig, ProfileEventStoreConfig, RegistryStoreConfig,
+    ResponsesProviderReasoningConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
 };
 use noloong_agent::{
     AgentManifest, AgentSession, ManifestPatch,
@@ -18,7 +19,8 @@ use noloong_agent_core::{
     BoxFuture, CancellationToken, ChatCompletionsProvider, ChatCompletionsProviderConfig,
     ContextCompactionConfig, ContextCompactionMode, ContextCompactor, EventStore, HttpAuthContext,
     HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, InMemoryEventStore, ModelProvider,
-    ResponsesApiProvider, ResponsesApiProviderConfig, SqliteEventStore, SqliteEventStoreConfig,
+    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesReasoningConfig, SqliteEventStore,
+    SqliteEventStoreConfig,
 };
 use noloong_openai::{
     auth::{ChatGptAuthManager, ChatGptTokenStorage, ChatGptTokenStore},
@@ -223,6 +225,7 @@ fn build_provider(
             headers,
             extra_body,
             max_completion_tokens,
+            reasoning,
         } => {
             let mut provider = ChatCompletionsProviderConfig::new(
                 provider_id.clone().unwrap_or_else(|| profile_id.into()),
@@ -237,6 +240,7 @@ fn build_provider(
             for (name, value) in headers {
                 provider = provider.header(name, value);
             }
+            provider = apply_chat_completions_reasoning(provider, reasoning.as_ref());
             for (name, value) in extra_body {
                 provider = provider.extra_body(name, value.clone());
             }
@@ -255,6 +259,7 @@ fn build_provider(
             headers,
             extra_body,
             max_output_tokens,
+            reasoning,
         } => {
             let mut provider = ResponsesApiProviderConfig::new(
                 provider_id.clone().unwrap_or_else(|| profile_id.into()),
@@ -269,6 +274,7 @@ fn build_provider(
             for (name, value) in headers {
                 provider = provider.header(name, value);
             }
+            provider = apply_responses_reasoning(provider, reasoning.as_ref());
             for (name, value) in extra_body {
                 provider = provider.extra_body(name, value.clone());
             }
@@ -287,6 +293,7 @@ fn build_provider(
             headers,
             extra_body,
             max_tokens,
+            reasoning,
         } => {
             let mut provider = AnthropicMessagesProviderConfig::new(
                 provider_id.clone().unwrap_or_else(|| profile_id.into()),
@@ -301,6 +308,7 @@ fn build_provider(
             for (name, value) in headers {
                 provider = provider.header(name, value);
             }
+            provider = apply_anthropic_reasoning(provider, reasoning.as_ref());
             for (name, value) in extra_body {
                 provider = provider.extra_body(name, value.clone());
             }
@@ -315,14 +323,17 @@ fn build_provider(
             provider_id,
             model,
             auth,
+            reasoning,
         } => {
             let provider_id = provider_id.clone().unwrap_or_else(|| profile_id.into());
             let auth_provider = build_chatgpt_auth_provider(auth)?;
-            let provider = noloong_openai::provider::chatgpt_responses_provider(
+            let provider_config = noloong_openai::provider::chatgpt_responses_provider_config(
                 provider_id.clone(),
                 model,
                 Arc::clone(&auth_provider),
-            )?;
+            );
+            let provider_config = apply_responses_reasoning(provider_config, reasoning.as_ref());
+            let provider = ResponsesApiProvider::new(provider_config)?;
             Ok(BuiltProvider {
                 provider: Arc::new(provider),
                 chatgpt_compact: Some(ChatGptCompactSource {
@@ -332,6 +343,94 @@ fn build_provider(
                 }),
             })
         }
+    }
+}
+
+fn apply_chat_completions_reasoning(
+    mut provider: ChatCompletionsProviderConfig,
+    reasoning: Option<&ChatCompletionsReasoningConfig>,
+) -> ChatCompletionsProviderConfig {
+    let Some(reasoning) = reasoning else {
+        return provider;
+    };
+    for (name, value) in chat_completions_reasoning_extra_body(reasoning) {
+        provider = provider.extra_body(name, value);
+    }
+    provider
+}
+
+fn chat_completions_reasoning_extra_body(
+    reasoning: &ChatCompletionsReasoningConfig,
+) -> serde_json::Map<String, serde_json::Value> {
+    let enabled = reasoning.enabled;
+    let mut body = serde_json::Map::new();
+    body.insert("enable_thinking".into(), json!(enabled));
+    body.insert(
+        "thinking".into(),
+        json!({
+            "type": if enabled { "enabled" } else { "disabled" },
+        }),
+    );
+    body.insert("reasoning".into(), json!({ "enabled": enabled }));
+    body.insert("reasoning_split".into(), json!(enabled));
+    body.insert(
+        "chat_template_kwargs".into(),
+        json!({
+            "enable_thinking": enabled,
+        }),
+    );
+    if enabled && let Some(effort) = reasoning.effort {
+        body.insert("reasoning_effort".into(), json!(effort.as_str()));
+    }
+    body
+}
+
+fn apply_responses_reasoning(
+    mut provider: ResponsesApiProviderConfig,
+    reasoning: Option<&ResponsesProviderReasoningConfig>,
+) -> ResponsesApiProviderConfig {
+    let Some(reasoning) = reasoning else {
+        return provider;
+    };
+    if let Some(core_reasoning) = responses_reasoning_config(reasoning) {
+        provider = provider.reasoning(core_reasoning);
+    }
+    if reasoning.enabled && reasoning.include_encrypted {
+        provider = provider.include_encrypted_reasoning(true);
+    }
+    provider
+}
+
+fn responses_reasoning_config(
+    reasoning: &ResponsesProviderReasoningConfig,
+) -> Option<ResponsesReasoningConfig> {
+    if !reasoning.enabled || (reasoning.effort.is_none() && reasoning.summary.is_none()) {
+        return None;
+    }
+    let mut config = ResponsesReasoningConfig::new();
+    if let Some(effort) = reasoning.effort {
+        config = config.effort(effort.into());
+    }
+    if let Some(summary) = reasoning.summary {
+        config = config.summary(summary.into());
+    }
+    Some(config)
+}
+
+fn apply_anthropic_reasoning(
+    mut provider: AnthropicMessagesProviderConfig,
+    reasoning: Option<&AnthropicProviderReasoningConfig>,
+) -> AnthropicMessagesProviderConfig {
+    let Some(reasoning) = reasoning else {
+        return provider;
+    };
+    if let Some(effort) = reasoning.effort {
+        provider = provider.output_effort(effort.into());
+    }
+    match reasoning.thinking {
+        Some(AnthropicProviderThinkingMode::Adaptive) => provider.adaptive_thinking(),
+        Some(AnthropicProviderThinkingMode::Disabled) => provider.disable_thinking(),
+        Some(AnthropicProviderThinkingMode::Omit) | None => provider,
     }
 }
 
@@ -532,17 +631,27 @@ fn opendal_error(error: opendal::Error) -> HostBuildError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS, RuntimeProfile, build_registry};
+    use super::{
+        DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS, RuntimeProfile, apply_anthropic_reasoning,
+        apply_chat_completions_reasoning, apply_responses_reasoning, build_registry,
+        chat_completions_reasoning_extra_body, responses_reasoning_config,
+    };
     use crate::config::{
-        BuiltInProviderConfig, HostProfileConfig, ProfileEventStoreConfig, RuntimeProfileConfig,
+        AnthropicProviderReasoningConfig, AnthropicProviderReasoningEffort,
+        AnthropicProviderThinkingMode, BuiltInProviderConfig, ChatCompletionsReasoningConfig,
+        ChatCompletionsReasoningEffort, HostProfileConfig, ProfileEventStoreConfig,
+        ResponsesProviderReasoningConfig, ResponsesProviderReasoningEffort,
+        ResponsesProviderReasoningSummary, RuntimeProfileConfig,
     };
     use noloong_agent::{
         AgentManifest, AgentSession, ManifestPatch, interaction::AgentRuntimeProfile,
     };
     use noloong_agent_core::{
-        AgentEvent, AgentEventKind, BoxFuture, CancellationToken, ContextCompactionMode,
-        EventStore as _, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
-        SqliteEventStore, SqliteEventStoreConfig, StopReason,
+        AgentEvent, AgentEventKind, AnthropicEffort, AnthropicMessagesProviderConfig,
+        AnthropicThinkingConfig, BoxFuture, CancellationToken, ChatCompletionsProviderConfig,
+        ContextCompactionMode, EventStore as _, ModelProvider, ModelRequest, ModelStreamEvent,
+        ModelStreamSink, ResponsesApiProviderConfig, ResponsesReasoningEffort,
+        ResponsesReasoningSummary, SqliteEventStore, SqliteEventStoreConfig, StopReason,
     };
     use std::{
         path::{Path, PathBuf},
@@ -562,7 +671,7 @@ mod tests {
                 "profiles": [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "chat_completions", "model": "gpt-5.5-mini"}
+                    "provider": {"type": "chat_completions", "model": "gpt-5.4-mini"}
                 }]
             }"#,
         )
@@ -571,6 +680,128 @@ mod tests {
         let registry = build_registry(&config).await.unwrap();
 
         assert_eq!(registry.profile_descriptors()[0].profile_id, "default");
+    }
+
+    #[test]
+    fn chat_completions_reasoning_body_enables_common_switches_and_effort() {
+        let body = chat_completions_reasoning_extra_body(&ChatCompletionsReasoningConfig {
+            enabled: true,
+            effort: Some(ChatCompletionsReasoningEffort::XHigh),
+        });
+
+        assert_eq!(body["enable_thinking"], serde_json::json!(true));
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "enabled" }));
+        assert_eq!(body["reasoning"], serde_json::json!({ "enabled": true }));
+        assert_eq!(body["reasoning_split"], serde_json::json!(true));
+        assert_eq!(
+            body["chat_template_kwargs"],
+            serde_json::json!({ "enable_thinking": true })
+        );
+        assert_eq!(body["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn chat_completions_reasoning_body_disables_common_switches_without_effort() {
+        let body = chat_completions_reasoning_extra_body(&ChatCompletionsReasoningConfig {
+            enabled: false,
+            effort: Some(ChatCompletionsReasoningEffort::High),
+        });
+
+        assert_eq!(body["enable_thinking"], serde_json::json!(false));
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "disabled" }));
+        assert_eq!(body["reasoning"], serde_json::json!({ "enabled": false }));
+        assert_eq!(body["reasoning_split"], serde_json::json!(false));
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn chat_completions_extra_body_can_override_reasoning_mapping() {
+        let provider = apply_chat_completions_reasoning(
+            ChatCompletionsProviderConfig::new("openrouter", "openrouter/free"),
+            Some(&ChatCompletionsReasoningConfig {
+                enabled: true,
+                effort: Some(ChatCompletionsReasoningEffort::High),
+            }),
+        )
+        .extra_body("reasoning_effort", serde_json::json!("low"))
+        .extra_body("reasoning", serde_json::json!({ "enabled": false }));
+
+        assert_eq!(provider.extra_body["reasoning_effort"], "low");
+        assert_eq!(
+            provider.extra_body["reasoning"],
+            serde_json::json!({ "enabled": false })
+        );
+    }
+
+    #[test]
+    fn responses_reasoning_maps_fields_and_respects_disabled() {
+        let reasoning = responses_reasoning_config(&ResponsesProviderReasoningConfig {
+            enabled: true,
+            effort: Some(ResponsesProviderReasoningEffort::High),
+            summary: Some(ResponsesProviderReasoningSummary::Concise),
+            include_encrypted: true,
+        })
+        .expect("enabled reasoning config should render");
+        let disabled = responses_reasoning_config(&ResponsesProviderReasoningConfig {
+            enabled: false,
+            effort: Some(ResponsesProviderReasoningEffort::High),
+            summary: Some(ResponsesProviderReasoningSummary::Concise),
+            include_encrypted: true,
+        });
+
+        assert_eq!(reasoning.effort, Some(ResponsesReasoningEffort::High));
+        assert_eq!(reasoning.summary, Some(ResponsesReasoningSummary::Concise));
+        assert!(disabled.is_none());
+    }
+
+    #[test]
+    fn responses_reasoning_sets_encrypted_include_only_when_enabled() {
+        let enabled = apply_responses_reasoning(
+            ResponsesApiProviderConfig::new("openai", "gpt-5.4-mini"),
+            Some(&ResponsesProviderReasoningConfig {
+                enabled: true,
+                effort: None,
+                summary: None,
+                include_encrypted: true,
+            }),
+        );
+        let disabled = apply_responses_reasoning(
+            ResponsesApiProviderConfig::new("openai", "gpt-5.4-mini"),
+            Some(&ResponsesProviderReasoningConfig {
+                enabled: false,
+                effort: Some(ResponsesProviderReasoningEffort::High),
+                summary: Some(ResponsesProviderReasoningSummary::Detailed),
+                include_encrypted: true,
+            }),
+        );
+
+        assert!(enabled.include_encrypted_reasoning);
+        assert!(enabled.reasoning.is_none());
+        assert!(!disabled.include_encrypted_reasoning);
+        assert!(disabled.reasoning.is_none());
+    }
+
+    #[test]
+    fn anthropic_reasoning_maps_effort_and_thinking_mode() {
+        let provider = apply_anthropic_reasoning(
+            AnthropicMessagesProviderConfig::new("anthropic", "claude-test"),
+            Some(&AnthropicProviderReasoningConfig {
+                effort: Some(AnthropicProviderReasoningEffort::XHigh),
+                thinking: Some(AnthropicProviderThinkingMode::Adaptive),
+            }),
+        );
+        let omitted = apply_anthropic_reasoning(
+            AnthropicMessagesProviderConfig::new("anthropic", "claude-test"),
+            Some(&AnthropicProviderReasoningConfig {
+                effort: None,
+                thinking: Some(AnthropicProviderThinkingMode::Omit),
+            }),
+        );
+
+        assert_eq!(provider.output_effort, Some(AnthropicEffort::XHigh));
+        assert_eq!(provider.thinking, Some(AnthropicThinkingConfig::Adaptive));
+        assert!(omitted.output_effort.is_none());
+        assert!(omitted.thinking.is_none());
     }
 
     #[tokio::test]
@@ -699,7 +930,7 @@ mod tests {
             r#"{
                 "profileId": "default",
                 "displayName": "Default",
-                "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                "provider": {"type": "responses", "model": "gpt-5.4-mini"},
                 "plugins": [{
                     "pluginId": "echo",
                     "displayName": "Echo",
@@ -833,7 +1064,7 @@ mod tests {
     fn responses_provider() -> BuiltInProviderConfig {
         serde_json::from_value(serde_json::json!({
             "type": "responses",
-            "model": "gpt-5.5-mini"
+            "model": "gpt-5.4-mini"
         }))
         .unwrap()
     }
@@ -895,7 +1126,7 @@ mod tests {
         }
 
         fn model_name(&self) -> Option<&str> {
-            Some("gpt-5.5-mini")
+            Some("gpt-5.4-mini")
         }
 
         fn stream_model<'a>(

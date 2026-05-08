@@ -36,11 +36,11 @@ fn agent_session_tool_patch_takes_effect_next_turn() {
         .build()
         .unwrap();
 
-    assert!(runtime.tool("host.exec.start").is_err());
+    assert!(runtime.tool("host.exec.start").is_ok());
 
     let proposal = session
         .proposal_store()
-        .record_pending_proposal(ManifestPatch::EnableTool {
+        .record_pending_proposal(ManifestPatch::DisableTool {
             tool_name: BuiltInToolName::HostExecStart,
         })
         .unwrap();
@@ -59,6 +59,26 @@ fn agent_session_tool_patch_takes_effect_next_turn() {
         .unwrap();
 
     assert_eq!(applied, vec!["manifest-proposal-1".to_string()]);
+    assert!(runtime.tool("host.exec.start").is_err());
+
+    let proposal = session
+        .proposal_store()
+        .record_pending_proposal(ManifestPatch::EnableTool {
+            tool_name: BuiltInToolName::HostExecStart,
+        })
+        .unwrap();
+    session
+        .proposal_store()
+        .approve_proposal(&proposal.proposal_id)
+        .unwrap();
+    let applied = session.apply_approved_manifest_patches().unwrap();
+    let runtime = session
+        .runtime_builder()
+        .with_model_provider(Arc::new(DummyModelProvider))
+        .build()
+        .unwrap();
+
+    assert_eq!(applied, vec!["manifest-proposal-2".to_string()]);
     assert!(runtime.tool("host.exec.start").is_ok());
 }
 
@@ -398,7 +418,7 @@ async fn agent_session_system_prompt_hook_reads_current_manifest() {
 #[tokio::test]
 async fn agent_session_auto_system_prompt_profile_uses_model_context() {
     let session = AgentSession::builder().build();
-    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.5-mini"));
+    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.5"));
     let agent = Agent::builder()
         .with_runtime(Arc::new(
             session
@@ -469,7 +489,7 @@ async fn agent_session_system_prompt_additions_are_injected_and_reported() {
 
 #[test]
 fn agent_session_selects_apply_patch_for_gpt_models() {
-    for model_name in ["gpt-5.5-mini", "GPT-5.5-mini"] {
+    for model_name in ["gpt-5.4-mini", "GPT-5.4-mini"] {
         let runtime = AgentSession::builder()
             .build()
             .runtime_builder()
@@ -508,14 +528,14 @@ fn agent_session_file_edit_policy_overrides_model_selection() {
 
     let write_file = runtime_with_file_edit_policy(
         FileEditToolPolicy::WriteFile,
-        NamedModelProvider::new("provider", "gpt-5.5-mini"),
+        NamedModelProvider::new("provider", "gpt-5.4-mini"),
     );
     assert!(write_file.tool("write_file").is_ok());
     assert!(write_file.tool("apply_patch").is_err());
 
     let disabled = runtime_with_file_edit_policy(
         FileEditToolPolicy::Disabled,
-        NamedModelProvider::new("provider", "gpt-5.5-mini"),
+        NamedModelProvider::new("provider", "gpt-5.4-mini"),
     );
     assert!(disabled.tool("write_file").is_err());
     assert!(disabled.tool("apply_patch").is_err());
@@ -523,7 +543,7 @@ fn agent_session_file_edit_policy_overrides_model_selection() {
 
 #[tokio::test]
 async fn agent_session_model_request_never_exposes_both_file_edit_tools() {
-    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.5-mini"));
+    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.4-mini"));
     let agent = Agent::builder()
         .with_runtime(Arc::new(
             AgentSession::builder()
@@ -552,7 +572,7 @@ fn agent_session_file_edit_tool_names_are_reserved() {
         .with_tool(Arc::new(ReservedNameTool::new("write_file")))
         .with_model_provider(Arc::new(NamedModelProvider::new(
             "provider",
-            "gpt-5.5-mini",
+            "gpt-5.4-mini",
         )))
         .build()
         .unwrap();

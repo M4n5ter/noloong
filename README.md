@@ -60,7 +60,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> noloong_agent_core::Result<()> {
     let provider = ChatCompletionsProvider::new(
-        ChatCompletionsProviderConfig::new("openai-chat", "gpt-5.5-mini")
+        ChatCompletionsProviderConfig::new("openai-chat", "gpt-5.4-mini")
             .api_key_env("OPENAI_API_KEY")
             .max_completion_tokens(512),
     )?;
@@ -76,7 +76,7 @@ async fn main() -> noloong_agent_core::Result<()> {
 }
 ```
 
-Provider-specific compatible APIs should be configured by the caller through `base_url`, `api_key_env`, headers, and `extra_body`; the core provider intentionally does not hardcode vendor/model presets. OpenAI Chat Completions uses `max_completion_tokens` for the generated-token upper bound, including visible output and reasoning tokens. Some compatible providers still require their legacy or provider-specific field names, so those overrides should stay in caller-owned `extra_body`.
+Provider-specific compatible APIs should be configured by the caller through `base_url`, `api_key_env`, headers, and `extra_body`; the core provider intentionally does not hardcode vendor/model presets. OpenAI Chat Completions uses `max_completion_tokens` for the generated-token upper bound, including visible output and reasoning tokens. Some compatible providers still require their legacy or provider-specific field names, so those overrides should stay in caller-owned `extra_body`. The root `noloong` profile config adds a product-layer `reasoning` convenience field for common provider switches, but it still maps to generic provider config and keeps `extraBody` as the final override.
 
 Built-in OpenAI Responses API provider:
 
@@ -90,7 +90,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> noloong_agent_core::Result<()> {
     let provider = ResponsesApiProvider::new(
-        ResponsesApiProviderConfig::new("openai-responses", "gpt-5.5-mini")
+        ResponsesApiProviderConfig::new("openai-responses", "gpt-5.4-mini")
             .api_key_env("OPENAI_API_KEY")
             .max_output_tokens(1024)
             .reasoning(
@@ -116,17 +116,18 @@ Built-in Anthropic Messages provider:
 
 ```rust
 use noloong_agent_core::{
-    AgentRuntime, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
+    AgentRuntime, AnthropicEffort, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
 };
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> noloong_agent_core::Result<()> {
     let provider = AnthropicMessagesProvider::new(
-        AnthropicMessagesProviderConfig::new("anthropic", "claude-sonnet-4-5")
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-sonnet-4-6")
             .api_key_env("ANTHROPIC_API_KEY")
             .max_tokens(2048)
-            .enable_thinking(1024),
+            .output_effort(AnthropicEffort::Medium)
+            .adaptive_thinking(),
     )?;
 
     let runtime = AgentRuntime::builder()
@@ -169,10 +170,19 @@ Root profile config has a checked-in JSON Schema at [`schemas/profile-config.sch
   "profiles": [{
     "profileId": "default",
     "displayName": "Default",
-    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+    "provider": {
+      "type": "responses",
+      "model": "gpt-5.4-mini",
+      "reasoning": {
+        "effort": "medium",
+        "summary": "auto"
+      }
+    }
   }]
 }
 ```
+
+Provider `reasoning` is typed by API format. Chat Completions supports `enabled` plus `effort` and maps common compatible thinking switches, including `reasoning_effort`. Responses and ChatGPT subscription profiles map to the Responses API reasoning object. Anthropic Messages maps `effort` to `output_config.effort` and can opt into `thinking: "adaptive"` or `thinking: "disabled"`. In every provider, `extraBody` is applied last so advanced users can override the generated top-level fields.
 
 Regenerate or check the artifact with the root CLI:
 
@@ -208,7 +218,7 @@ The TS AI SDK stdio provider example lives in `examples/extensions/ai-sdk-provid
 ```bash
 cd examples/extensions/ai-sdk-provider
 npm install
-OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.5-mini npm run start
+OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.4-mini npm run start
 ```
 
 The Rust side for launching that provider is:
@@ -239,7 +249,7 @@ The root `noloong` profile config has two separate persistence layers. `registry
   "profiles": [{
     "profileId": "default",
     "displayName": "Default",
-    "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+    "provider": {"type": "responses", "model": "gpt-5.4-mini"},
     "eventStore": {"type": "sqlite", "databaseUrl": "sqlite:target/noloong-events.sqlite"}
   }]
 }
@@ -309,7 +319,7 @@ Provider mapping references:
 
 The conformance source of truth is [`crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md`](crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md). Update that matrix whenever a core capability, invariant, or verification command changes.
 
-The product-layer agent runtime lives in [`crates/noloong-agent`](crates/noloong-agent). Its architecture notes are in [`crates/noloong-agent/docs/ARCHITECTURE.md`](crates/noloong-agent/docs/ARCHITECTURE.md). The first product-layer execution primitive is a host-first background command lifecycle with `host.exec.start/read/wait/write/terminate/list`; `host.exec.start` uses a short foreground window before falling back to a background job handle.
+The product-layer agent runtime lives in [`crates/noloong-agent`](crates/noloong-agent). Its architecture notes are in [`crates/noloong-agent/docs/ARCHITECTURE.md`](crates/noloong-agent/docs/ARCHITECTURE.md). The first product-layer execution primitive is a host-first background command lifecycle with `host.exec.start/read/wait/write/terminate/list`; `host.exec.start` uses a short foreground window before falling back to a background job handle. Rust built-in tools are enabled by default in new manifests and can be removed with `disable_tool` manifest patches. File editing remains policy-driven: `fileEditToolPolicy` selects exactly one of `apply_patch` or `write_file`, or disables both.
 
 ```bash
 cargo fmt --check

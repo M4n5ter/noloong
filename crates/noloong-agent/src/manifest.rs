@@ -16,7 +16,7 @@ pub struct AgentManifest {
     pub locale: Locale,
     #[serde(default)]
     pub system_prompt: AgentSystemPrompt,
-    #[serde(default)]
+    #[serde(default = "BuiltInToolName::default_enabled")]
     pub enabled_tools: BTreeSet<BuiltInToolName>,
     #[serde(default)]
     pub file_edit_tool_policy: FileEditToolPolicy,
@@ -32,7 +32,7 @@ impl AgentManifest {
         Self {
             locale: Locale::En,
             system_prompt,
-            enabled_tools: BTreeSet::new(),
+            enabled_tools: BuiltInToolName::default_enabled(),
             file_edit_tool_policy: FileEditToolPolicy::default(),
             approval_policy: ApprovalPolicy::RequireApproval,
             plugins: BTreeMap::new(),
@@ -499,6 +499,12 @@ define_built_in_tool_names! {
 impl std::fmt::Display for BuiltInToolName {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+impl BuiltInToolName {
+    pub fn default_enabled() -> BTreeSet<Self> {
+        Self::ALL.iter().copied().collect()
     }
 }
 

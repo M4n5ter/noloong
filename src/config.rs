@@ -1,6 +1,8 @@
 use jsonc_parser::{ParseOptions, parse_to_serde_value};
 use noloong_agent::{AgentPluginDeclaration, ManifestPatch};
-use noloong_agent_core::ContextCompactionMode;
+use noloong_agent_core::{
+    AnthropicEffort, ContextCompactionMode, ResponsesReasoningEffort, ResponsesReasoningSummary,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -115,6 +117,8 @@ pub enum BuiltInProviderConfig {
         extra_body: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_completion_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<ChatCompletionsReasoningConfig>,
     },
     Responses {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +134,8 @@ pub enum BuiltInProviderConfig {
         extra_body: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<ResponsesProviderReasoningConfig>,
     },
     AnthropicMessages {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +151,8 @@ pub enum BuiltInProviderConfig {
         extra_body: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<AnthropicProviderReasoningConfig>,
     },
     ChatgptResponses {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,7 +160,139 @@ pub enum BuiltInProviderConfig {
         model: String,
         #[serde(default)]
         auth: ChatGptAuthConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<ResponsesProviderReasoningConfig>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatCompletionsReasoningConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ChatCompletionsReasoningEffort>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompletionsReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl ChatCompletionsReasoningEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsesProviderReasoningConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ResponsesProviderReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ResponsesProviderReasoningSummary>,
+    #[serde(default)]
+    pub include_encrypted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesProviderReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl From<ResponsesProviderReasoningEffort> for ResponsesReasoningEffort {
+    fn from(effort: ResponsesProviderReasoningEffort) -> Self {
+        match effort {
+            ResponsesProviderReasoningEffort::Minimal => Self::Minimal,
+            ResponsesProviderReasoningEffort::Low => Self::Low,
+            ResponsesProviderReasoningEffort::Medium => Self::Medium,
+            ResponsesProviderReasoningEffort::High => Self::High,
+            ResponsesProviderReasoningEffort::XHigh => Self::XHigh,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesProviderReasoningSummary {
+    Auto,
+    Concise,
+    Detailed,
+    None,
+}
+
+impl From<ResponsesProviderReasoningSummary> for ResponsesReasoningSummary {
+    fn from(summary: ResponsesProviderReasoningSummary) -> Self {
+        match summary {
+            ResponsesProviderReasoningSummary::Auto => Self::Auto,
+            ResponsesProviderReasoningSummary::Concise => Self::Concise,
+            ResponsesProviderReasoningSummary::Detailed => Self::Detailed,
+            ResponsesProviderReasoningSummary::None => Self::None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnthropicProviderReasoningConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<AnthropicProviderReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<AnthropicProviderThinkingMode>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicProviderReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+}
+
+impl From<AnthropicProviderReasoningEffort> for AnthropicEffort {
+    fn from(effort: AnthropicProviderReasoningEffort) -> Self {
+        match effort {
+            AnthropicProviderReasoningEffort::Low => Self::Low,
+            AnthropicProviderReasoningEffort::Medium => Self::Medium,
+            AnthropicProviderReasoningEffort::High => Self::High,
+            AnthropicProviderReasoningEffort::XHigh => Self::XHigh,
+            AnthropicProviderReasoningEffort::Max => Self::Max,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicProviderThinkingMode {
+    Adaptive,
+    Disabled,
+    Omit,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -419,8 +559,11 @@ fn parse_csv<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BuiltInProviderConfig, ChatGptAuthConfig, HostProfileConfig, ProfileCompactionConfig,
-        ProfileEventStoreConfig, RuntimeProfileConfig, resolve_chatgpt_token_file_with_env,
+        AnthropicProviderReasoningEffort, AnthropicProviderThinkingMode, BuiltInProviderConfig,
+        ChatCompletionsReasoningEffort, ChatGptAuthConfig, HostProfileConfig,
+        ProfileCompactionConfig, ProfileEventStoreConfig, ResponsesProviderReasoningEffort,
+        ResponsesProviderReasoningSummary, RuntimeProfileConfig,
+        resolve_chatgpt_token_file_with_env,
     };
     use crate::test_support::{remove_temp_file, write_temp_file};
     use noloong_agent_core::ContextCompactionMode;
@@ -435,7 +578,7 @@ mod tests {
                     "displayName": "Default",
                     "provider": {
                         "type": "chat_completions",
-                        "model": "gpt-5.5-mini",
+                        "model": "gpt-5.4-mini",
                         "apiKeyEnv": "OPENROUTER_API_KEY"
                     }
                 }]
@@ -455,6 +598,111 @@ mod tests {
     }
 
     #[test]
+    fn profile_config_loads_chat_completions_reasoning() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {
+                    "type": "chat_completions",
+                    "model": "gpt-5.4-mini",
+                    "reasoning": {
+                        "enabled": true,
+                        "effort": "xhigh"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::ChatCompletions {
+            reasoning: Some(reasoning),
+            ..
+        } = config.provider
+        else {
+            panic!("expected Chat Completions reasoning");
+        };
+        assert!(reasoning.enabled);
+        assert_eq!(
+            reasoning.effort,
+            Some(ChatCompletionsReasoningEffort::XHigh)
+        );
+    }
+
+    #[test]
+    fn profile_config_loads_responses_reasoning() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {
+                    "type": "responses",
+                    "model": "gpt-5.4-mini",
+                    "reasoning": {
+                        "effort": "medium",
+                        "summary": "detailed",
+                        "includeEncrypted": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::Responses {
+            reasoning: Some(reasoning),
+            ..
+        } = config.provider
+        else {
+            panic!("expected Responses reasoning");
+        };
+        assert!(reasoning.enabled);
+        assert_eq!(
+            reasoning.effort,
+            Some(ResponsesProviderReasoningEffort::Medium)
+        );
+        assert_eq!(
+            reasoning.summary,
+            Some(ResponsesProviderReasoningSummary::Detailed)
+        );
+        assert!(reasoning.include_encrypted);
+    }
+
+    #[test]
+    fn profile_config_loads_anthropic_reasoning() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {
+                    "type": "anthropic_messages",
+                    "model": "claude-opus-4-7",
+                    "reasoning": {
+                        "effort": "max",
+                        "thinking": "adaptive"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::AnthropicMessages {
+            reasoning: Some(reasoning),
+            ..
+        } = config.provider
+        else {
+            panic!("expected Anthropic reasoning");
+        };
+        assert_eq!(
+            reasoning.effort,
+            Some(AnthropicProviderReasoningEffort::Max)
+        );
+        assert_eq!(
+            reasoning.thinking,
+            Some(AnthropicProviderThinkingMode::Adaptive)
+        );
+    }
+
+    #[test]
     fn profile_config_load_reads_json_file() {
         let path = write_temp_file(
             "profile-json",
@@ -463,7 +711,7 @@ mod tests {
                 "profiles": [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+                    "provider": {"type": "responses", "model": "gpt-5.4-mini"}
                 }]
             }"#,
         );
@@ -484,7 +732,7 @@ mod tests {
                 "profiles": [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                    "provider": {"type": "responses", "model": "gpt-5.4-mini"},
                 }],
             }"#,
         );
@@ -515,7 +763,7 @@ mod tests {
                 profiles: [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+                    "provider": {"type": "responses", "model": "gpt-5.4-mini"}
                 }]
             }"#,
         );
@@ -532,7 +780,7 @@ mod tests {
             r#"{
                 "profileId": "default",
                 "displayName": "Default",
-                "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                "provider": {"type": "responses", "model": "gpt-5.4-mini"},
                 "eventStore": {
                     "type": "sqlite",
                     "databaseUrl": "sqlite:target/noloong-events.sqlite"
@@ -556,7 +804,7 @@ mod tests {
             r#"{
                 "profileId": "default",
                 "displayName": "Default",
-                "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                "provider": {"type": "responses", "model": "gpt-5.4-mini"},
                 "eventStore": {
                     "type": "sqlite",
                     "databaseUrl": "sqlite:target/noloong-events.sqlite",
@@ -599,7 +847,7 @@ mod tests {
                 "profiles": [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.5-mini"}
+                    "provider": {"type": "responses", "model": "gpt-5.4-mini"}
                 }]
             }"#,
         )
@@ -615,7 +863,7 @@ mod tests {
                 "profiles": [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.5-mini"},
+                    "provider": {"type": "responses", "model": "gpt-5.4-mini"},
                     "plugins": [{
                         "pluginId": "echo",
                         "displayName": "Echo",

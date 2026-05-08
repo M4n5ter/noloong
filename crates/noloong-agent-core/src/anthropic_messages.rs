@@ -43,6 +43,7 @@ pub struct AnthropicMessagesProviderConfig {
     pub stream_reconnect: SseReconnectConfig,
     pub anthropic_version: Option<String>,
     pub beta_headers: Vec<String>,
+    pub output_effort: Option<AnthropicEffort>,
     pub thinking: Option<AnthropicThinkingConfig>,
     pub allow_files_api_media: bool,
 }
@@ -54,8 +55,33 @@ pub enum AnthropicAuthScheme {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnthropicThinkingConfig {
-    pub budget_tokens: u64,
+pub enum AnthropicEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Custom(String),
+}
+
+impl AnthropicEffort {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Custom(effort) => effort,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnthropicThinkingConfig {
+    Manual { budget_tokens: u64 },
+    Adaptive,
+    Disabled,
 }
 
 impl Debug for AnthropicMessagesProviderConfig {
@@ -77,6 +103,7 @@ impl Debug for AnthropicMessagesProviderConfig {
             .field("stream_reconnect", &self.stream_reconnect)
             .field("anthropic_version", &self.anthropic_version)
             .field("beta_headers", &self.beta_headers)
+            .field("output_effort", &self.output_effort)
             .field("thinking", &self.thinking)
             .field("allow_files_api_media", &self.allow_files_api_media)
             .finish()
@@ -101,6 +128,7 @@ impl AnthropicMessagesProviderConfig {
             stream_reconnect: SseReconnectConfig::default(),
             anthropic_version: Some(DEFAULT_ANTHROPIC_VERSION.into()),
             beta_headers: Vec::new(),
+            output_effort: None,
             thinking: None,
             allow_files_api_media: false,
         }
@@ -182,8 +210,23 @@ impl AnthropicMessagesProviderConfig {
         self
     }
 
+    pub fn output_effort(mut self, effort: AnthropicEffort) -> Self {
+        self.output_effort = Some(effort);
+        self
+    }
+
     pub fn enable_thinking(mut self, budget_tokens: u64) -> Self {
-        self.thinking = Some(AnthropicThinkingConfig { budget_tokens });
+        self.thinking = Some(AnthropicThinkingConfig::Manual { budget_tokens });
+        self
+    }
+
+    pub fn adaptive_thinking(mut self) -> Self {
+        self.thinking = Some(AnthropicThinkingConfig::Adaptive);
+        self
+    }
+
+    pub fn disable_thinking(mut self) -> Self {
+        self.thinking = Some(AnthropicThinkingConfig::Disabled);
         self
     }
 
@@ -324,14 +367,16 @@ fn build_anthropic_payload(
     if let Some(temperature) = config.temperature {
         payload.insert("temperature".into(), json!(temperature));
     }
-    if let Some(thinking) = &config.thinking {
+    if let Some(effort) = &config.output_effort {
         payload.insert(
-            "thinking".into(),
+            "output_config".into(),
             json!({
-                "type": "enabled",
-                "budget_tokens": thinking.budget_tokens,
+                "effort": effort.as_str(),
             }),
         );
+    }
+    if let Some(thinking) = &config.thinking {
+        payload.insert("thinking".into(), anthropic_thinking_to_value(thinking));
     }
     if !request.tools.is_empty() {
         payload.insert(
@@ -348,6 +393,21 @@ fn build_anthropic_payload(
     );
     payload.extend(config.extra_body.clone());
     Ok(Value::Object(payload))
+}
+
+fn anthropic_thinking_to_value(thinking: &AnthropicThinkingConfig) -> Value {
+    match thinking {
+        AnthropicThinkingConfig::Manual { budget_tokens } => json!({
+            "type": "enabled",
+            "budget_tokens": budget_tokens,
+        }),
+        AnthropicThinkingConfig::Adaptive => json!({
+            "type": "adaptive",
+        }),
+        AnthropicThinkingConfig::Disabled => json!({
+            "type": "disabled",
+        }),
+    }
 }
 
 fn render_system_messages(messages: &[AgentMessage]) -> Result<Option<Value>> {

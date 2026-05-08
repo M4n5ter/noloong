@@ -1,5 +1,5 @@
 use noloong_agent_core::{
-    AgentMessage, AgentRuntime, AnthropicAuthScheme, AnthropicMessagesProvider,
+    AgentMessage, AgentRuntime, AnthropicAuthScheme, AnthropicEffort, AnthropicMessagesProvider,
     AnthropicMessagesProviderConfig, CancellationToken, ContentBlock, MediaBlock, MediaKind,
     MessageRole, ModelProvider, ModelRequest, ModelStreamEvent, Result, SseReconnectConfig,
     StopReason, ThinkingBlock, ToolCall, ToolExecutionMode, ToolOutput, ToolPermissionRequirement,
@@ -365,6 +365,45 @@ async fn payload_omits_thinking_config_by_default() -> Result<()> {
     .await?;
 
     assert!(body.json.get("thinking").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_sends_output_effort() -> Result<()> {
+    let body = captured_request_body(
+        simple_request(),
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .without_api_key()
+            .output_effort(AnthropicEffort::Medium),
+        text_response("ok"),
+    )
+    .await?;
+
+    assert_eq!(body.json["output_config"]["effort"], "medium");
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_sends_adaptive_and_disabled_thinking_modes() -> Result<()> {
+    let adaptive = captured_request_body(
+        simple_request(),
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .without_api_key()
+            .adaptive_thinking(),
+        text_response("ok"),
+    )
+    .await?;
+    let disabled = captured_request_body(
+        simple_request(),
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .without_api_key()
+            .disable_thinking(),
+        text_response("ok"),
+    )
+    .await?;
+
+    assert_eq!(adaptive.json["thinking"]["type"], "adaptive");
+    assert_eq!(disabled.json["thinking"]["type"], "disabled");
     Ok(())
 }
 

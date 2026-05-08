@@ -1199,6 +1199,7 @@ Responses reasoning request config 是显式 opt-in：
 - `stream_idle_timeout`
 - `anthropic_version`
 - `beta_headers`
+- `output_effort`
 - `thinking`
 - `allow_files_api_media`
 
@@ -1280,7 +1281,7 @@ tool `input_json_delta` 如果不是合法 JSON，会保留为 string，和 Chat
 
 ### Anthropic Thinking Replay
 
-`enable_thinking(budget_tokens)` 才会在 request body 中发送 Anthropic extended thinking config。provider 默认不请求 thinking。
+`output_effort(...)` 会在 request body 中发送 `output_config.effort`。这是当前 Claude API 推荐的整体推理/输出强度控制方式，会影响正文、工具调用和 thinking token 使用。`adaptive_thinking()` 会发送 `thinking: {"type":"adaptive"}`，`disable_thinking()` 会发送 `thinking: {"type":"disabled"}`。`enable_thinking(budget_tokens)` 仍保留为 manual extended thinking 的低层兼容入口，会发送 `thinking: {"type":"enabled","budget_tokens": N}`，但对新版 Claude 模型不再是推荐主路径。provider 默认不请求 thinking，也不设置 effort。
 
 每个 Anthropic thinking delta 会携带 replay descriptor：
 

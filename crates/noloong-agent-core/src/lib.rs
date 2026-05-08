@@ -22,8 +22,8 @@ mod types;
 
 pub use agent::{Agent, AgentBuilder};
 pub use anthropic_messages::{
-    AnthropicAuthScheme, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
-    AnthropicThinkingConfig,
+    AnthropicAuthScheme, AnthropicEffort, AnthropicMessagesProvider,
+    AnthropicMessagesProviderConfig, AnthropicThinkingConfig,
 };
 pub use chat_completions::{
     ChatAudioFormat, ChatCompletionsProvider, ChatCompletionsProviderConfig, ChatImageDetail,
