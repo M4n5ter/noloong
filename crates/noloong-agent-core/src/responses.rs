@@ -4,6 +4,7 @@ use crate::provider_utils::{
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
+use crate::tool_names::ProviderToolNameCodec;
 use crate::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, HttpAuthContext, HttpAuthHeader,
     HttpAuthProvider, HttpAuthRefreshContext, MediaBlock, MediaEncoding, MediaKind, MediaSource,
@@ -473,10 +474,15 @@ impl ModelProvider for ResponsesApiProvider {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
             let render_config = ResponsesApiRequestRenderConfig::from(&self.config);
-            let payload = render_responses_api_request(&render_config, &request)?;
+            let tool_names = ProviderToolNameCodec::new(&request.tools);
+            let payload = render_responses_api_request_with_tool_names(
+                &render_config,
+                &tool_names,
+                &request,
+            )?;
 
             let mut events = Vec::new();
-            let mut state = ResponsesStreamState::new(&self.config, &request);
+            let mut state = ResponsesStreamState::new(&self.config, &request, tool_names);
             let mut attempt = 0_u32;
             let mut refreshed_headers = None;
             loop {
@@ -544,8 +550,17 @@ pub fn render_responses_api_request(
     config: &ResponsesApiRequestRenderConfig,
     request: &ModelRequest,
 ) -> Result<Value> {
+    let tool_names = ProviderToolNameCodec::new(&request.tools);
+    render_responses_api_request_with_tool_names(config, &tool_names, request)
+}
+
+fn render_responses_api_request_with_tool_names(
+    config: &ResponsesApiRequestRenderConfig,
+    tool_names: &ProviderToolNameCodec,
+    request: &ModelRequest,
+) -> Result<Value> {
     let mut payload = Map::new();
-    let rendered_messages = render_responses_messages(config, &request.messages)?;
+    let rendered_messages = render_responses_messages(config, tool_names, &request.messages)?;
     payload.insert("model".into(), Value::String(config.model.clone()));
     payload.insert("input".into(), Value::Array(rendered_messages.input));
     payload.insert("stream".into(), Value::Bool(true));
@@ -578,7 +593,7 @@ pub fn render_responses_api_request(
     {
         payload.insert("instructions".into(), Value::String(instructions));
     }
-    let tools = to_responses_tools(config, &request.tools);
+    let tools = to_responses_tools(config, tool_names, &request.tools)?;
     if !tools.is_empty() {
         payload.insert("tools".into(), Value::Array(tools));
     }
@@ -604,6 +619,7 @@ struct RenderedResponsesMessages {
 
 fn render_responses_messages(
     config: &ResponsesApiRequestRenderConfig,
+    tool_names: &ProviderToolNameCodec,
     messages: &[AgentMessage],
 ) -> Result<RenderedResponsesMessages> {
     let mut input = Vec::new();
@@ -627,7 +643,7 @@ fn render_responses_messages(
                 "content": render_user_content(config, &message.content)?,
             })),
             MessageRole::Assistant => {
-                input.extend(render_assistant_items(config, message)?);
+                input.extend(render_assistant_items(config, tool_names, message)?);
             }
             MessageRole::ToolResult => {
                 input.extend(render_tool_result_items(&message.content)?);
@@ -713,6 +729,7 @@ fn render_user_content(
 
 fn render_assistant_items(
     config: &ResponsesApiRequestRenderConfig,
+    tool_names: &ProviderToolNameCodec,
     message: &AgentMessage,
 ) -> Result<Vec<Value>> {
     let mut items = Vec::new();
@@ -729,7 +746,7 @@ fn render_assistant_items(
             }
             ContentBlock::ToolCall { tool_call } => {
                 flush_assistant_text_message(&mut items, &mut text_parts);
-                items.push(function_call_item(tool_call));
+                items.push(function_call_item(config, tool_names, tool_call)?);
             }
             ContentBlock::Media { .. } => {
                 return Err(AgentCoreError::Provider(
@@ -843,14 +860,18 @@ fn output_text_part(text: String) -> Value {
     json!({ "type": "output_text", "text": text, "annotations": [] })
 }
 
-fn function_call_item(tool_call: &ToolCall) -> Value {
-    json!({
+fn function_call_item(
+    config: &ResponsesApiRequestRenderConfig,
+    tool_names: &ProviderToolNameCodec,
+    tool_call: &ToolCall,
+) -> Result<Value> {
+    Ok(json!({
         "type": "function_call",
         "call_id": tool_call.id,
-        "name": tool_call.name,
+        "name": tool_names.provider_name(&tool_call.name, &config.provider_id, &config.model)?,
         "arguments": tool_call.arguments.to_string(),
         "status": "completed",
-    })
+    }))
 }
 
 fn media_to_responses_input_part(
@@ -966,19 +987,27 @@ fn data_url(media: &MediaBlock, data: &str, label: &str) -> Result<String> {
     Ok(format!("data:{mime_type};base64,{data}"))
 }
 
-fn to_responses_tools(config: &ResponsesApiRequestRenderConfig, tools: &[ToolSpec]) -> Vec<Value> {
+fn to_responses_tools(
+    config: &ResponsesApiRequestRenderConfig,
+    tool_names: &ProviderToolNameCodec,
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>> {
     let mut rendered = tools
         .iter()
-        .map(|tool| to_responses_function_tool(config, tool))
-        .collect::<Vec<_>>();
+        .map(|tool| to_responses_function_tool(config, tool_names, tool))
+        .collect::<Result<Vec<_>>>()?;
     rendered.extend(config.native_tools.clone());
-    rendered
+    Ok(rendered)
 }
 
-fn to_responses_function_tool(config: &ResponsesApiRequestRenderConfig, tool: &ToolSpec) -> Value {
+fn to_responses_function_tool(
+    config: &ResponsesApiRequestRenderConfig,
+    tool_names: &ProviderToolNameCodec,
+    tool: &ToolSpec,
+) -> Result<Value> {
     let mut value = json!({
         "type": "function",
-        "name": tool.name,
+        "name": tool_names.provider_name(&tool.name, &config.provider_id, &config.model)?,
         "description": tool.description,
         "parameters": tool.input_schema,
     });
@@ -987,7 +1016,7 @@ fn to_responses_function_tool(config: &ResponsesApiRequestRenderConfig, tool: &T
     {
         object.insert("strict".into(), Value::Bool(strict));
     }
-    value
+    Ok(value)
 }
 
 fn replay_reasoning(
@@ -1030,6 +1059,7 @@ struct ResponsesStreamState {
     model: String,
     run_id: String,
     turn_id: u64,
+    tool_names: ProviderToolNameCodec,
     started: bool,
     tool_calls: BTreeMap<String, PartialResponsesToolCall>,
     tool_keys_by_output_index: BTreeMap<u64, String>,
@@ -1042,12 +1072,17 @@ struct ResponsesStreamState {
 }
 
 impl ResponsesStreamState {
-    fn new(config: &ResponsesApiProviderConfig, request: &ModelRequest) -> Self {
+    fn new(
+        config: &ResponsesApiProviderConfig,
+        request: &ModelRequest,
+        tool_names: ProviderToolNameCodec,
+    ) -> Self {
         Self {
             provider_id: config.id.clone(),
             model: config.model.clone(),
             run_id: request.run_id.clone(),
             turn_id: request.turn_id,
+            tool_names,
             ..Self::default()
         }
     }
@@ -1386,7 +1421,7 @@ impl ResponsesStreamState {
         let Some(tool_call) = self.tool_calls.get(&key) else {
             return Ok(Vec::new());
         };
-        let event = tool_call.to_event(&key);
+        let event = tool_call.to_event(&key, &self.tool_names, &self.provider_id, &self.model)?;
         let mut events = self.ensure_started();
         events.push(event);
         Ok(events)
@@ -1454,19 +1489,25 @@ struct PartialResponsesToolCall {
 }
 
 impl PartialResponsesToolCall {
-    fn to_event(&self, key: &str) -> ModelStreamEvent {
+    fn to_event(
+        &self,
+        key: &str,
+        tool_names: &ProviderToolNameCodec,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ModelStreamEvent> {
         let arguments = parse_tool_arguments(&self.arguments_json);
-        ModelStreamEvent::ToolCall {
+        Ok(ModelStreamEvent::ToolCall {
             tool_call: ToolCall {
                 id: if self.id.is_empty() {
                     key.into()
                 } else {
                     self.id.clone()
                 },
-                name: self.name.clone(),
+                name: tool_names.canonical_name(&self.name, provider_id, model)?,
                 arguments,
             },
-        }
+        })
     }
 }
 

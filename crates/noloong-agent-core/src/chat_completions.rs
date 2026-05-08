@@ -4,6 +4,7 @@ use crate::provider_utils::{
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
+use crate::tool_names::ProviderToolNameCodec;
 use crate::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, HttpAuthContext, HttpAuthHeader,
     HttpAuthProvider, HttpAuthRefreshContext, MediaBlock, MediaDelta, MediaEncoding, MediaKind,
@@ -366,11 +367,12 @@ impl ModelProvider for ChatCompletionsProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
-            let payload = build_chat_payload(&self.config, &request)?;
+            let tool_names = ProviderToolNameCodec::new(&request.tools);
+            let payload = build_chat_payload(&self.config, &tool_names, &request)?;
             let stream_id = format!("chat-completions-{}-{}", request.run_id, request.turn_id);
 
             let mut events = Vec::new();
-            let mut state = ChatStreamState::new(&self.config);
+            let mut state = ChatStreamState::new(&self.config, tool_names);
             let mut started = false;
             let endpoint = self.endpoint();
             let mut attempt = 0_u32;
@@ -444,7 +446,7 @@ impl ModelProvider for ChatCompletionsProvider {
                     Err(error) => return Err(error),
                 }
             }
-            for event in state.finish_events() {
+            for event in state.finish_events()? {
                 emit_model_stream_event(&stream, &mut events, event).await?;
             }
             Ok(events)
@@ -454,13 +456,14 @@ impl ModelProvider for ChatCompletionsProvider {
 
 fn build_chat_payload(
     config: &ChatCompletionsProviderConfig,
+    tool_names: &ProviderToolNameCodec,
     request: &ModelRequest,
 ) -> Result<Value> {
     let mut payload = Map::new();
     payload.insert("model".into(), Value::String(config.model.clone()));
     payload.insert(
         "messages".into(),
-        Value::Array(to_chat_messages(config, request)?),
+        Value::Array(to_chat_messages(config, tool_names, request)?),
     );
     payload.insert("stream".into(), Value::Bool(true));
     if config.include_usage {
@@ -497,7 +500,10 @@ fn build_chat_payload(
         );
     }
     if !request.tools.is_empty() {
-        payload.insert("tools".into(), Value::Array(to_chat_tools(&request.tools)));
+        payload.insert(
+            "tools".into(),
+            Value::Array(to_chat_tools(config, tool_names, &request.tools)?),
+        );
     }
     payload.extend(config.extra_body.clone());
     Ok(Value::Object(payload))
@@ -526,6 +532,7 @@ fn effective_output_modalities(config: &ChatCompletionsProviderConfig) -> Result
 
 fn to_chat_messages(
     config: &ChatCompletionsProviderConfig,
+    tool_names: &ProviderToolNameCodec,
     request: &ModelRequest,
 ) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
@@ -539,9 +546,11 @@ fn to_chat_messages(
                 "role": message.role.as_str(),
                 "content": render_user_content(config, &message.content)?
             })),
-            MessageRole::Assistant => messages.push(to_assistant_message(config, message)?),
+            MessageRole::Assistant => {
+                messages.push(to_assistant_message(config, tool_names, message)?)
+            }
             MessageRole::ToolResult => {
-                messages.extend(to_tool_result_messages(message)?);
+                messages.extend(to_tool_result_messages(config, tool_names, message)?);
             }
         }
     }
@@ -550,6 +559,7 @@ fn to_chat_messages(
 
 fn to_assistant_message(
     config: &ChatCompletionsProviderConfig,
+    tool_names: &ProviderToolNameCodec,
     message: &AgentMessage,
 ) -> Result<Value> {
     let mut rendered = Map::new();
@@ -580,7 +590,7 @@ fn to_assistant_message(
                     "id": tool_call.id,
                     "type": "function",
                     "function": {
-                        "name": tool_call.name,
+                        "name": tool_names.provider_name(&tool_call.name, &config.id, &config.model)?,
                         "arguments": tool_call.arguments.to_string()
                     }
                 }));
@@ -821,7 +831,11 @@ fn provider_file_to_chat_content_part(
     }))
 }
 
-fn to_tool_result_messages(message: &AgentMessage) -> Result<Vec<Value>> {
+fn to_tool_result_messages(
+    config: &ChatCompletionsProviderConfig,
+    tool_names: &ProviderToolNameCodec,
+    message: &AgentMessage,
+) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
     for block in &message.content {
         if let ContentBlock::ToolResult {
@@ -834,7 +848,7 @@ fn to_tool_result_messages(message: &AgentMessage) -> Result<Vec<Value>> {
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "name": tool_name,
+                "name": tool_names.provider_name(tool_name, &config.id, &config.model)?,
                 "content": render_content_text(content)?
             }));
         }
@@ -869,18 +883,22 @@ fn render_text_block(block: &ContentBlock) -> Result<Option<String>> {
     }
 }
 
-fn to_chat_tools(tools: &[ToolSpec]) -> Vec<Value> {
+fn to_chat_tools(
+    config: &ChatCompletionsProviderConfig,
+    tool_names: &ProviderToolNameCodec,
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>> {
     tools
         .iter()
         .map(|tool| {
-            json!({
+            Ok(json!({
                 "type": "function",
                 "function": {
-                    "name": tool.name,
+                    "name": tool_names.provider_name(&tool.name, &config.id, &config.model)?,
                     "description": tool.description,
                     "parameters": tool.input_schema
                 }
-            })
+            }))
         })
         .collect()
 }
@@ -1000,6 +1018,7 @@ impl ReasoningField {
 #[derive(Default)]
 struct ChatStreamState {
     replay_scope: ReasoningReplayScope,
+    tool_names: ProviderToolNameCodec,
     tool_calls: BTreeMap<u64, PartialToolCall>,
     reasoning: BTreeMap<ReasoningField, ReasoningReplayState>,
     stop_reason: Option<StopReason>,
@@ -1009,12 +1028,13 @@ struct ChatStreamState {
 }
 
 impl ChatStreamState {
-    fn new(config: &ChatCompletionsProviderConfig) -> Self {
+    fn new(config: &ChatCompletionsProviderConfig, tool_names: ProviderToolNameCodec) -> Self {
         Self {
             replay_scope: ReasoningReplayScope {
                 provider_id: config.id.clone(),
                 model: config.model.clone(),
             },
+            tool_names,
             ..Self::default()
         }
     }
@@ -1053,20 +1073,26 @@ impl ChatStreamState {
         Ok(events)
     }
 
-    fn finish_events(&mut self) -> Vec<ModelStreamEvent> {
+    fn finish_events(&mut self) -> Result<Vec<ModelStreamEvent>> {
         if self.finished {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.finished = true;
         let mut events = Vec::new();
         if !self.tool_calls_emitted {
             self.tool_calls_emitted = true;
-            events.extend(self.tool_calls.values().map(PartialToolCall::to_event));
+            for tool_call in self.tool_calls.values() {
+                events.push(tool_call.to_event(
+                    &self.tool_names,
+                    &self.replay_scope.provider_id,
+                    &self.replay_scope.model,
+                )?);
+            }
         }
         events.push(ModelStreamEvent::Finished {
             stop_reason: self.stop_reason.clone().unwrap_or(StopReason::Stop),
         });
-        events
+        Ok(events)
     }
 
     fn absorb_tool_call_chunks(&mut self, tool_call_chunks: &[Value]) {
@@ -1222,15 +1248,20 @@ impl PartialToolCall {
         }
     }
 
-    fn to_event(&self) -> ModelStreamEvent {
+    fn to_event(
+        &self,
+        tool_names: &ProviderToolNameCodec,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ModelStreamEvent> {
         let arguments = parse_tool_arguments(&self.arguments_json);
-        ModelStreamEvent::ToolCall {
+        Ok(ModelStreamEvent::ToolCall {
             tool_call: ToolCall {
                 id: self.id.clone(),
-                name: self.name.clone(),
+                name: tool_names.canonical_name(&self.name, provider_id, model)?,
                 arguments,
             },
-        }
+        })
     }
 }
 

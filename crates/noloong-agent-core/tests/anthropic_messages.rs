@@ -11,7 +11,10 @@ use tokio::time::{Duration, sleep};
 
 pub mod support;
 
-use support::{CapturedRequest, HangingServer, MockResponse, MockServer, fast_one_retry_reconnect};
+use support::{
+    CapturedRequest, DOTTED_TEST_TOOL_NAME, HangingServer, MockResponse, MockServer,
+    dotted_tool_spec, fast_one_retry_reconnect, is_provider_safe_tool_name,
+};
 
 #[test]
 fn reconnect_config_builder_sets_stream_reconnect() {
@@ -98,6 +101,69 @@ async fn config_files_api_adds_beta_header() -> Result<()> {
         body.json["messages"][0]["content"][0]["source"]["file_id"],
         "file-123"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dotted_tool_names_are_encoded_for_provider_and_decoded_from_stream() -> Result<()> {
+    let response = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-dotted\"}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu-1\",\"name\":\"host_exec_start\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"value\\\":\\\"ok\\\"}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let server = MockServer::spawn(200, "text/event-stream", response).await?;
+    let provider = AnthropicMessagesProvider::new(
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let events = provider
+        .stream_model(
+            ModelRequest {
+                tools: vec![dotted_tool_spec(None)],
+                ..simple_request()
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let body = server.request_json();
+    assert_eq!(body["tools"][0]["name"], "host_exec_start");
+    assert!(
+        body["tools"][0]["name"]
+            .as_str()
+            .is_some_and(is_provider_safe_tool_name)
+    );
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ModelStreamEvent::ToolCall { tool_call }
+                if tool_call.name == "host.exec.start"
+                    && tool_call.arguments["value"] == "ok"
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dotted_tool_names_are_encoded_in_assistant_history() -> Result<()> {
+    let body = captured_request_body(
+        request_with_dotted_tool_history(),
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test").without_api_key(),
+        text_response("ok"),
+    )
+    .await?;
+
+    assert_eq!(
+        body.json["messages"][1]["content"][0]["name"],
+        "host_exec_start"
+    );
+    assert_eq!(body.json["tools"][0]["name"], "host_exec_start");
     Ok(())
 }
 
@@ -430,7 +496,7 @@ async fn stream_text_thinking_tool_call_and_finish_reason() -> Result<()> {
 
     let events = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -493,7 +559,7 @@ async fn stream_error_reports_provider_failure() -> Result<()> {
 
     let events = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -529,7 +595,7 @@ async fn stream_ignores_unknown_nonfatal_events() -> Result<()> {
 
     let events = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -565,7 +631,7 @@ async fn stream_accepts_done_sentinel_from_compatible_routes() -> Result<()> {
 
     let events = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -607,7 +673,7 @@ async fn stream_handles_interleaved_tool_blocks() -> Result<()> {
 
     let events = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -646,7 +712,7 @@ async fn stream_tool_use_malformed_json_policy_falls_back_to_string() -> Result<
 
     let events = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -976,6 +1042,29 @@ fn simple_request() -> ModelRequest {
     }
 }
 
+fn request_with_lookup_tool() -> ModelRequest {
+    ModelRequest {
+        tools: vec![lookup_tool_spec()],
+        ..simple_request()
+    }
+}
+
+fn lookup_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: "lookup".into(),
+        description: "Look up a value".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        }),
+        execution_mode: None,
+        permissions: Vec::new(),
+    }
+}
+
 fn request_with_user_content(content: Vec<ContentBlock>) -> ModelRequest {
     ModelRequest {
         messages: vec![AgentMessage {
@@ -1095,23 +1184,42 @@ fn text_response(text: &'static str) -> &'static str {
     }
 }
 
+fn request_with_dotted_tool_history() -> ModelRequest {
+    ModelRequest {
+        messages: vec![
+            AgentMessage::user("user-1", "use a command"),
+            AgentMessage::assistant(
+                "assistant-1",
+                vec![ContentBlock::ToolCall {
+                    tool_call: ToolCall {
+                        id: "toolu-1".into(),
+                        name: DOTTED_TEST_TOOL_NAME.into(),
+                        arguments: json!({ "value": "ok" }),
+                    },
+                }],
+            ),
+            AgentMessage::tool_result(
+                "tool-result-1",
+                "toolu-1",
+                DOTTED_TEST_TOOL_NAME,
+                ToolOutput {
+                    content: vec![ContentBlock::Text { text: "ok".into() }],
+                    details: Value::Null,
+                    is_error: false,
+                    updates: Vec::new(),
+                },
+            ),
+        ],
+        tools: vec![dotted_tool_spec(None)],
+        ..simple_request()
+    }
+}
+
 struct EchoTool;
 
 impl ToolProvider for EchoTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "lookup".into(),
-            description: "Look up a value".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" }
-                },
-                "required": ["query"]
-            }),
-            execution_mode: None,
-            permissions: Vec::new(),
-        }
+        lookup_tool_spec()
     }
 
     fn execute_tool<'a>(

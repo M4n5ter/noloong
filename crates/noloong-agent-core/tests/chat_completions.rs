@@ -12,7 +12,8 @@ use tokio::time::{Duration, sleep};
 pub mod support;
 
 use support::{
-    HangingServer, MockResponse, MockServer, TestAuthProvider, fast_one_retry_reconnect,
+    DOTTED_TEST_TOOL_NAME, HangingServer, MockResponse, MockServer, TestAuthProvider,
+    dotted_tool_spec, fast_one_retry_reconnect, is_provider_safe_tool_name,
 };
 
 #[test]
@@ -92,6 +93,148 @@ async fn payload_maps_messages_tools_and_replay_descriptor() -> Result<()> {
     assert_eq!(body["messages"][3]["tool_call_id"], "call-1");
     assert_eq!(body["tools"][0]["function"]["name"], "lookup");
     assert!(body["tools"][0]["function"].get("permissions").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dotted_tool_names_are_encoded_for_provider_and_decoded_from_stream() -> Result<()> {
+    let server = MockServer::spawn(
+        200,
+        "text/event-stream",
+        concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"host_exec_start\",\"arguments\":\"{\\\"value\\\":\\\"ok\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ),
+    )
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let events = provider
+        .stream_model(
+            ModelRequest {
+                tools: vec![dotted_tool_spec(Some(ToolExecutionMode::Parallel))],
+                ..simple_request()
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let body = server.request_json();
+    assert_eq!(body["tools"][0]["function"]["name"], "host_exec_start");
+    assert!(
+        body["tools"][0]["function"]["name"]
+            .as_str()
+            .is_some_and(is_provider_safe_tool_name)
+    );
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ModelStreamEvent::ToolCall { tool_call }
+                if tool_call.name == "host.exec.start"
+                    && tool_call.arguments["value"] == "ok"
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_provider_tool_alias_reports_context() -> Result<()> {
+    let server = MockServer::spawn(
+        200,
+        "text/event-stream",
+        concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"unexpected_alias\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ),
+    )
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    let error = provider
+        .stream_model(
+            ModelRequest {
+                tools: vec![dotted_tool_spec(Some(ToolExecutionMode::Parallel))],
+                ..simple_request()
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("unknown provider alias should fail with context")
+        .to_string();
+
+    assert!(error.contains("unexpected_alias"));
+    assert!(error.contains("test-chat"));
+    assert!(error.contains("test-model"));
+    assert!(error.contains("host_exec_start->host.exec.start"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dotted_tool_names_are_encoded_in_assistant_history() -> Result<()> {
+    let server = MockServer::spawn(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
+    .await?;
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+
+    provider
+        .stream_model(
+            request_with_dotted_tool_history(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let body = server.request_json();
+    assert_eq!(
+        body["messages"][1]["tool_calls"][0]["function"]["name"],
+        "host_exec_start"
+    );
+    assert_eq!(body["messages"][2]["name"], "host_exec_start");
+    assert_eq!(body["tools"][0]["function"]["name"], "host_exec_start");
+    Ok(())
+}
+
+#[tokio::test]
+async fn undeclared_canonical_tool_in_history_reports_context() -> Result<()> {
+    let provider = ChatCompletionsProvider::new(
+        ChatCompletionsProviderConfig::new("test-chat", "test-model")
+            .base_url("http://127.0.0.1:9")
+            .without_api_key(),
+    )?;
+
+    let error = provider
+        .stream_model(
+            request_with_dotted_tool_history_without_tools(),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("undeclared canonical tool should fail before request")
+        .to_string();
+
+    assert!(error.contains("undeclared canonical tool"));
+    assert!(error.contains(DOTTED_TEST_TOOL_NAME));
+    assert!(error.contains("test-chat"));
+    assert!(error.contains("test-model"));
     Ok(())
 }
 
@@ -612,7 +755,7 @@ async fn sse_streams_text_thinking_tool_calls_and_finish_reason() -> Result<()> 
 
     let returned = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(move |event| {
                 let received = Arc::clone(&received);
                 Box::pin(async move {
@@ -672,7 +815,7 @@ async fn http_error_reports_status_and_body_excerpt() -> Result<()> {
 
     let error = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -956,7 +1099,7 @@ async fn thinking_details_preserve_raw_json_and_render_summary_delta() -> Result
 
     let returned = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -1002,7 +1145,7 @@ async fn object_reasoning_preserves_raw_snapshot_and_summary_kind() -> Result<()
 
     let returned = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -1069,7 +1212,7 @@ async fn legacy_function_call_streams_tool_use() -> Result<()> {
 
     let returned = provider
         .stream_model(
-            simple_request(),
+            request_with_lookup_tool(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
@@ -1338,23 +1481,72 @@ fn request_with_history() -> ModelRequest {
             ),
         ],
         context: Default::default(),
-        tools: vec![ToolSpec {
-            name: "lookup".into(),
-            description: "Look up a value".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" }
-                },
-                "required": ["query"]
-            }),
-            execution_mode: Some(ToolExecutionMode::Parallel),
-            permissions: vec![ToolPermissionRequirement {
-                capability: "test.lookup".into(),
-                description: Some("Allows lookup test calls.".into()),
-                metadata: json!({ "scope": "provider-payload-boundary" }),
-            }],
-        }],
+        tools: vec![lookup_tool_spec()],
         metadata: Default::default(),
+    }
+}
+
+fn request_with_lookup_tool() -> ModelRequest {
+    ModelRequest {
+        tools: vec![lookup_tool_spec()],
+        ..simple_request()
+    }
+}
+
+fn lookup_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: "lookup".into(),
+        description: "Look up a value".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        }),
+        execution_mode: Some(ToolExecutionMode::Parallel),
+        permissions: vec![ToolPermissionRequirement {
+            capability: "test.lookup".into(),
+            description: Some("Allows lookup test calls.".into()),
+            metadata: json!({ "scope": "provider-payload-boundary" }),
+        }],
+    }
+}
+
+fn request_with_dotted_tool_history() -> ModelRequest {
+    ModelRequest {
+        messages: vec![
+            AgentMessage::user("user-1", "use a command"),
+            AgentMessage::assistant(
+                "assistant-1",
+                vec![ContentBlock::ToolCall {
+                    tool_call: ToolCall {
+                        id: "call-1".into(),
+                        name: DOTTED_TEST_TOOL_NAME.into(),
+                        arguments: json!({ "value": "ok" }),
+                    },
+                }],
+            ),
+            AgentMessage::tool_result(
+                "tool-result-1",
+                "call-1",
+                DOTTED_TEST_TOOL_NAME,
+                noloong_agent_core::ToolOutput {
+                    content: vec![ContentBlock::Text { text: "ok".into() }],
+                    details: Value::Null,
+                    is_error: false,
+                    updates: Vec::new(),
+                },
+            ),
+        ],
+        tools: vec![dotted_tool_spec(Some(ToolExecutionMode::Parallel))],
+        ..simple_request()
+    }
+}
+
+fn request_with_dotted_tool_history_without_tools() -> ModelRequest {
+    ModelRequest {
+        tools: Vec::new(),
+        ..request_with_dotted_tool_history()
     }
 }

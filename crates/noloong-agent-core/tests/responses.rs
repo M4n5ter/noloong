@@ -13,8 +13,8 @@ use tokio::time::Duration;
 pub mod support;
 
 use support::{
-    HangingServer, LiveEchoTool, MockResponse, MockServer, TestAuthProvider,
-    fast_one_retry_reconnect,
+    DOTTED_TEST_TOOL_NAME, HangingServer, LiveEchoTool, MockResponse, MockServer, TestAuthProvider,
+    ValueEchoTool, fast_one_retry_reconnect, is_provider_safe_tool_name,
 };
 
 #[test]
@@ -91,6 +91,19 @@ const RUNTIME_TOOL_SECOND_STREAM: &str = concat!(
     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-runtime-final\"}}\n\n",
     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"noloong-response-final\"}\n\n",
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-runtime-final\",\"status\":\"completed\",\"output\":[]}}\n\n",
+);
+
+const DOTTED_TOOL_FIRST_STREAM: &str = concat!(
+    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-dotted-tool\"}}\n\n",
+    "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc-dotted\",\"type\":\"function_call\",\"call_id\":\"call-dotted\",\"name\":\"host_exec_start\",\"arguments\":\"\"}}\n\n",
+    "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-dotted\",\"output_index\":0,\"item\":{\"id\":\"fc-dotted\",\"type\":\"function_call\",\"call_id\":\"call-dotted\",\"name\":\"host_exec_start\",\"arguments\":\"{\\\"value\\\":\\\"dotted-tool\\\"}\"}}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-dotted-tool\",\"status\":\"completed\",\"output\":[]}}\n\n",
+);
+
+const DOTTED_TOOL_SECOND_STREAM: &str = concat!(
+    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-dotted-final\"}}\n\n",
+    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"dotted-final\"}\n\n",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-dotted-final\",\"status\":\"completed\",\"output\":[]}}\n\n",
 );
 
 #[test]
@@ -806,7 +819,7 @@ async fn stream_openrouter_content_part_delta() -> Result<()> {
 #[tokio::test]
 async fn stream_accumulates_function_call_arguments() -> Result<()> {
     let events = stream_request(
-        simple_request(),
+        request_with_tools(),
         ResponsesApiProviderConfig::new("test-responses", "test-model"),
         TOOL_STREAM,
     )
@@ -833,7 +846,7 @@ async fn stream_accumulates_function_call_arguments() -> Result<()> {
 #[tokio::test]
 async fn stream_handles_interleaved_text_and_function_calls() -> Result<()> {
     let events = stream_request(
-        simple_request(),
+        request_with_tools(),
         ResponsesApiProviderConfig::new("test-responses", "test-model"),
         INTERLEAVED_STREAM,
     )
@@ -992,6 +1005,41 @@ async fn runtime_executes_responses_tool_call() -> Result<()> {
         server.requests_json()[1]["input"][2]["type"],
         "function_call_output"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_executes_dotted_tool_name_through_provider_alias() -> Result<()> {
+    let server = MockServer::spawn_many(vec![
+        MockResponse::new(200, "text/event-stream", DOTTED_TOOL_FIRST_STREAM),
+        MockResponse::new(200, "text/event-stream", DOTTED_TOOL_SECOND_STREAM),
+    ])
+    .await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .without_api_key(),
+    )?;
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(Arc::new(provider))
+        .with_tool(Arc::new(ValueEchoTool::new(
+            DOTTED_TEST_TOOL_NAME,
+            "Echoes a value through a dotted-name test tool.",
+        )))
+        .max_turns(2)
+        .build()?;
+
+    let report = runtime.run("use the dotted tool").await?;
+
+    assert!(has_tool_execution(&report, "dotted-tool"));
+    let requests = server.requests_json();
+    assert_eq!(requests[0]["tools"][0]["name"], "host_exec_start");
+    assert!(
+        requests[0]["tools"][0]["name"]
+            .as_str()
+            .is_some_and(is_provider_safe_tool_name)
+    );
+    assert_eq!(requests[1]["input"][1]["name"], "host_exec_start");
     Ok(())
 }
 

@@ -18,6 +18,7 @@ mod runtime;
 mod sse;
 mod store;
 mod tool_arguments;
+mod tool_names;
 mod types;
 
 pub use agent::{Agent, AgentBuilder};

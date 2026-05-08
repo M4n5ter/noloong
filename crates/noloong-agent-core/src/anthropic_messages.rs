@@ -4,6 +4,7 @@ use crate::provider_utils::{
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
+use crate::tool_names::ProviderToolNameCodec;
 use crate::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, MediaBlock, MediaEncoding,
     MediaKind, MediaSource, MessageRole, ModelProvider, ModelRequest, ModelStreamEvent,
@@ -279,13 +280,14 @@ impl ModelProvider for AnthropicMessagesProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
-            let payload = build_anthropic_payload(&self.config, &request)?;
+            let tool_names = ProviderToolNameCodec::new(&request.tools);
+            let payload = build_anthropic_payload(&self.config, &tool_names, &request)?;
             let headers = headers_from_config(&self.config)?;
             let api_key = self.api_key()?;
             let auth_scheme = self.config.auth_scheme;
 
             let mut events = Vec::new();
-            let mut state = AnthropicStreamState::new(&self.config, &request);
+            let mut state = AnthropicStreamState::new(&self.config, &request, tool_names);
             run_sse_model_stream(
                 SseStreamOptions {
                     provider_label: "anthropic messages",
@@ -358,6 +360,7 @@ fn effective_beta_headers(config: &AnthropicMessagesProviderConfig) -> Vec<Strin
 
 fn build_anthropic_payload(
     config: &AnthropicMessagesProviderConfig,
+    tool_names: &ProviderToolNameCodec,
     request: &ModelRequest,
 ) -> Result<Value> {
     let mut payload = Map::new();
@@ -381,7 +384,13 @@ fn build_anthropic_payload(
     if !request.tools.is_empty() {
         payload.insert(
             "tools".into(),
-            Value::Array(request.tools.iter().map(to_anthropic_tool).collect()),
+            Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| to_anthropic_tool(config, tool_names, tool))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
         );
     }
     if let Some(system) = render_system_messages(&request.messages)? {
@@ -389,7 +398,7 @@ fn build_anthropic_payload(
     }
     payload.insert(
         "messages".into(),
-        Value::Array(to_anthropic_messages(config, request)?),
+        Value::Array(to_anthropic_messages(config, tool_names, request)?),
     );
     payload.extend(config.extra_body.clone());
     Ok(Value::Object(payload))
@@ -423,6 +432,7 @@ fn render_system_messages(messages: &[AgentMessage]) -> Result<Option<Value>> {
 
 fn to_anthropic_messages(
     config: &AnthropicMessagesProviderConfig,
+    tool_names: &ProviderToolNameCodec,
     request: &ModelRequest,
 ) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
@@ -438,7 +448,7 @@ fn to_anthropic_messages(
             })),
             MessageRole::Assistant => messages.push(json!({
                 "role": "assistant",
-                "content": render_anthropic_assistant_content(config, &message.content)?,
+                "content": render_anthropic_assistant_content(config, tool_names, &message.content)?,
             })),
             MessageRole::ToolResult => messages.push(json!({
                 "role": "user",
@@ -518,6 +528,7 @@ fn render_anthropic_content_text_only(content: &[ContentBlock]) -> Result<Vec<Va
 
 fn render_anthropic_assistant_content(
     config: &AnthropicMessagesProviderConfig,
+    tool_names: &ProviderToolNameCodec,
     content: &[ContentBlock],
 ) -> Result<Vec<Value>> {
     let mut blocks = Vec::new();
@@ -531,7 +542,7 @@ fn render_anthropic_assistant_content(
             ContentBlock::ToolCall { tool_call } => blocks.push(json!({
                 "type": "tool_use",
                 "id": tool_call.id,
-                "name": tool_call.name,
+                "name": tool_names.provider_name(&tool_call.name, &config.id, &config.model)?,
                 "input": tool_call.arguments,
             })),
             ContentBlock::Media { .. } => {
@@ -745,12 +756,16 @@ fn anthropic_text_block(text: String) -> Value {
     json!({ "type": "text", "text": text })
 }
 
-fn to_anthropic_tool(tool: &ToolSpec) -> Value {
-    json!({
-        "name": tool.name,
+fn to_anthropic_tool(
+    config: &AnthropicMessagesProviderConfig,
+    tool_names: &ProviderToolNameCodec,
+    tool: &ToolSpec,
+) -> Result<Value> {
+    Ok(json!({
+        "name": tool_names.provider_name(&tool.name, &config.id, &config.model)?,
         "description": tool.description,
         "input_schema": tool.input_schema,
-    })
+    }))
 }
 
 fn replay_thinking(
@@ -809,6 +824,7 @@ struct AnthropicStreamState {
     model: String,
     run_id: String,
     turn_id: u64,
+    tool_names: ProviderToolNameCodec,
     tool_calls: BTreeMap<u64, PartialAnthropicToolCall>,
     thinking: BTreeMap<u64, AnthropicThinkingState>,
     stop_reason: Option<StopReason>,
@@ -817,12 +833,17 @@ struct AnthropicStreamState {
 }
 
 impl AnthropicStreamState {
-    fn new(config: &AnthropicMessagesProviderConfig, request: &ModelRequest) -> Self {
+    fn new(
+        config: &AnthropicMessagesProviderConfig,
+        request: &ModelRequest,
+        tool_names: ProviderToolNameCodec,
+    ) -> Self {
         Self {
             provider_id: config.id.clone(),
             model: config.model.clone(),
             run_id: request.run_id.clone(),
             turn_id: request.turn_id,
+            tool_names,
             ..Self::default()
         }
     }
@@ -991,7 +1012,12 @@ impl AnthropicStreamState {
             return Ok(Vec::new());
         };
         if let Some(tool_call) = self.tool_calls.remove(&index) {
-            return Ok(vec![tool_call.to_event(index)]);
+            return Ok(vec![tool_call.to_event(
+                index,
+                &self.tool_names,
+                &self.provider_id,
+                &self.model,
+            )?]);
         }
         if let Some(thinking) = self.thinking.remove(&index) {
             return Ok(vec![anthropic_thinking_delta(
@@ -1068,19 +1094,25 @@ struct PartialAnthropicToolCall {
 }
 
 impl PartialAnthropicToolCall {
-    fn to_event(&self, index: u64) -> ModelStreamEvent {
+    fn to_event(
+        &self,
+        index: u64,
+        tool_names: &ProviderToolNameCodec,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<ModelStreamEvent> {
         let arguments = parse_tool_arguments(&self.arguments_json);
-        ModelStreamEvent::ToolCall {
+        Ok(ModelStreamEvent::ToolCall {
             tool_call: ToolCall {
                 id: if self.id.is_empty() {
                     format!("toolu-{index}")
                 } else {
                     self.id.clone()
                 },
-                name: self.name.clone(),
+                name: tool_names.canonical_name(&self.name, provider_id, model)?,
                 arguments,
             },
-        }
+        })
     }
 }
 

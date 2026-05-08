@@ -3,7 +3,8 @@ use noloong_agent_core::{
     AgentEventKind, AgentMessage, AgentState, BoxFuture, CancellationToken, ContentBlock,
     HttpAuthContext, HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, HttpAuthRefreshContext,
     HttpAuthRefreshResult, MessageRole, ModelStreamEvent, Result, RunReport, SseReconnectConfig,
-    StdioExtensionConfig, ThinkingBlock, ToolOutput, ToolProvider, ToolRequest, ToolSpec,
+    StdioExtensionConfig, ThinkingBlock, ToolExecutionMode, ToolOutput, ToolProvider, ToolRequest,
+    ToolSpec,
 };
 use serde_json::{Value, json};
 use std::{
@@ -442,26 +443,32 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+pub const DOTTED_TEST_TOOL_NAME: &str = "host.exec.start";
+
+pub fn dotted_tool_spec(execution_mode: Option<ToolExecutionMode>) -> ToolSpec {
+    value_echo_tool_spec(
+        DOTTED_TEST_TOOL_NAME,
+        "Starts a command in a dotted-name test tool.",
+        execution_mode,
+    )
+}
+
+pub fn is_provider_safe_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 pub struct LiveEchoTool;
 
 impl ToolProvider for LiveEchoTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "live_echo".into(),
-            description: "Echoes a value for live model tool-call conformance tests.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "value": {
-                        "type": "string"
-                    }
-                },
-                "required": ["value"],
-                "additionalProperties": false
-            }),
-            execution_mode: None,
-            permissions: Vec::new(),
-        }
+        value_echo_tool_spec(
+            "live_echo",
+            "Echoes a value for live model tool-call conformance tests.",
+            None,
+        )
     }
 
     fn execute_tool<'a>(
@@ -469,22 +476,77 @@ impl ToolProvider for LiveEchoTool {
         request: ToolRequest,
         _cancellation: CancellationToken,
     ) -> BoxFuture<'a, ToolOutput> {
-        Box::pin(async move {
-            Ok(ToolOutput {
-                content: vec![ContentBlock::Text {
-                    text: request
-                        .arguments
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                }],
-                details: request.arguments,
-                is_error: false,
-                updates: Vec::new(),
-            })
-        })
+        value_echo_tool_output(request)
     }
+}
+
+pub struct ValueEchoTool {
+    name: String,
+    description: String,
+}
+
+impl ValueEchoTool {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+}
+
+impl ToolProvider for ValueEchoTool {
+    fn spec(&self) -> ToolSpec {
+        value_echo_tool_spec(&self.name, &self.description, None)
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        request: ToolRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ToolOutput> {
+        value_echo_tool_output(request)
+    }
+}
+
+fn value_echo_tool_spec(
+    name: &str,
+    description: &str,
+    execution_mode: Option<ToolExecutionMode>,
+) -> ToolSpec {
+    ToolSpec {
+        name: name.into(),
+        description: description.into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        }),
+        execution_mode,
+        permissions: Vec::new(),
+    }
+}
+
+fn value_echo_tool_output(request: ToolRequest) -> BoxFuture<'static, ToolOutput> {
+    Box::pin(async move {
+        Ok(ToolOutput {
+            content: vec![ContentBlock::Text {
+                text: request
+                    .arguments
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            }],
+            details: request.arguments,
+            is_error: false,
+            updates: Vec::new(),
+        })
+    })
 }
 
 #[derive(Clone)]
