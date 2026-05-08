@@ -1,3 +1,4 @@
+mod build_info;
 mod chatgpt;
 mod config;
 mod host;
@@ -74,6 +75,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
             command: ServeSubcommand::Interaction(options),
         }) => run_serve_interaction(options).await,
         CliCommand::ChatGpt(options) => chatgpt::run_chatgpt(options).await.map_err(Into::into),
+        CliCommand::BuildInfo(command) => run_build_info(command),
         CliCommand::ProfileConfig(ProfileConfigCommand {
             command: ProfileConfigSubcommand::Schema(options),
         }) => run_profile_config_schema(options),
@@ -96,6 +98,44 @@ fn run_profile_config_schema(options: ProfileConfigSchemaOptions) -> Result<(), 
         return write_profile_config_schema(&output_path, &schema);
     }
     io::stdout().lock().write_all(schema.as_bytes())?;
+    Ok(())
+}
+
+fn run_build_info(command: BuildInfoCommand) -> Result<(), CliError> {
+    match command.command {
+        BuildInfoSubcommand::Manifest => {
+            io::stdout()
+                .lock()
+                .write_all(build_info::manifest_json().as_bytes())?;
+        }
+        BuildInfoSubcommand::Command => {
+            writeln!(io::stdout().lock(), "{}", build_info::build_command()?)?;
+        }
+        BuildInfoSubcommand::Source(command) => run_build_info_source(command)?,
+    }
+    Ok(())
+}
+
+fn run_build_info_source(command: BuildInfoSourceCommand) -> Result<(), CliError> {
+    match command.command {
+        BuildInfoSourceSubcommand::List => {
+            let mut stdout = io::stdout().lock();
+            for path in build_info::source_paths()? {
+                writeln!(stdout, "{path}")?;
+            }
+        }
+        BuildInfoSourceSubcommand::Cat(options) => {
+            io::stdout()
+                .lock()
+                .write_all(&build_info::source_file(&options.path)?)?;
+        }
+        BuildInfoSourceSubcommand::Extract(options) => {
+            build_info::extract_source(&options.output_dir, options.force)?;
+        }
+        BuildInfoSourceSubcommand::Archive(options) => {
+            build_info::write_archive(&options.output)?;
+        }
+    }
     Ok(())
 }
 
@@ -651,6 +691,52 @@ struct ProfileConfigSchemaOptions {
 }
 
 #[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct BuildInfoCommand {
+    #[command(subcommand)]
+    command: BuildInfoSubcommand,
+}
+
+#[derive(Clone, Debug, Subcommand, PartialEq, Eq)]
+enum BuildInfoSubcommand {
+    Manifest,
+    Command,
+    Source(BuildInfoSourceCommand),
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct BuildInfoSourceCommand {
+    #[command(subcommand)]
+    command: BuildInfoSourceSubcommand,
+}
+
+#[derive(Clone, Debug, Subcommand, PartialEq, Eq)]
+enum BuildInfoSourceSubcommand {
+    List,
+    Cat(BuildInfoSourceCatOptions),
+    Extract(BuildInfoSourceExtractOptions),
+    Archive(BuildInfoSourceArchiveOptions),
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct BuildInfoSourceCatOptions {
+    path: String,
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct BuildInfoSourceExtractOptions {
+    #[arg(long = "output-dir")]
+    output_dir: PathBuf,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct BuildInfoSourceArchiveOptions {
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
 struct ProfileConfigCommand {
     #[command(subcommand)]
     command: ProfileConfigSubcommand,
@@ -673,6 +759,8 @@ enum CliCommand {
     Serve(ServeCommand),
     #[command(name = "chatgpt")]
     ChatGpt(chatgpt::ChatGptOptions),
+    #[command(name = "build-info")]
+    BuildInfo(BuildInfoCommand),
     #[command(name = "profile-config")]
     ProfileConfig(ProfileConfigCommand),
     #[command(name = "telegram-bridge")]
@@ -699,6 +787,8 @@ enum CliError {
     Host(#[from] host::HostBuildError),
     #[error("{0}")]
     ChatGpt(#[from] chatgpt::ChatGptCliError),
+    #[error("{0}")]
+    BuildInfo(#[from] build_info::BuildInfoError),
     #[error("interaction transport failed: {0}")]
     Interaction(#[from] noloong_agent::interaction::InteractionError),
     #[error("interaction client failed: {0}")]
@@ -730,9 +820,10 @@ enum CliError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliCommand, CliError, ProfileConfigSchemaOptions, ProfileConfigSubcommand,
-        TelegramBridgeOptions, run_profile_config_schema, telegram_config_from_values,
-        telegram_text_input, validate_interaction_bind,
+        BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand, CliError,
+        ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
+        run_profile_config_schema, telegram_config_from_values, telegram_text_input,
+        validate_interaction_bind,
     };
     use crate::schema::profile_config_schema_json;
     use crate::test_support::{remove_temp_file, write_temp_file};
@@ -820,6 +911,79 @@ mod tests {
             options.check,
             Some(PathBuf::from("schemas/profile-config.schema.json"))
         );
+    }
+
+    #[test]
+    fn cli_build_info_commands_parse() {
+        let manifest = Cli::try_parse_from(["noloong", "build-info", "manifest"]).unwrap();
+        let CliCommand::BuildInfo(command) = manifest.command else {
+            panic!("expected build-info command");
+        };
+        assert!(matches!(command.command, BuildInfoSubcommand::Manifest));
+
+        let list = Cli::try_parse_from(["noloong", "build-info", "source", "list"]).unwrap();
+        let CliCommand::BuildInfo(command) = list.command else {
+            panic!("expected build-info command");
+        };
+        let BuildInfoSubcommand::Source(source) = command.command else {
+            panic!("expected build-info source command");
+        };
+        assert!(matches!(source.command, BuildInfoSourceSubcommand::List));
+
+        let cat =
+            Cli::try_parse_from(["noloong", "build-info", "source", "cat", "Cargo.toml"]).unwrap();
+        let CliCommand::BuildInfo(command) = cat.command else {
+            panic!("expected build-info command");
+        };
+        let BuildInfoSubcommand::Source(source) = command.command else {
+            panic!("expected build-info source command");
+        };
+        let BuildInfoSourceSubcommand::Cat(options) = source.command else {
+            panic!("expected build-info source cat command");
+        };
+        assert_eq!(options.path, "Cargo.toml");
+
+        let extract = Cli::try_parse_from([
+            "noloong",
+            "build-info",
+            "source",
+            "extract",
+            "--output-dir",
+            "out",
+            "--force",
+        ])
+        .unwrap();
+        let CliCommand::BuildInfo(command) = extract.command else {
+            panic!("expected build-info command");
+        };
+        let BuildInfoSubcommand::Source(source) = command.command else {
+            panic!("expected build-info source command");
+        };
+        let BuildInfoSourceSubcommand::Extract(options) = source.command else {
+            panic!("expected build-info source extract command");
+        };
+        assert_eq!(options.output_dir, PathBuf::from("out"));
+        assert!(options.force);
+
+        let archive = Cli::try_parse_from([
+            "noloong",
+            "build-info",
+            "source",
+            "archive",
+            "--output",
+            "source.tar.zst",
+        ])
+        .unwrap();
+        let CliCommand::BuildInfo(command) = archive.command else {
+            panic!("expected build-info command");
+        };
+        let BuildInfoSubcommand::Source(source) = command.command else {
+            panic!("expected build-info source command");
+        };
+        let BuildInfoSourceSubcommand::Archive(options) = source.command else {
+            panic!("expected build-info source archive command");
+        };
+        assert_eq!(options.output, PathBuf::from("source.tar.zst"));
     }
 
     #[test]

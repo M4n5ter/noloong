@@ -24,6 +24,14 @@ noloong-agent-core
 - `ToolProvider`：暴露后台命令 lifecycle tools、模型感知文件编辑工具和 manifest patch proposal tool。
 - `ToolCallHook`：统一处理命令执行、stdin 写入、终止命令、文件编辑和 manifest patch 的 approval。内置 approval hook id 是 `noloong.builtin.approval`。
 
+## Immutable Host Self-Inspection
+
+root `noloong` binary 在构建时内嵌一份 source snapshot 和 build-info manifest。该能力通过 `noloong build-info manifest`、`noloong build-info command`、`noloong build-info source list/cat/extract/archive` 暴露，目的是让 Agent 在没有原始 checkout 的环境里也能理解当前不可变 Rust host 的来源、构建 recipe 和源码内容。
+
+source snapshot 遵循 `.gitignore`，并显式排除 `.git/`。因此 `.gitignore` 是安全边界：任何本地 token、数据库、日志、私钥或临时文件在进入 checkout 前，都应先确认会被 ignore。
+
+该能力是自省和审计入口，不是常规自我改进入口。Noloong 不推荐 Agent 解包内置源码后修改并重新编译替换当前 binary；真正的自我改进应优先通过编写或更新插件完成，让不可变 Rust host 保持稳定，把演进放在可替换扩展层。
+
 ## Host-first Execution
 
 v1 默认在宿主机执行。SSH、VMM、`clone`、Lima、QEMU 等不是统一 target abstraction，而是宿主机命令能力：Agent 可以通过 `host.exec.start` 启动这些命令，并在后续 turn 中读取或控制它们。

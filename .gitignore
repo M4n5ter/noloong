@@ -3,3 +3,15 @@ node_modules/
 __pycache__/
 *.pyc
 .zed
+.env*
+.envrc
+*.sqlite*
+*.db
+*.pem
+*.key
+*.log
+.DS_Store
+.idea/
+.vscode/
+tmp/
+temp/

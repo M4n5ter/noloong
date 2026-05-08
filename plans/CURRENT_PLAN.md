@@ -1,336 +1,290 @@
-# 实施计划：Profile Config JSON Schema 与 JSONC 支持
+# 实施计划：Build Info 与构建时源码快照
 
-> 状态：已完成实现、本地验证、workspace 测试和 clippy。目标是为 root `noloong` profile config 提供完整、可生成、可校验的 JSON Schema，并让 profile config loader 支持 JSONC。明确不引入 JSON5。
+> 状态：已完成实现、本地验证、workspace 测试和 clippy。目标是在 `noloong` Rust 二进制中嵌入构建时仓库源码快照和构建 provenance，并提供 `noloong build-info ...` 子命令，让 Agent 在自我迭代时能够审阅不可变 Rust host 的源码和可复现构建命令。
 
 ## 概览
 
-当前 root `noloong` profile config 只通过 `serde_json::from_str` 解析，使用者需要阅读示例和 Rust 类型才能知道完整配置结构。下一步要把 `HostProfileConfig` 及其引用到的 profile/provider/plugin/manifest patch/store/compaction 类型生成一份 checked-in JSON Schema，同时提供 CLI 生成入口，便于 IDE、文档、第三方配置工具和 CI 共享同一份 contract。配置文件输入层增加 JSONC 支持，只承诺 JSON 加注释和 trailing comma，不扩大到 JSON5 的 unquoted key、single quote、hex number 等额外语法。
+当前 Agent 可以通过工具操作宿主环境，但运行中的 Rust 二进制本身是不可变层；如果运行环境没有原始 git checkout，Agent 无法确认自己正在调用的 host/core/interaction 代码。下一步在 root `noloong` crate 增加构建时 source snapshot：`build.rs` 遵循 `.gitignore` 收集仓库文件，显式排除 `.git/`，生成 `source.tar.zst` 和 `build-info.json`，运行时通过 CLI 输出 manifest、构建命令、源码列表、单文件内容、归档和解包目录。
 
 ## 架构决策
 
-- 使用 `schemars = "1.2"` 生成标准 JSON Schema；schema 是 profile config 的 editor/tooling contract，不替代 serde 作为 runtime parse contract。
-- 使用 `jsonc-parser = "0.32"` 支持 profile config JSONC；不使用 `json5`，避免把更宽的 JSON5 方言变成长期兼容承诺。
-- checked-in schema 放在 `schemas/profile-config.schema.json`，由 CLI 生成，CI 负责检测漂移。
-- CLI 入口采用 `noloong profile-config schema`，默认输出到 stdout；额外支持写入文件和 check 模式，便于本地更新和 CI 校验。
-- `noloong-agent-core` 与 `noloong-agent` 中被 profile config 引用的类型通过可选 `json-schema` feature 派生 `JsonSchema`，避免让 library crates 的默认依赖面无意义扩大。
-- schema 不应比 serde 更严格：如果 Rust 类型没有 `deny_unknown_fields`，schema 不主动设置全局 `additionalProperties: false`，避免 IDE 报错与运行时行为不一致。
-- JSONC 支持只作用于 root profile config 文件加载；JSON-RPC、model provider protocol、extension conformance fixture、Telegram API payload 等仍保持严格 JSON。
+- 使用二进制自包含方案：源码快照以 `tar.zst` 嵌入 root `noloong` binary，不依赖运行时 checkout、网络或外部 artifact。
+- `.gitignore` 是源码快照的安全边界；先补齐本地 secret、数据库、日志、IDE/cache/temp 排除规则，再让 `build.rs` 遵循 ignore 规则遍历仓库。
+- 快照范围是被 `.gitignore` 允许的仓库快照，包含 `.github/`、`.gitignore`、docs、examples、schemas、Cargo manifests 和 Rust 源码；显式排除 `.git/` 与 build output。
+- 构建命令输出 normalized reproducible recipe，不承诺还原用户 shell 中的原始命令；manifest 同时记录 target/profile/features、rustc/cargo version、git 状态和 source hash。
+- CLI 入口采用 `noloong build-info`，下挂 `manifest`、`command`、`source list`、`source cat`、`source extract`、`source archive`。
+- v1 不嵌入 crates.io 依赖源码、不自动重建新二进制、不替换当前进程，只提供可审计、可解包、可复现的信息。
+- 嵌入源码只推荐用于理解当前二进制背后的不可变 Rust host 内容；不推荐把内置源码解包后直接修改并重新编译作为常规自我改进路径。
+- 真正的自我改进应优先通过编写、更新和热插拔插件完成，让不可变核心保持稳定，演进能力落在可替换扩展层。
 
 ## 任务列表
 
-### 阶段 1：依赖与 schema feature 基础
+### 阶段 1：源码快照边界与构建依赖
 
-#### 任务 1：添加 schema 与 JSONC 依赖
+#### 任务 1：收紧 `.gitignore` 作为快照安全边界
 
-**描述：** 在 workspace 依赖中加入 `schemars`、`jsonc-parser`，并为 schema validation 测试加入 `jsonschema` dev-dependency。`schemars` 在 root crate 直接使用，在 core/agent 作为 optional feature 使用。
+**描述：** 完善 `.gitignore`，确保构建时仓库快照不会嵌入本地 secret、临时数据库、日志、编辑器缓存和 OS 噪声文件。保留 `.github/`、`.gitignore`、docs、examples、schemas 等可审阅上下文。
 
 **验收标准：**
-- [x] workspace 依赖包含 `schemars = "1.2"`、`jsonc-parser = "0.32"`。
-- [x] root `noloong` package 可以直接使用 `schemars` 和 `jsonc-parser`。
-- [x] `noloong-agent-core` 增加可选 feature `json-schema = ["dep:schemars"]`。
-- [x] `noloong-agent` 增加可选 feature `json-schema = ["dep:schemars", "noloong-agent-core/json-schema"]`。
-- [x] schema/example validation 测试可使用 `jsonschema = "0.46"`，但不进入 runtime dependency。
+- [x] `.gitignore` 继续排除 `target/`、`node_modules/`、Python cache 和 `.zed/`。
+- [x] `.gitignore` 新增排除 `.env*`、`.envrc`、`*.sqlite*`、`*.db`、`*.pem`、`*.key`、`*.log`、`.DS_Store`、`.idea/`、`.vscode/`、`tmp/`、`temp/`。
+- [x] `git ls-files -co --exclude-standard` 不显示本地 secret/token/database/log 类文件。
+- [x] `.github/workflows/ci.yml` 仍会进入快照候选文件。
 
 **验证：**
-- [x] `cargo check -p noloong-agent-core --features json-schema`
-- [x] `cargo check -p noloong-agent --features json-schema`
+- [x] `git ls-files -co --exclude-standard | rg '(^|/)(\\.env|.*\\.sqlite|.*\\.db|.*\\.pem|.*\\.key|.*\\.log)$'` 无输出。
+- [x] `git ls-files -co --exclude-standard | rg '^\\.github/workflows/ci\\.yml$'` 有输出。
+
+**依赖：** 无
+
+**预计涉及文件：**
+- `.gitignore`
+
+**预计范围：** XS
+
+#### 任务 2：添加 build-time archive 依赖
+
+**描述：** 在 workspace 中加入源码遍历、归档、压缩和 hash 相关依赖。`ignore` 只用于 `build.rs`；`tar`、`zstd` 同时用于 build-time 打包和 runtime list/cat/extract/archive。
+
+**验收标准：**
+- [x] workspace dependencies 增加 `ignore = "0.4"`、`tar = "0.4"`、`zstd = "0.13"`。
+- [x] root package `build-dependencies` 包含 `ignore`、`tar`、`zstd`、`sha2`、`serde_json`。
+- [x] root runtime dependencies 包含 `tar`、`zstd`、`sha2`。
+- [x] 不给 library crates 增加无关默认依赖。
+
+**验证：**
 - [x] `cargo check -p noloong`
 
 **依赖：** 无
 
 **预计涉及文件：**
 - `Cargo.toml`
-- `crates/noloong-agent-core/Cargo.toml`
-- `crates/noloong-agent/Cargo.toml`
+- `Cargo.lock`
 
 **预计范围：** S
 
-#### 任务 2：为 profile config 引用类型派生 `JsonSchema`
+### 检查点：快照边界基础
 
-**描述：** 为 root `src/config.rs` 中的 config 类型派生 `JsonSchema`，并在 `noloong-agent-core`、`noloong-agent` 中只为 profile config 实际引用到的公共类型补充 feature-gated `JsonSchema` derive。重点覆盖 `ContextCompactionMode`、plugin declaration、capability selector、manifest patch、approval policy、file edit policy、locale 等链路。
+- [x] `git status --short` 只显示本计划相关文件。
+- [x] `cargo check -p noloong`
+
+### 阶段 2：构建时快照生成
+
+#### 任务 3：实现 root `build.rs` 源码快照生成器
+
+**描述：** 新增 root `build.rs`，在构建时从 workspace root 遍历 `.gitignore` 允许的文件，生成稳定顺序的 `source.tar.zst` 和 `build-info.json` 到 `OUT_DIR`。快照必须可复现、可审计，并显式拒绝 `.git/`。
 
 **验收标准：**
-- [x] `HostProfileConfig`、`RuntimeProfileConfig`、provider/store/compaction/auth config 类型都能生成 schema。
-- [x] `AgentPluginDeclaration`、`PluginTransport`、`PluginEnvSource`、`PluginLoadFailurePolicy` 在 `json-schema` feature 下实现 `JsonSchema`。
-- [x] `ManifestPatch` 及其引用的 manifest/policy enum 在 `json-schema` feature 下实现 `JsonSchema`。
-- [x] `ContextCompactionMode` 和 `ExtensionCapabilitySelector` 在 `json-schema` feature 下实现 `JsonSchema`。
-- [x] 不为无关 runtime internals 大面积添加 schema derive。
+- [x] `build.rs` 使用 `ignore::WalkBuilder`，开启 git ignore 规则，关闭 hidden-file 过滤，显式跳过 `.git/`。
+- [x] 文件列表按仓库相对路径稳定排序。
+- [x] 每个普通文件写入 tar 时使用相对路径；不跟随 symlink 写入仓库外内容。
+- [x] `source.tar.zst` 使用 zstd 压缩，`build-info.json` 记录 archive sha256、compressed/uncompressed size、file count 和每个文件的 path/size/sha256。
+- [x] `cargo:rerun-if-changed` 覆盖 `.gitignore` 和进入快照的文件；git metadata 变化通过 `.git/HEAD` 与对应 ref 尽量触发重建。
+- [x] 构建脚本不读取环境变量中的 secret，不把绝对 workspace path 写入 manifest。
 
 **验证：**
-- [x] `cargo check -p noloong`
-- [x] `cargo check -p noloong-agent --features json-schema`
-- [x] `cargo check -p noloong-agent-core --features json-schema`
+- [x] `cargo clean -p noloong`
+- [x] `cargo build -p noloong`
+- [x] 在 `target` 对应 `OUT_DIR` 中能找到生成的 `source.tar.zst` 与 `build-info.json`。
 
-**依赖：** 任务 1
+**依赖：** 任务 1、任务 2
 
 **预计涉及文件：**
-- `src/config.rs`
-- `crates/noloong-agent-core/src/compaction.rs`
-- `crates/noloong-agent-core/src/types/extension.rs`
-- `crates/noloong-agent/src/plugin.rs`
-- `crates/noloong-agent/src/manifest.rs`
-- `crates/noloong-agent/src/approval/policy.rs`
+- `build.rs`
+- `Cargo.toml`
 
 **预计范围：** M
 
-### 检查点：schema 类型基础
+#### 任务 4：定义 build info manifest v1
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo check -p noloong`
-- [x] `cargo check -p noloong-agent --features json-schema`
-- [x] `cargo check -p noloong-agent-core --features json-schema`
-
-### 阶段 2：schema 生成入口与 checked-in artifact
-
-#### 任务 3：新增 profile config schema 生成模块
-
-**描述：** 新增 root schema helper，集中生成 `HostProfileConfig` 的 schema `serde_json::Value` 与 canonical pretty JSON。该模块不读取文件、不处理 CLI，只负责把 Rust 类型 contract 转换成稳定 JSON artifact。
+**描述：** 在构建脚本侧生成稳定 JSON manifest，运行时直接嵌入。manifest v1 是 Agent 与外部审计工具消费的 contract，字段名使用 camelCase，schemaVersion 固定为 `1`。
 
 **验收标准：**
-- [x] 提供 `profile_config_schema_value()` 或等价函数。
-- [x] 提供 canonical pretty JSON 输出函数，末尾换行稳定。
-- [x] schema 顶层有清晰 title，并包含 `HostProfileConfig` 的完整 `$defs`。
-- [x] schema generation 不依赖网络、环境变量或运行时 profile。
+- [x] manifest 顶层包含 `schemaVersion`、`package`、`workspace`、`git`、`rust`、`cargo`、`build`、`sourceArchive`、`files`。
+- [x] `build.command` 输出 normalized recipe，例如 `cargo build -p noloong --bin noloong`，并按 profile/target/features 增补参数。
+- [x] `git` 包含 `commit`、`dirty`、`hasUntracked`、`status`，git 不可用时字段为 `null` 或 `unknown`，命令仍可用。
+- [x] `files` 只记录相对路径、byte size 和 sha256，不记录本机绝对路径。
+- [x] manifest pretty JSON 末尾有换行，便于 CLI 直接输出。
 
 **验证：**
-- [x] 单元测试：schema 是 JSON object，包含 `$schema`、`$defs`、`profiles`。
-- [x] 单元测试：canonical 输出可被 `serde_json::from_str` 重新解析。
-
-**依赖：** 任务 2
-
-**预计涉及文件：**
-- `src/schema.rs`
-- `src/main.rs`
-
-**预计范围：** S
-
-#### 任务 4：增加 `noloong profile-config schema` CLI
-
-**描述：** 在 root CLI 中增加 profile config 子命令，支持生成 schema 到 stdout、写入文件、以及检查 checked-in schema 是否与当前类型一致。该命令只生成 schema，不加载实际 profile config。
-
-**验收标准：**
-- [x] `noloong profile-config schema` 将 schema 输出到 stdout。
-- [x] `noloong profile-config schema --output schemas/profile-config.schema.json` 可写入 schema 文件。
-- [x] `noloong profile-config schema --check schemas/profile-config.schema.json` 在文件内容匹配时退出成功。
-- [x] check 模式不匹配时返回非零错误，并给出可诊断信息。
-- [x] CLI help 中能看到 profile-config 子命令。
-
-**验证：**
-- [x] 单元测试：CLI 能解析 `profile-config schema`。
-- [x] 单元测试：check 模式对匹配/不匹配内容返回正确结果。
-- [x] 手工验证：`cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
+- [x] `serde_json::from_str(include_str!(...))` 可解析 manifest。
+- [x] 单元测试断言 manifest `schemaVersion == 1`。
 
 **依赖：** 任务 3
 
 **预计涉及文件：**
-- `src/main.rs`
-- `src/schema.rs`
+- `build.rs`
+- `src/build_info.rs`
 
-**预计范围：** M
+**预计范围：** S
 
-#### 任务 5：提交 checked-in schema artifact
+### 检查点：构建产物可嵌入
 
-**描述：** 新增 `schemas/profile-config.schema.json`，内容必须来自 CLI 生成结果。该文件是第三方使用者、IDE 和文档引用的稳定入口。
+- [x] `cargo build -p noloong`
+- [x] `cargo test -p noloong build_info`
+
+### 阶段 3：运行时 build-info 模块与 CLI
+
+#### 任务 5：新增 runtime `build_info` 模块
+
+**描述：** 新增 `src/build_info.rs`，通过 `include_str!` 和 `include_bytes!` 嵌入 `build-info.json` 与 `source.tar.zst`。模块提供 manifest 输出、build command 输出、source list/cat/extract/archive 的纯函数，CLI 只负责参数解析和 stdout/filesystem I/O。
 
 **验收标准：**
-- [x] 新增 `schemas/profile-config.schema.json`。
-- [x] 文件内容与 `noloong profile-config schema` 生成结果一致。
-- [x] schema 覆盖 provider variants：`chat_completions`、`responses`、`anthropic_messages`、`chatgpt_responses`。
-- [x] schema 覆盖 `registryStore`、profile `eventStore`、`compaction`、`plugins`、`manifestPatches`、`metadata`。
-- [x] schema 文件不包含真实 secret、真实 token 或机器私有路径。
+- [x] `manifest_json()` 返回构建时 manifest JSON。
+- [x] `build_command()` 返回 manifest 中的 normalized build command。
+- [x] `source_paths()` 从嵌入 archive 读取并返回排序路径。
+- [x] `source_file(path)` 安全读取单个文件内容；拒绝绝对路径、空路径、`..` 和目录路径。
+- [x] `write_archive(path)` 原样写出嵌入的 `source.tar.zst`。
+- [x] `extract_source(output_dir, force)` 安全解包，不允许 tar path traversal；默认拒绝覆盖非空目录。
 
 **验证：**
-- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-- [x] `serde_json` parse schema artifact 成功。
+- [x] 单元测试：manifest JSON 可解析。
+- [x] 单元测试：`source_paths()` 包含 `Cargo.toml`、`.github/workflows/ci.yml`、`crates/noloong-agent-core/src/lib.rs`。
+- [x] 单元测试：`source_paths()` 不包含 `.git/`、`target/`、`.env`、sqlite/log/key 类路径。
+- [x] 单元测试：`source_file("Cargo.toml")` 返回包含 `[workspace]` 的文本。
+- [x] 单元测试：`source_file("../Cargo.toml")` 和绝对路径返回错误。
 
 **依赖：** 任务 4
 
 **预计涉及文件：**
-- `schemas/profile-config.schema.json`
+- `src/build_info.rs`
+- `src/main.rs`
 
-**预计范围：** S
+**预计范围：** M
 
-### 检查点：schema artifact 闭环
+#### 任务 6：接入 `noloong build-info` CLI
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong schema`
-- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-
-### 阶段 3：JSONC profile config loader
-
-#### 任务 6：让 `HostProfileConfig::load` 支持 JSONC
-
-**描述：** 把 profile config 文件加载从直接 `serde_json::from_str` 调整为 JSONC parse -> `serde_json::Value` -> `HostProfileConfig`。普通 `.json` 文件继续可用；`.jsonc` 或带注释/trailing comma 的配置也可用。错误信息需要保留“读文件失败”和“解析配置失败”的清晰边界。
+**描述：** 在 root `src/main.rs` 接入 `build-info` 子命令，保持现有 clap 风格。命令只做自省输出，不启动 Agent runtime，也不读取 profile config。
 
 **验收标准：**
-- [x] `HostProfileConfig::load` 可以读取带 `//`、`/* */` 注释的 profile config。
-- [x] `HostProfileConfig::load` 可以读取带 trailing comma 的 profile config。
-- [x] 普通 JSON 文件行为保持不变。
-- [x] JSONC 语法错误返回 `CliConfigError::ParseConfig`，错误信息包含足够定位信息。
-- [x] 不把 JSONC 支持扩散到 JSON-RPC、provider payload 或 extension protocol。
+- [x] `noloong build-info manifest` 输出 pretty JSON。
+- [x] `noloong build-info command` 输出 normalized build command 单行文本。
+- [x] `noloong build-info source list` 输出每行一个相对路径。
+- [x] `noloong build-info source cat <path>` 输出指定文件内容。
+- [x] `noloong build-info source extract --output-dir <dir> [--force]` 解包快照。
+- [x] `noloong build-info source archive --output <path>` 写出嵌入归档。
+- [x] 错误归入 `CliError`，信息可诊断，不 panic。
 
 **验证：**
-- [x] 单元测试：普通 JSON profile config load 成功。
-- [x] 单元测试：JSONC comments + trailing comma profile config load 成功。
-- [x] 单元测试：非法 JSONC 返回 parse error。
+- [x] CLI parse 单元测试覆盖所有新增子命令。
+- [x] `cargo run -p noloong -- build-info manifest`
+- [x] `cargo run -p noloong -- build-info command`
+- [x] `cargo run -p noloong -- build-info source list`
+- [x] `cargo run -p noloong -- build-info source cat Cargo.toml`
 
-**依赖：** 任务 1
+**依赖：** 任务 5
 
 **预计涉及文件：**
-- `src/config.rs`
+- `src/main.rs`
+- `src/build_info.rs`
 
-**预计范围：** S
+**预计范围：** M
 
-#### 任务 7：增加 `.jsonc` 示例配置
+### 检查点：CLI 自省闭环
 
-**描述：** 在 `examples/profile-configs` 下新增一个不含 secret 的 JSONC 示例，展示 `$schema`、注释和 trailing comma 的使用方式。现有 `.json` 示例保持严格 JSON，继续服务自动测试和最小运行路径。
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong build_info`
+- [x] `cargo run -p noloong -- build-info source cat Cargo.toml`
+
+### 阶段 4：安全边界、文档与 CI
+
+#### 任务 7：强化解包与路径安全测试
+
+**描述：** 针对 `source cat`、`source extract`、`source archive` 的路径处理补充负例，保证 Agent 即使传入恶意路径也不能写出 output dir 外或读取非法路径。
 
 **验收标准：**
-- [x] 新增 `examples/profile-configs/telegram-openrouter-free.jsonc` 或等价示例。
-- [x] 示例顶部包含 `"$schema": "../../schemas/profile-config.schema.json"`。
-- [x] 示例包含注释和至少一个 trailing comma。
-- [x] 示例不包含真实 API key、Telegram bot token 或 user id。
-- [x] 现有 `.json` 示例不被改成 JSONC。
+- [x] `source cat` 拒绝绝对路径、`..`、空路径、目录路径和不存在路径。
+- [x] `extract` 拒绝非空目录，除非传 `--force`。
+- [x] `extract` 对 archive entry 做 path traversal 防护。
+- [x] `archive --output` 可创建父目录，但不会接受目录作为文件输出路径。
 
 **验证：**
-- [x] 单元测试或集成测试：`.jsonc` 示例可通过 `HostProfileConfig::load` 加载并 `validate()` 通过。
-- [x] 手工检查示例路径中的 `$schema` 相对位置正确。
+- [x] `cargo test -p noloong build_info`
+- [x] `cargo test -p noloong cli_build_info`
 
 **依赖：** 任务 5、任务 6
 
 **预计涉及文件：**
-- `examples/profile-configs/*.jsonc`
-- `src/config.rs`
+- `src/build_info.rs`
+- `src/main.rs`
+- `src/test_support.rs`
 
 **预计范围：** S
 
-### 检查点：JSONC 输入体验
+#### 任务 8：更新 README 与架构文档
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong config::`
-- [x] `cargo test -p noloong schema`
-
-### 阶段 4：schema validation、CI 与文档
-
-#### 任务 8：用 JSON Schema 校验现有 profile 示例
-
-**描述：** 增加测试，使用 generated schema 校验 `examples/profile-configs/*.json` 的 JSON 数据。JSONC 示例先通过 JSONC parser 转成 JSON value，再走同一份 schema 校验。
+**描述：** 文档说明 build-time source snapshot 的用途、命令示例、安全边界和限制。重点说清楚它是“不可变 Rust host 自省”，不是热更新机制。
 
 **验收标准：**
-- [x] 所有现有 `.json` profile examples 通过 schema validation。
-- [x] 新增 `.jsonc` profile example 通过 schema validation。
-- [x] validation 使用当前 generated schema，而不是手写简化 schema。
-- [x] 测试失败时能指出失败的示例文件名。
+- [x] README 增加 `build-info` 使用示例。
+- [x] `crates/noloong-agent/docs/ARCHITECTURE.md` 增加不可变 host 自省说明。
+- [x] 文档明确 `.gitignore` 是快照边界，添加 secret 文件前必须先确认 ignore 规则。
+- [x] 文档明确 v1 不嵌入 crates.io 依赖源码、不自动重建或替换当前 binary。
+- [x] 文档明确不推荐解包内置源码后修改并重新编译作为常规自我改进方式。
+- [x] 文档明确自我改进的推荐路径是编写或更新插件，而不是修改不可变 Rust host。
 
 **验证：**
-- [x] `cargo test -p noloong schema`
-- [x] `cargo test -p noloong config::`
+- [x] `rg -n "build-info|source snapshot|sourceArchive" README.md crates/noloong-agent/docs/ARCHITECTURE.md`
 
-**依赖：** 任务 3、任务 6、任务 7
+**依赖：** 任务 6
 
 **预计涉及文件：**
-- `src/schema.rs`
-- `src/config.rs`
+- `README.md`
+- `crates/noloong-agent/docs/ARCHITECTURE.md`
 
 **预计范围：** S
 
-#### 任务 9：把 schema drift 检查接入 CI
+#### 任务 9：接入 CI 与完整验证
 
-**描述：** 在 GitHub Actions 中加入 schema artifact drift 检查，确保 Rust 类型变更没有忘记更新 `schemas/profile-config.schema.json`。
+**描述：** 在 CI 中增加最小 build-info smoke checks，确保嵌入源码快照在 Linux CI 上可生成、可解析、可读取。
 
 **验收标准：**
-- [x] `.github/workflows/ci.yml` 增加 schema check step。
-- [x] CI step 使用 `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json` 或等价命令。
-- [x] 该 step 不依赖 secret、网络服务或本地绝对路径。
+- [x] CI 增加 `cargo run -p noloong -- build-info manifest`。
+- [x] CI 增加 `cargo run -p noloong -- build-info source cat Cargo.toml`。
+- [x] CI 不运行会写入仓库目录的 extract/archive 命令。
+- [x] workspace 原有 schema check、clippy、test 保持通过。
 
 **验证：**
-- [x] 本地运行 CI step 命令成功。
-- [x] `cargo test --workspace` 成功。
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
+- [x] `cargo run -p noloong -- build-info manifest`
+- [x] `cargo run -p noloong -- build-info source cat Cargo.toml`
 
-**依赖：** 任务 4、任务 5
+**依赖：** 任务 6、任务 8
 
 **预计涉及文件：**
 - `.github/workflows/ci.yml`
 
 **预计范围：** XS
 
-#### 任务 10：更新文档说明 schema 与 JSONC
+### 检查点：完成
 
-**描述：** 更新 README 和相关 docs，说明 profile config schema 的位置、生成方式、CI 检查方式、JSONC 支持范围，以及为什么不支持 JSON5。
-
-**验收标准：**
-- [x] `README.md` 展示 `$schema` 用法和 `noloong profile-config schema` 命令。
-- [x] 文档说明 `.json` 示例仍是严格 JSON，`.jsonc` 示例可用于带注释配置。
-- [x] 文档明确 JSONC 只用于 profile config，不用于 extension JSON-RPC 或 provider payload。
-- [x] 文档明确不使用 JSON5 的原因：避免扩大配置语言兼容面。
-- [x] 文档没有真实 secret。
-
-**验证：**
-- [x] 手工检查文档命令和实际 CLI 一致。
-- [x] 手工检查 schema path 和示例 `$schema` 相对路径一致。
-
-**依赖：** 任务 4、任务 7
-
-**预计涉及文件：**
-- `README.md`
-- `crates/noloong-agent/docs/INTERACTION.md`
-- `crates/noloong-agent/docs/ARCHITECTURE.md`
-
-**预计范围：** S
-
-### 检查点：文档与 CI
-
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong schema`
-- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-- [x] 手工检查文档与示例不包含真实 secret。
-
-### 阶段 5：全量验证与收尾
-
-#### 任务 11：全量验证与计划状态更新
-
-**描述：** 完成实现后跑完整 workspace 验证，确认 schema artifact、JSONC loader、CI step 和文档都已闭环，再把本计划状态改为已完成。
-
-**验收标准：**
-- [x] 所有任务验收项完成。
-- [x] `plans/CURRENT_PLAN.md` 状态更新为已完成。
-- [x] 没有新增 `#[allow(dead_code)]`。
-- [x] 没有真实 secret 写入仓库。
-- [x] checked-in schema 与 CLI 生成结果一致。
-
-**验证：**
-- [x] `cargo fmt --all --check`
-- [x] `cargo test --workspace`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-- [x] `git diff --check`
-- [x] `rg -n "#\\[allow\\(dead_code\\)\\]" crates src`
-
-**依赖：** 任务 1-10
-
-**预计涉及文件：**
-- `plans/CURRENT_PLAN.md`
-
-**预计范围：** XS
+- [x] 所有新增 CLI 命令可用。
+- [x] 嵌入源码快照不包含 `.git/`、`target/`、secret、数据库和日志类文件。
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- [x] `cargo test --workspace` 通过。
+- [x] 文档能指导 Agent 或开发者从二进制提取源码并构建派生版本。
 
 ## 风险与缓解
 
 | 风险 | 影响 | 缓解 |
-|---|---|---|
-| schema 与 serde runtime 行为漂移 | 高 | schema 由 Rust 类型生成；checked-in artifact 由 CLI check 和 CI 防漂移 |
-| schema 比 runtime 更严格导致 IDE 假阳性 | 中 | 不主动添加 `additionalProperties: false`，除非 serde 同步启用严格字段 |
-| 为 schema derive 扩散修改过多 core/agent 类型 | 中 | 只覆盖 profile config 引用链，使用 `json-schema` optional feature |
-| JSONC 被误解为 JSON5 | 中 | 文档和错误信息明确只支持 JSONC，不支持 JSON5 扩展语法 |
-| JSONC parser 错误信息不够友好 | 中 | 在 `CliConfigError::ParseConfig` 中保留 parser 的位置/上下文；测试覆盖非法 JSONC |
-| checked-in schema 体积较大影响 review | 低 | schema 单独提交或单独文件，CLI check 保证可再生成 |
+|------|------|------|
+| `.gitignore` 漏掉 secret 类文件 | 高 | 先收紧 `.gitignore`，并在测试中断言快照不包含常见 secret/database/log 路径。 |
+| 二进制体积明显增大 | 中 | 使用 `tar.zst` 压缩；v1 接受体积换自包含能力，后续可加 feature gate 或外部 artifact 模式。 |
+| `build.rs` 触发重建过频繁 | 中 | 只对进入快照的文件输出 `rerun-if-changed`，git metadata 只监听 `.git/HEAD` 和当前 ref。 |
+| archive 解包路径穿越 | 高 | runtime 解包前 normalize entry path，拒绝绝对路径、`..` 和非普通文件 entry。 |
+| normalized command 被误认为原始命令 | 中 | manifest 字段和文档明确它是 reproducible recipe，不是 shell history。 |
 
-## 并行化机会
+## 并行化建议
 
-- 任务 2 和任务 6 可以在任务 1 后并行：schema derive 与 JSONC loader 互不阻塞。
-- 任务 10 可以在任务 4 的 CLI 形状确定后提前写草案。
-- 任务 8 必须等待任务 3、6、7 完成，因为它依赖 generated schema 和 JSONC 示例。
-- 任务 9 必须等待任务 4、5 完成，否则 CI 没有稳定 artifact 可检查。
+- 任务 1 和任务 2 可以并行。
+- 任务 3 和任务 4 必须顺序执行。
+- 任务 5 和任务 6 建议同一人连续完成，避免 CLI 与模块 API 反复调整。
+- 任务 8 可在任务 6 稳定后与任务 7 并行。
+- 任务 9 最后执行，避免 CI 先引用未稳定命令。
 
-## 开放问题
+## Open Questions
 
-- 无需额外产品决策。采用 `schemars` + `jsonc-parser`，不引入 JSON5；schema checked in，同时提供 CLI 生成和 CI drift 检查。
+- 无阻塞问题。默认按二进制自包含、仓库快照、`build-info` CLI、normalized build recipe 执行。

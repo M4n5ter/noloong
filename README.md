@@ -12,6 +12,23 @@
 
 Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md). Extension authoring details live in [`crates/noloong-agent-core/docs/EXTENSIONS.md`](crates/noloong-agent-core/docs/EXTENSIONS.md).
 
+## Build Info Source Snapshot
+
+The root `noloong` binary embeds a build-time source snapshot for immutable host inspection. This lets an agent see the Rust host, product layer, examples, schemas, and docs that were present when the binary was built, even when the original checkout is unavailable.
+
+```bash
+noloong build-info manifest
+noloong build-info command
+noloong build-info source list
+noloong build-info source cat Cargo.toml
+noloong build-info source extract --output-dir /tmp/noloong-source
+noloong build-info source archive --output /tmp/noloong-source.tar.zst
+```
+
+The snapshot follows `.gitignore` and always excludes `.git/`. Treat `.gitignore` as the safety boundary before adding local credentials, databases, logs, or other private files to a checkout.
+
+This feature is for understanding and auditing the immutable Rust host behind a binary. It is not the recommended self-improvement path to extract the embedded source, edit it, and rebuild a replacement binary. Noloong should evolve through plugins first: write or update plugin code, reload the extension layer, and keep the Rust host small and stable unless the core contract itself needs to change.
+
 ## Examples
 
 ```bash

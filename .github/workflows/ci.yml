@@ -37,6 +37,12 @@ jobs:
       - name: Check profile config schema
         run: cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json
 
+      - name: Check build info manifest
+        run: cargo run -p noloong -- build-info manifest > /dev/null
+
+      - name: Check build info source snapshot
+        run: cargo run -p noloong -- build-info source cat Cargo.toml > /dev/null
+
       - name: Build examples
         run: cargo test -p noloong-agent-core --examples
 
