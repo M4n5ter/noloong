@@ -25,6 +25,9 @@ getrandom = "0.4"
 ignore = "0.4"
 jsonc-parser = { version = "0.32", features = ["serde", "serde_json"] }
 jsonschema = { version = "0.46", default-features = false }
+env_logger = "0.11"
+human-panic = "2.0"
+log = "0.4"
 memchr = "2.8"
 opendal = { version = "0.56", default-features = false, features = ["executors-tokio", "services-fs", "services-memory"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -59,8 +62,11 @@ noloong-agent = { workspace = true, features = ["interaction-http", "json-schema
 noloong-agent-core = { workspace = true, features = ["json-schema", "sqlite-store"] }
 noloong-agent-telegram.workspace = true
 noloong-openai.workspace = true
+env_logger.workspace = true
 getrandom.workspace = true
+human-panic.workspace = true
 jsonc-parser.workspace = true
+log.workspace = true
 opendal.workspace = true
 reqwest.workspace = true
 schemars.workspace = true

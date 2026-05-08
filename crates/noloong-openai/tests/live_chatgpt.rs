@@ -14,6 +14,10 @@ use noloong_openai::{
 use serde_json::Map;
 use std::{env, path::PathBuf, sync::Arc};
 
+#[path = "support/logging.rs"]
+mod logging;
+use logging::init_test_logger;
+
 const LIVE_ENABLE_ENV: &str = "NOLOONG_OPENAI_LIVE_CHATGPT";
 const LIVE_MODEL_ENV: &str = "NOLOONG_CHATGPT_LIVE_MODEL";
 const LIVE_TOKEN_FILE_ENV: &str = "NOLOONG_CHATGPT_TOKEN_FILE";
@@ -84,15 +88,18 @@ async fn live_chatgpt_responses_compact_smoke() -> CoreResult<()> {
 
 fn live_model_and_auth() -> CoreResult<Option<(String, Arc<ChatGptAuthManager>)>> {
     if env::var(LIVE_ENABLE_ENV).as_deref() != Ok("1") {
-        eprintln!("skipping ChatGPT live test; set {LIVE_ENABLE_ENV}=1");
+        init_test_logger();
+        log::info!("skipping ChatGPT live test; set {LIVE_ENABLE_ENV}=1");
         return Ok(None);
     }
     let Ok(model) = env::var(LIVE_MODEL_ENV) else {
-        eprintln!("skipping ChatGPT live test; set {LIVE_MODEL_ENV}");
+        init_test_logger();
+        log::info!("skipping ChatGPT live test; set {LIVE_MODEL_ENV}");
         return Ok(None);
     };
     let Some(storage) = live_token_storage().map_err(to_core_error)? else {
-        eprintln!(
+        init_test_logger();
+        log::info!(
             "skipping ChatGPT live test; set {LIVE_TOKEN_FILE_ENV} or explicit token env vars"
         );
         return Ok(None);

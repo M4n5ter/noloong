@@ -1,290 +1,264 @@
-# 实施计划：Build Info 与构建时源码快照
+# 实施计划：统一诊断日志到 `log` + `env_logger`
 
-> 状态：已完成实现、本地验证、workspace 测试和 clippy。目标是在 `noloong` Rust 二进制中嵌入构建时仓库源码快照和构建 provenance，并提供 `noloong build-info ...` 子命令，让 Agent 在自我迭代时能够审阅不可变 Rust host 的源码和可复现构建命令。
+> 状态：已完成实现、本地验证、workspace 测试和 clippy。诊断类输出已迁移到 `log`，root CLI 使用 `env_logger` 与 `human-panic`，机器可读 stdout、CLI 错误和交互式提示保持原有输出语义。
 
 ## 概览
 
-当前 Agent 可以通过工具操作宿主环境，但运行中的 Rust 二进制本身是不可变层；如果运行环境没有原始 git checkout，Agent 无法确认自己正在调用的 host/core/interaction 代码。下一步在 root `noloong` crate 增加构建时 source snapshot：`build.rs` 遵循 `.gitignore` 收集仓库文件，显式排除 `.git/`，生成 `source.tar.zst` 和 `build-info.json`，运行时通过 CLI 输出 manifest、构建命令、源码列表、单文件内容、归档和解包目录。
+当前仓库里仍有一批 `eprintln!` 被用于运行时诊断、启动状态、重试提示和 live test skip 信息。下一步将这些诊断输出统一迁移到 `log` facade，并由二进制入口使用 `env_logger` 初始化。默认日志级别为 `info`，允许用户通过 `RUST_LOG` 覆盖。同时引入 `human-panic`，让 release panic 给出更适合用户提交问题的崩溃报告。
+
+本计划只迁移“诊断日志”。命令承诺的 stdout、机器可读输出、交互式登录提示、示例程序演示输出继续保持普通 `println!` / `eprintln!`，避免日志污染 CLI contract。
 
 ## 架构决策
 
-- 使用二进制自包含方案：源码快照以 `tar.zst` 嵌入 root `noloong` binary，不依赖运行时 checkout、网络或外部 artifact。
-- `.gitignore` 是源码快照的安全边界；先补齐本地 secret、数据库、日志、IDE/cache/temp 排除规则，再让 `build.rs` 遵循 ignore 规则遍历仓库。
-- 快照范围是被 `.gitignore` 允许的仓库快照，包含 `.github/`、`.gitignore`、docs、examples、schemas、Cargo manifests 和 Rust 源码；显式排除 `.git/` 与 build output。
-- 构建命令输出 normalized reproducible recipe，不承诺还原用户 shell 中的原始命令；manifest 同时记录 target/profile/features、rustc/cargo version、git 状态和 source hash。
-- CLI 入口采用 `noloong build-info`，下挂 `manifest`、`command`、`source list`、`source cat`、`source extract`、`source archive`。
-- v1 不嵌入 crates.io 依赖源码、不自动重建新二进制、不替换当前进程，只提供可审计、可解包、可复现的信息。
-- 嵌入源码只推荐用于理解当前二进制背后的不可变 Rust host 内容；不推荐把内置源码解包后直接修改并重新编译作为常规自我改进路径。
-- 真正的自我改进应优先通过编写、更新和热插拔插件完成，让不可变核心保持稳定，演进能力落在可替换扩展层。
+- workspace 统一依赖：新增 `log = "0.4"`、`env_logger = "0.11"`、`human-panic = "2.0"`。
+- `log` 是库与二进制共享的诊断 facade；`env_logger` 只在二进制或测试初始化处使用。
+- root `noloong` CLI 在入口最早位置初始化 logger 与 `human-panic`；`noloong-extension-conformance` 保持轻量 CLI，不把 logger backend 或 panic reporter 下沉进 core library 依赖。
+- logger 使用 `env_logger::Env::default().default_filter_or("info")`，`RUST_LOG` 仍然具有最高优先级。
+- logger 初始化使用 `try_init` 或同等幂等封装，避免测试或嵌入场景重复初始化 panic。
+- 日志级别约定：
+  - `info!`：正常启动、监听地址、网络模式、预期的 live test skip。
+  - `warn!`：可恢复的重试，例如 Telegram polling retry。
+  - `error!`：真正的运行时诊断错误。
+- 不迁移以下输出：root CLI fatal error、conformance CLI error/usage、`build-info`、profile schema、conformance JSON/text report、ChatGPT browser/device login 提示、examples 演示输出。
 
 ## 任务列表
 
-### 阶段 1：源码快照边界与构建依赖
+### 阶段 1：依赖与初始化基础
 
-#### 任务 1：收紧 `.gitignore` 作为快照安全边界
+#### 任务 1：添加 workspace 日志与 panic 依赖
 
-**描述：** 完善 `.gitignore`，确保构建时仓库快照不会嵌入本地 secret、临时数据库、日志、编辑器缓存和 OS 噪声文件。保留 `.github/`、`.gitignore`、docs、examples、schemas 等可审阅上下文。
-
-**验收标准：**
-- [x] `.gitignore` 继续排除 `target/`、`node_modules/`、Python cache 和 `.zed/`。
-- [x] `.gitignore` 新增排除 `.env*`、`.envrc`、`*.sqlite*`、`*.db`、`*.pem`、`*.key`、`*.log`、`.DS_Store`、`.idea/`、`.vscode/`、`tmp/`、`temp/`。
-- [x] `git ls-files -co --exclude-standard` 不显示本地 secret/token/database/log 类文件。
-- [x] `.github/workflows/ci.yml` 仍会进入快照候选文件。
-
-**验证：**
-- [x] `git ls-files -co --exclude-standard | rg '(^|/)(\\.env|.*\\.sqlite|.*\\.db|.*\\.pem|.*\\.key|.*\\.log)$'` 无输出。
-- [x] `git ls-files -co --exclude-standard | rg '^\\.github/workflows/ci\\.yml$'` 有输出。
-
-**依赖：** 无
-
-**预计涉及文件：**
-- `.gitignore`
-
-**预计范围：** XS
-
-#### 任务 2：添加 build-time archive 依赖
-
-**描述：** 在 workspace 中加入源码遍历、归档、压缩和 hash 相关依赖。`ignore` 只用于 `build.rs`；`tar`、`zstd` 同时用于 build-time 打包和 runtime list/cat/extract/archive。
+**描述：** 在 workspace 统一管理 `log`、`env_logger`、`human-panic` 版本，并只把依赖加到实际需要的 crate。root `noloong` 需要三者；测试中写日志的 crate 使用 dev-dependencies；`noloong-agent-core` 不为 conformance binary 下沉 logger backend 或 panic reporter。
 
 **验收标准：**
-- [x] workspace dependencies 增加 `ignore = "0.4"`、`tar = "0.4"`、`zstd = "0.13"`。
-- [x] root package `build-dependencies` 包含 `ignore`、`tar`、`zstd`、`sha2`、`serde_json`。
-- [x] root runtime dependencies 包含 `tar`、`zstd`、`sha2`。
-- [x] 不给 library crates 增加无关默认依赖。
+- [x] workspace dependencies 包含 `log = "0.4"`、`env_logger = "0.11"`、`human-panic = "2.0"`。
+- [x] root `noloong` crate 可使用 `log`、`env_logger`、`human-panic`。
+- [x] `noloong-agent-core` 仅在 dev-dependencies 中使用 `log`、`env_logger`，不把 `env_logger` 或 `human-panic` 作为 library runtime dependency。
+- [x] 仅测试需要日志的 crate 使用 dev-dependencies，不给无关库 crate 增加 runtime logging backend。
 
 **验证：**
+- [x] `cargo metadata --no-deps`
 - [x] `cargo check -p noloong`
+- [x] `cargo check -p noloong-agent-core --bins`
 
 **依赖：** 无
 
 **预计涉及文件：**
 - `Cargo.toml`
+- `crates/noloong-agent-core/Cargo.toml`
+- `crates/noloong-agent/Cargo.toml`
+- `crates/noloong-openai/Cargo.toml`
 - `Cargo.lock`
 
 **预计范围：** S
 
-### 检查点：快照边界基础
+#### 任务 2：实现二进制入口初始化
 
-- [x] `git status --short` 只显示本计划相关文件。
-- [x] `cargo check -p noloong`
-
-### 阶段 2：构建时快照生成
-
-#### 任务 3：实现 root `build.rs` 源码快照生成器
-
-**描述：** 新增 root `build.rs`，在构建时从 workspace root 遍历 `.gitignore` 允许的文件，生成稳定顺序的 `source.tar.zst` 和 `build-info.json` 到 `OUT_DIR`。快照必须可复现、可审计，并显式拒绝 `.git/`。
+**描述：** 为 root CLI 增加早期初始化逻辑。初始化顺序为先注册 `human-panic`，再初始化 logger，然后进入原有 CLI 解析与运行流程。conformance CLI 不初始化 logger backend，避免污染 core library dependency graph。
 
 **验收标准：**
-- [x] `build.rs` 使用 `ignore::WalkBuilder`，开启 git ignore 规则，关闭 hidden-file 过滤，显式跳过 `.git/`。
-- [x] 文件列表按仓库相对路径稳定排序。
-- [x] 每个普通文件写入 tar 时使用相对路径；不跟随 symlink 写入仓库外内容。
-- [x] `source.tar.zst` 使用 zstd 压缩，`build-info.json` 记录 archive sha256、compressed/uncompressed size、file count 和每个文件的 path/size/sha256。
-- [x] `cargo:rerun-if-changed` 覆盖 `.gitignore` 和进入快照的文件；git metadata 变化通过 `.git/HEAD` 与对应 ref 尽量触发重建。
-- [x] 构建脚本不读取环境变量中的 secret，不把绝对 workspace path 写入 manifest。
+- [x] root `src/main.rs` 的 `main` 开头调用 `human_panic::setup_panic!();`。
+- [x] `noloong-extension-conformance` binary 不依赖 `env_logger` 或 `human-panic`。
+- [x] root CLI 初始化 `env_logger`，默认 filter 为 `info`。
+- [x] `RUST_LOG=debug`、`RUST_LOG=warn` 等环境变量能覆盖默认 filter。
+- [x] 重复初始化不会 panic。
 
 **验证：**
-- [x] `cargo clean -p noloong`
-- [x] `cargo build -p noloong`
-- [x] 在 `target` 对应 `OUT_DIR` 中能找到生成的 `source.tar.zst` 与 `build-info.json`。
+- [x] `cargo run -p noloong -- build-info command`
+- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile bad -- echo`
+- [x] `RUST_LOG=warn cargo run -p noloong -- build-info command`
 
-**依赖：** 任务 1、任务 2
-
-**预计涉及文件：**
-- `build.rs`
-- `Cargo.toml`
-
-**预计范围：** M
-
-#### 任务 4：定义 build info manifest v1
-
-**描述：** 在构建脚本侧生成稳定 JSON manifest，运行时直接嵌入。manifest v1 是 Agent 与外部审计工具消费的 contract，字段名使用 camelCase，schemaVersion 固定为 `1`。
-
-**验收标准：**
-- [x] manifest 顶层包含 `schemaVersion`、`package`、`workspace`、`git`、`rust`、`cargo`、`build`、`sourceArchive`、`files`。
-- [x] `build.command` 输出 normalized recipe，例如 `cargo build -p noloong --bin noloong`，并按 profile/target/features 增补参数。
-- [x] `git` 包含 `commit`、`dirty`、`hasUntracked`、`status`，git 不可用时字段为 `null` 或 `unknown`，命令仍可用。
-- [x] `files` 只记录相对路径、byte size 和 sha256，不记录本机绝对路径。
-- [x] manifest pretty JSON 末尾有换行，便于 CLI 直接输出。
-
-**验证：**
-- [x] `serde_json::from_str(include_str!(...))` 可解析 manifest。
-- [x] 单元测试断言 manifest `schemaVersion == 1`。
-
-**依赖：** 任务 3
+**依赖：** 任务 1
 
 **预计涉及文件：**
-- `build.rs`
-- `src/build_info.rs`
+- `src/main.rs`
+- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
 
 **预计范围：** S
 
-### 检查点：构建产物可嵌入
+### 检查点：初始化可用
 
-- [x] `cargo build -p noloong`
-- [x] `cargo test -p noloong build_info`
+- [x] `cargo fmt --all --check`
+- [x] `cargo check -p noloong`
+- [x] `cargo check -p noloong-agent-core --bins`
 
-### 阶段 3：运行时 build-info 模块与 CLI
+### 阶段 2：迁移运行时诊断输出
 
-#### 任务 5：新增 runtime `build_info` 模块
+#### 任务 3：迁移 root CLI 诊断输出
 
-**描述：** 新增 `src/build_info.rs`，通过 `include_str!` 和 `include_bytes!` 嵌入 `build-info.json` 与 `source.tar.zst`。模块提供 manifest 输出、build command 输出、source list/cat/extract/archive 的纯函数，CLI 只负责参数解析和 stdout/filesystem I/O。
+**描述：** 将 root CLI 中真正属于诊断信息的 `eprintln!` 替换为 `log` 宏。保持 stdout 命令输出不变，尤其是 schema、build-info manifest、source cat/list、ChatGPT 登录提示等用户可见 contract。
 
 **验收标准：**
-- [x] `manifest_json()` 返回构建时 manifest JSON。
-- [x] `build_command()` 返回 manifest 中的 normalized build command。
-- [x] `source_paths()` 从嵌入 archive 读取并返回排序路径。
-- [x] `source_file(path)` 安全读取单个文件内容；拒绝绝对路径、空路径、`..` 和目录路径。
-- [x] `write_archive(path)` 原样写出嵌入的 `source.tar.zst`。
-- [x] `extract_source(output_dir, force)` 安全解包，不允许 tar path traversal；默认拒绝覆盖非空目录。
+- [x] 顶层 `run_cli` error 保持直接 stderr，避免被 `RUST_LOG` 隐藏。
+- [x] interaction server listening 使用 `log::info!`。
+- [x] Telegram bridge initialized 使用 `log::info!`。
+- [x] Telegram network mode 使用 `log::info!`。
+- [x] Telegram polling retry 使用 `log::warn!`。
+- [x] `build-info`、profile schema、ChatGPT login/logout/status 输出不改成日志。
 
 **验证：**
-- [x] 单元测试：manifest JSON 可解析。
-- [x] 单元测试：`source_paths()` 包含 `Cargo.toml`、`.github/workflows/ci.yml`、`crates/noloong-agent-core/src/lib.rs`。
-- [x] 单元测试：`source_paths()` 不包含 `.git/`、`target/`、`.env`、sqlite/log/key 类路径。
-- [x] 单元测试：`source_file("Cargo.toml")` 返回包含 `[workspace]` 的文本。
-- [x] 单元测试：`source_file("../Cargo.toml")` 和绝对路径返回错误。
+- [x] `cargo run -p noloong -- build-info command` stdout 仍只包含 build command。
+- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
+- [x] `RUST_LOG=warn cargo run -p noloong -- build-info command` 不输出 info 日志。
 
-**依赖：** 任务 4
+**依赖：** 任务 2
 
 **预计涉及文件：**
-- `src/build_info.rs`
 - `src/main.rs`
+
+**预计范围：** S
+
+#### 任务 4：迁移 conformance CLI 诊断输出
+
+**描述：** 将 extension conformance runner 的报告输出和用户可见错误边界保持清晰：错误与 usage 仍直写 stderr，conformance report 仍写 stdout，避免破坏第三方扩展作者依赖的 JSON/text 输出，也避免 `RUST_LOG` 隐藏 CLI 错误。
+
+**验收标准：**
+- [x] runtime error 使用直接 stderr，确保用户必见。
+- [x] CLI parse error 和 usage 使用直接 stderr，确保用户必见。
+- [x] `--json` 输出仍是纯 JSON，不混入日志。
+- [x] text report 仍写 stdout。
+
+**验证：**
+- [x] `cargo test -p noloong-agent-core --test extension_conformance_cli`
+- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --json -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs` stdout 可被 `serde_json` 解析。
+- [x] invalid profile 测试仍能在 stderr 中看到可诊断错误。
+
+**依赖：** 任务 2
+
+**预计涉及文件：**
+- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
+- `crates/noloong-agent-core/tests/extension_conformance_cli.rs`
+
+**预计范围：** S
+
+### 检查点：运行时日志迁移完成
+
+- [x] `rg -n "eprintln!" src crates --glob '*.rs'` 只剩用户输出、示例输出或交互提示。
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-agent-core --test extension_conformance_cli`
+
+### 阶段 3：迁移测试诊断输出
+
+#### 任务 5：为测试增加幂等 logger 初始化
+
+**描述：** 为会打印 skip 信息的测试增加最小 logger 初始化 helper。测试 logger 使用 `env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).is_test(true).try_init()`，保证 `cargo test` 输出可控且不会因重复初始化失败。
+
+**验收标准：**
+- [x] `noloong-agent-core` live test support 有可复用测试 logger 初始化。
+- [x] `noloong-agent` PostgreSQL registry store live test 初始化 logger。
+- [x] `noloong-openai` ChatGPT live test 初始化 logger。
+- [x] helper 不引入全局可变复杂状态，不因并发测试 panic。
+
+**验证：**
+- [x] `cargo test -p noloong-agent-core --tests`
+- [x] `cargo test -p noloong-agent --tests`
+- [x] `cargo test -p noloong-openai --tests`
+
+**依赖：** 任务 1
+
+**预计涉及文件：**
+- `crates/noloong-agent-core/tests/support/mod.rs`
+- `crates/noloong-agent/tests/interaction_registry_store_postgres.rs`
+- `crates/noloong-openai/tests/live_chatgpt.rs`
 
 **预计范围：** M
 
-#### 任务 6：接入 `noloong build-info` CLI
+#### 任务 6：迁移 live test skip 诊断
 
-**描述：** 在 root `src/main.rs` 接入 `build-info` 子命令，保持现有 clap 风格。命令只做自省输出，不启动 Agent runtime，也不读取 profile config。
+**描述：** 将测试中的 expected skip 信息从 `eprintln!` 改为 `log::info!`。这些 skip 属于预期环境缺失，不应使用 `warn!` 或 `error!`。
 
 **验收标准：**
-- [x] `noloong build-info manifest` 输出 pretty JSON。
-- [x] `noloong build-info command` 输出 normalized build command 单行文本。
-- [x] `noloong build-info source list` 输出每行一个相对路径。
-- [x] `noloong build-info source cat <path>` 输出指定文件内容。
-- [x] `noloong build-info source extract --output-dir <dir> [--force]` 解包快照。
-- [x] `noloong build-info source archive --output <path>` 写出嵌入归档。
-- [x] 错误归入 `CliError`，信息可诊断，不 panic。
+- [x] `OPENROUTER_API_KEY`、ChatGPT live env、PostgreSQL env 等缺失提示使用 `log::info!`。
+- [x] TypeScript example dependency 缺失提示使用 `log::info!`。
+- [x] 测试逻辑和 skip 条件不改变。
+- [x] 不使用关键词断言新增低价值测试。
 
 **验证：**
-- [x] CLI parse 单元测试覆盖所有新增子命令。
-- [x] `cargo run -p noloong -- build-info manifest`
-- [x] `cargo run -p noloong -- build-info command`
-- [x] `cargo run -p noloong -- build-info source list`
-- [x] `cargo run -p noloong -- build-info source cat Cargo.toml`
+- [x] `cargo test -p noloong-agent-core --tests`
+- [x] `cargo test -p noloong-agent --tests`
+- [x] `cargo test -p noloong-openai --tests`
 
 **依赖：** 任务 5
 
 **预计涉及文件：**
-- `src/main.rs`
-- `src/build_info.rs`
+- `crates/noloong-agent-core/tests/support/mod.rs`
+- `crates/noloong-agent-core/tests/extension_language_examples.rs`
+- `crates/noloong-agent-core/tests/anthropic_live.rs`
+- `crates/noloong-agent-core/tests/responses_live.rs`
+- `crates/noloong-agent/tests/interaction_registry_store_postgres.rs`
+- `crates/noloong-openai/tests/live_chatgpt.rs`
 
 **预计范围：** M
 
-### 检查点：CLI 自省闭环
+### 检查点：测试日志迁移完成
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong build_info`
-- [x] `cargo run -p noloong -- build-info source cat Cargo.toml`
+- [x] `rg -n "eprintln!" src crates --glob '*.rs'` 输出已人工分类。
+- [x] `cargo test --workspace`
 
-### 阶段 4：安全边界、文档与 CI
+### 阶段 4：文档、清理与完整验证
 
-#### 任务 7：强化解包与路径安全测试
+#### 任务 7：补充 diagnostics 文档
 
-**描述：** 针对 `source cat`、`source extract`、`source archive` 的路径处理补充负例，保证 Agent 即使传入恶意路径也不能写出 output dir 外或读取非法路径。
-
-**验收标准：**
-- [x] `source cat` 拒绝绝对路径、`..`、空路径、目录路径和不存在路径。
-- [x] `extract` 拒绝非空目录，除非传 `--force`。
-- [x] `extract` 对 archive entry 做 path traversal 防护。
-- [x] `archive --output` 可创建父目录，但不会接受目录作为文件输出路径。
-
-**验证：**
-- [x] `cargo test -p noloong build_info`
-- [x] `cargo test -p noloong cli_build_info`
-
-**依赖：** 任务 5、任务 6
-
-**预计涉及文件：**
-- `src/build_info.rs`
-- `src/main.rs`
-- `src/test_support.rs`
-
-**预计范围：** S
-
-#### 任务 8：更新 README 与架构文档
-
-**描述：** 文档说明 build-time source snapshot 的用途、命令示例、安全边界和限制。重点说清楚它是“不可变 Rust host 自省”，不是热更新机制。
+**描述：** 在 README 或现有 CLI 文档中补充诊断日志行为：默认 `info`、`RUST_LOG` 覆盖、release panic 报告和 `RUST_BACKTRACE=1` 的关系。文档要明确日志不会写入机器可读 stdout。
 
 **验收标准：**
-- [x] README 增加 `build-info` 使用示例。
-- [x] `crates/noloong-agent/docs/ARCHITECTURE.md` 增加不可变 host 自省说明。
-- [x] 文档明确 `.gitignore` 是快照边界，添加 secret 文件前必须先确认 ignore 规则。
-- [x] 文档明确 v1 不嵌入 crates.io 依赖源码、不自动重建或替换当前 binary。
-- [x] 文档明确不推荐解包内置源码后修改并重新编译作为常规自我改进方式。
-- [x] 文档明确自我改进的推荐路径是编写或更新插件，而不是修改不可变 Rust host。
+- [x] 文档说明默认日志级别是 `info`。
+- [x] 文档说明可用 `RUST_LOG=noloong=debug` 或 `RUST_LOG=warn` 控制输出。
+- [x] 文档说明 release panic 会由 `human-panic` 生成用户友好的 crash report。
+- [x] 文档说明 `RUST_BACKTRACE=1` 可查看传统 backtrace。
+- [x] 文档说明 JSON/schema/build-info 等 stdout contract 不混入日志。
 
 **验证：**
-- [x] `rg -n "build-info|source snapshot|sourceArchive" README.md crates/noloong-agent/docs/ARCHITECTURE.md`
+- [x] `rg -n "RUST_LOG|human-panic|RUST_BACKTRACE|diagnostic" README.md crates`
 
-**依赖：** 任务 6
+**依赖：** 任务 2、任务 3、任务 4
 
 **预计涉及文件：**
 - `README.md`
-- `crates/noloong-agent/docs/ARCHITECTURE.md`
-
-**预计范围：** S
-
-#### 任务 9：接入 CI 与完整验证
-
-**描述：** 在 CI 中增加最小 build-info smoke checks，确保嵌入源码快照在 Linux CI 上可生成、可解析、可读取。
-
-**验收标准：**
-- [x] CI 增加 `cargo run -p noloong -- build-info manifest`。
-- [x] CI 增加 `cargo run -p noloong -- build-info source cat Cargo.toml`。
-- [x] CI 不运行会写入仓库目录的 extract/archive 命令。
-- [x] workspace 原有 schema check、clippy、test 保持通过。
-
-**验证：**
-- [x] `cargo fmt --all --check`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo test --workspace`
-- [x] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-- [x] `cargo run -p noloong -- build-info manifest`
-- [x] `cargo run -p noloong -- build-info source cat Cargo.toml`
-
-**依赖：** 任务 6、任务 8
-
-**预计涉及文件：**
-- `.github/workflows/ci.yml`
 
 **预计范围：** XS
 
-### 检查点：完成
+#### 任务 8：最终清理与 clippy
 
-- [x] 所有新增 CLI 命令可用。
-- [x] 嵌入源码快照不包含 `.git/`、`target/`、secret、数据库和日志类文件。
-- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过。
-- [x] `cargo test --workspace` 通过。
-- [x] 文档能指导 Agent 或开发者从二进制提取源码并构建派生版本。
+**描述：** 检查剩余 print 宏和 lint 状态，确保迁移没有把用户输出误改为日志，也没有留下未使用依赖或 clippy warning。
+
+**验收标准：**
+- [x] `rg -n "eprintln!|println!|print!" src crates --glob '*.rs'` 的剩余项均有明确用户输出、机器输出或 example 输出用途。
+- [x] 无 `#[allow(dead_code)]` 或新增 lint 规避。
+- [x] workspace clippy 无 warning。
+- [x] workspace tests 通过。
+
+**验证：**
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets --all-features`
+- [x] `cargo test --workspace`
+- [x] `cargo run -p noloong -- build-info command`
+- [x] `cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --json -- node crates/noloong-agent-core/tests/fixtures/jsonrpc-conformance-extension.mjs`
+
+**依赖：** 任务 1-7
+
+**预计涉及文件：**
+- `Cargo.toml`
+- `Cargo.lock`
+- `src/main.rs`
+- `crates/noloong-agent-core/src/bin/noloong-extension-conformance.rs`
+- live test files
+- `README.md`
+
+**预计范围：** S
 
 ## 风险与缓解
 
 | 风险 | 影响 | 缓解 |
-|------|------|------|
-| `.gitignore` 漏掉 secret 类文件 | 高 | 先收紧 `.gitignore`，并在测试中断言快照不包含常见 secret/database/log 路径。 |
-| 二进制体积明显增大 | 中 | 使用 `tar.zst` 压缩；v1 接受体积换自包含能力，后续可加 feature gate 或外部 artifact 模式。 |
-| `build.rs` 触发重建过频繁 | 中 | 只对进入快照的文件输出 `rerun-if-changed`，git metadata 只监听 `.git/HEAD` 和当前 ref。 |
-| archive 解包路径穿越 | 高 | runtime 解包前 normalize entry path，拒绝绝对路径、`..` 和非普通文件 entry。 |
-| normalized command 被误认为原始命令 | 中 | manifest 字段和文档明确它是 reproducible recipe，不是 shell history。 |
+|---|---:|---|
+| 日志污染 JSON/stdout contract | 高 | 只把诊断写入 `log`/stderr，保留 report/schema/build-info stdout，并增加 CLI smoke 验证 |
+| 测试重复初始化 logger | 中 | 统一使用 `try_init`，测试 logger 使用 `is_test(true)` |
+| 把交互提示误改为日志 | 中 | ChatGPT login/device/browser prompts 和 examples 明确保留普通输出 |
+| `human-panic` 改变 debug panic 体验 | 低 | 文档说明 `RUST_BACKTRACE=1` 可查看传统 backtrace；仅在二进制入口注册 |
 
-## 并行化建议
+## 完成标准
 
-- 任务 1 和任务 2 可以并行。
-- 任务 3 和任务 4 必须顺序执行。
-- 任务 5 和任务 6 建议同一人连续完成，避免 CLI 与模块 API 反复调整。
-- 任务 8 可在任务 6 稳定后与任务 7 并行。
-- 任务 9 最后执行，避免 CI 先引用未稳定命令。
-
-## Open Questions
-
-- 无阻塞问题。默认按二进制自包含、仓库快照、`build-info` CLI、normalized build recipe 执行。
+- [x] 所有诊断类输出已迁移到 `log`。
+- [x] `env_logger` 默认 `info`，且 `RUST_LOG` 可覆盖。
+- [x] root CLI 已接入 `human-panic`；conformance CLI 保持轻量 stderr/ stdout contract。
+- [x] 用户输出与机器可读 stdout 未被日志污染。
+- [x] `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --all-features`、`cargo test --workspace` 全部通过。

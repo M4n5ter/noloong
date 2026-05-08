@@ -27,3 +27,7 @@ tokio.workspace = true
 toasty = { workspace = true, optional = true }
 toasty-driver-sqlite = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+
+[dev-dependencies]
+env_logger.workspace = true
+log.workspace = true

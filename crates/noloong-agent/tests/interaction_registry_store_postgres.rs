@@ -16,7 +16,8 @@ const POSTGRES_URL_ENV: &str = "NOLOONG_POSTGRES_TEST_URL";
 #[tokio::test]
 async fn postgres_store_round_trips_when_url_is_available() {
     let Ok(database_url) = std::env::var(POSTGRES_URL_ENV) else {
-        eprintln!("skipping PostgreSQL registry store test; {POSTGRES_URL_ENV} is not set");
+        init_test_logger();
+        log::info!("skipping PostgreSQL registry store test; {POSTGRES_URL_ENV} is not set");
         return;
     };
     let store = SqlAgentSessionRegistryStore::connect(
@@ -37,6 +38,12 @@ async fn postgres_store_round_trips_when_url_is_available() {
 
     store.remove("root").await.unwrap();
     assert!(store.get("root").await.unwrap().is_none());
+}
+
+fn init_test_logger() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
 }
 
 fn record(session_id: &str) -> AgentSessionRecord {

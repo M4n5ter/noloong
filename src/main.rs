@@ -61,10 +61,17 @@ type SharedDisplayStates = Arc<Mutex<BTreeMap<TelegramSessionKey, SharedDisplayS
 
 #[tokio::main]
 async fn main() {
+    init_process_diagnostics();
     if let Err(error) = run_cli(env::args().skip(1).collect()).await {
         eprintln!("{error}");
         std::process::exit(1);
     }
+}
+
+fn init_process_diagnostics() {
+    human_panic::setup_panic!();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
 }
 
 async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
@@ -170,7 +177,7 @@ async fn run_serve_interaction(options: ServeInteractionOptions) -> Result<(), C
     let token = interaction_token(options.interaction_token_env.as_deref());
     validate_interaction_bind(bind, token.as_deref())?;
     let listener = TcpListener::bind(bind).await?;
-    eprintln!("interaction server listening on {}", listener.local_addr()?);
+    log::info!("interaction server listening on {}", listener.local_addr()?);
     serve_interaction_http(
         listener,
         InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all()),
@@ -260,7 +267,7 @@ async fn run_telegram_bridge_with_config(
         bot_username: config.bot_username.clone(),
     });
     let poller = TelegramPoller::new(Arc::clone(&handler.api), handler);
-    eprintln!("telegram bridge initialized; polling started");
+    log::info!("telegram bridge initialized; polling started");
 
     tokio::select! {
         result = run_polling_loop(poller) => result.map_err(CliError::Polling),
@@ -285,19 +292,19 @@ async fn hydrate_telegram_fallback_addrs(
 fn log_telegram_network_mode(config: &TelegramNetworkConfig) {
     match network_resolution_mode(config) {
         TelegramNetworkResolutionMode::Proxy => {
-            eprintln!("telegram network using TELEGRAM_PROXY");
+            log::info!("telegram network using TELEGRAM_PROXY");
         }
         TelegramNetworkResolutionMode::EnvProxy => {
-            eprintln!("telegram network using ambient proxy environment");
+            log::info!("telegram network using ambient proxy environment");
         }
         TelegramNetworkResolutionMode::StaticResolve => {
-            eprintln!(
+            log::info!(
                 "telegram network fallback addresses configured: {}",
                 config.resolved_addrs.len()
             );
         }
         TelegramNetworkResolutionMode::SystemDns => {
-            eprintln!("telegram network using direct system DNS");
+            log::info!("telegram network using direct system DNS");
         }
     }
 }
@@ -310,7 +317,7 @@ async fn run_polling_loop(mut poller: TelegramPoller) -> Result<(), TelegramPoll
                 delay_seconds,
                 reason,
             } => {
-                eprintln!("telegram polling retrying after {delay_seconds}s: {reason}");
+                log::warn!("telegram polling retrying after {delay_seconds}s: {reason}");
                 tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
             }
         }

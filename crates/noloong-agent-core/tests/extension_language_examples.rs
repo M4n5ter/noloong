@@ -8,7 +8,7 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
-use support::workspace_root;
+use support::{init_test_logger, workspace_root};
 
 #[tokio::test]
 async fn python_conformance_example_passes_strict_profile() -> Result<()> {
@@ -45,7 +45,8 @@ async fn typescript_conformance_example_passes_strict_profile_when_dependencies_
         .join("full-conformance-extension.ts");
 
     let Some(tsx_command) = tsx_command(&example_dir) else {
-        eprintln!(
+        init_test_logger();
+        log::info!(
             "skipping TypeScript conformance example; run `npm install` in {}",
             example_dir.display()
         );

@@ -8,7 +8,7 @@ pub mod support;
 
 use support::{
     LiveEchoTool, assert_assistant_text_contains, has_exact_tool_execution,
-    has_visible_or_raw_thinking_event_and_block, skip_when_env_missing,
+    has_visible_or_raw_thinking_event_and_block, init_test_logger, skip_when_env_missing,
 };
 
 #[tokio::test]
@@ -46,7 +46,8 @@ async fn openrouter_responses_tool_loop_when_model_declared() -> Result<()> {
         return Ok(());
     }
     let Ok(model) = env::var("NOLOONG_OPENROUTER_RESPONSES_TOOL_MODEL") else {
-        eprintln!(
+        init_test_logger();
+        log::info!(
             "skipping OpenRouter Responses tool live test; set NOLOONG_OPENROUTER_RESPONSES_TOOL_MODEL to a tool-capable model"
         );
         return Ok(());
@@ -86,7 +87,8 @@ async fn openrouter_responses_reasoning_when_model_declared() -> Result<()> {
         return Ok(());
     }
     let Ok(model) = env::var("NOLOONG_OPENROUTER_RESPONSES_REASONING_MODEL") else {
-        eprintln!(
+        init_test_logger();
+        log::info!(
             "skipping OpenRouter Responses reasoning live test; set NOLOONG_OPENROUTER_RESPONSES_REASONING_MODEL to a reasoning-capable model"
         );
         return Ok(());

@@ -29,6 +29,19 @@ The snapshot follows `.gitignore` and always excludes `.git/`. Treat `.gitignore
 
 This feature is for understanding and auditing the immutable Rust host behind a binary. It is not the recommended self-improvement path to extract the embedded source, edit it, and rebuild a replacement binary. Noloong should evolve through plugins first: write or update plugin code, reload the extension layer, and keep the Rust host small and stable unless the core contract itself needs to change.
 
+## Diagnostics
+
+The `noloong` binary uses the `log` facade with `env_logger`. The default diagnostic filter is `info`, and `RUST_LOG` overrides it:
+
+```bash
+RUST_LOG=noloong=debug cargo run -p noloong -- build-info command
+RUST_LOG=warn cargo run -p noloong -- build-info command
+```
+
+Diagnostics are written to stderr and do not mix into machine-readable stdout contracts such as profile schema output and build-info output. `noloong-extension-conformance` keeps report output on stdout and CLI errors on stderr so third-party extension test runners can consume it without enabling a logger backend.
+
+Release builds also install `human-panic` for user-friendly crash reports. Set `RUST_BACKTRACE=1` when you need the traditional panic backtrace.
+
 ## Examples
 
 ```bash

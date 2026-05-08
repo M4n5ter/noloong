@@ -21,8 +21,15 @@ pub fn skip_when_env_missing(name: &str) -> bool {
     if std::env::var(name).is_ok() {
         return false;
     }
-    eprintln!("skipping live test because {name} is not set");
+    init_test_logger();
+    log::info!("skipping live test because {name} is not set");
     true
+}
+
+pub fn init_test_logger() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {

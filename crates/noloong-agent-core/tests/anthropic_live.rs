@@ -8,7 +8,7 @@ pub mod support;
 
 use support::{
     LiveEchoTool, RED_DOT_PNG_BASE64, assert_exact_assistant_text, has_exact_tool_execution,
-    has_visible_thinking, skip_when_env_missing,
+    has_visible_thinking, init_test_logger, skip_when_env_missing,
 };
 
 #[tokio::test]
@@ -126,7 +126,8 @@ async fn openrouter_anthropic_messages_tool_loop_when_model_declared() -> Result
         return Ok(());
     }
     let Ok(model) = env::var("NOLOONG_OPENROUTER_ANTHROPIC_TOOL_MODEL") else {
-        eprintln!(
+        init_test_logger();
+        log::info!(
             "skipping OpenRouter Anthropic Messages tool live test; set NOLOONG_OPENROUTER_ANTHROPIC_TOOL_MODEL to a tool-capable model"
         );
         return Ok(());
@@ -201,7 +202,8 @@ fn openrouter_anthropic_live_model() -> String {
 
 fn skip_official_anthropic_live() -> bool {
     if env::var("NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE").as_deref() != Ok("1") {
-        eprintln!(
+        init_test_logger();
+        log::info!(
             "skipping official Anthropic live test; set NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1 with a valid ANTHROPIC_API_KEY to opt in"
         );
         return true;
