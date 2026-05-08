@@ -5,6 +5,9 @@ use crate::{
     ManifestProposalStore, ToolOutputOverflowConfig, WriteFileTool,
     approval::{ApprovalCache, cache_key_from_approval_resolution},
     plugin::{PluginLoadError, PluginLoadFailurePolicy, PluginLoadWarning},
+    system_prompt::{
+        BUILT_IN_SYSTEM_PROMPT_HOOK_ID, ResolvedSystemPrompt, SystemPromptModelContext,
+    },
     text,
     tools::{
         APPLY_PATCH_TOOL_NAME, HostExecListTool, HostExecReadTool, HostExecStartTool,
@@ -13,10 +16,11 @@ use crate::{
     },
 };
 use noloong_agent_core::{
-    Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, CompactionSummarizer,
-    ContextCompactionConfig, ContextCompactor, ContextProvider, EventStore, ModelProvider,
-    PhaseHook, PhaseNode, Result, StdioExtensionConfig, TokenEstimator, ToolApprovalRequest,
-    ToolCallHook, ToolExecutionMode, ToolPermissionDecision, ToolProvider,
+    Agent, AgentMessage, AgentRuntime, AgentRuntimeBuilder, BeforeModelRequestHookContext,
+    BeforeModelRequestHookResult, CompactionSummarizer, ContentBlock, ContextCompactionConfig,
+    ContextCompactor, ContextProvider, EventStore, MessageRole, ModelProvider, PhaseHook,
+    PhaseNode, Result, StdioExtensionConfig, TokenEstimator, ToolApprovalRequest, ToolCallHook,
+    ToolExecutionMode, ToolPermissionDecision, ToolProvider,
 };
 use serde_json::{Map, json};
 use std::{
@@ -41,6 +45,7 @@ struct AgentSessionInner {
     proposal_store: ManifestProposalStore,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
+    system_prompt_model_context: Mutex<Option<SystemPromptModelContext>>,
 }
 
 #[derive(Default)]
@@ -106,6 +111,10 @@ impl AgentSession {
         self.inner.proposal_store.clone()
     }
 
+    pub fn resolved_system_prompt(&self) -> ResolvedSystemPrompt {
+        resolved_system_prompt_from_inner(&self.inner)
+    }
+
     pub fn apply_approved_manifest_patches(&self) -> Result<Vec<String>> {
         let proposals = self.inner.proposal_store.drain_approved();
         let mut manifest = self
@@ -127,6 +136,9 @@ impl AgentSession {
         let manifest = self.manifest();
         let catalog = Catalog::new(manifest.locale);
         let mut builder = AgentRuntime::builder()
+            .with_phase_hook(Arc::new(BuiltInSystemPromptHook::new(Arc::clone(
+                &self.inner,
+            ))))
             .with_context_provider(Arc::new(BuiltInHostContextProvider::new(
                 self.inner.environment.clone(),
                 catalog.clone(),
@@ -232,6 +244,89 @@ impl AgentSession {
     }
 }
 
+struct BuiltInSystemPromptHook {
+    inner: Arc<AgentSessionInner>,
+}
+
+impl BuiltInSystemPromptHook {
+    fn new(inner: Arc<AgentSessionInner>) -> Self {
+        Self { inner }
+    }
+}
+
+impl PhaseHook for BuiltInSystemPromptHook {
+    fn id(&self) -> Option<&str> {
+        Some(BUILT_IN_SYSTEM_PROMPT_HOOK_ID)
+    }
+
+    fn before_model_request<'a>(
+        &'a self,
+        context: BeforeModelRequestHookContext<'a>,
+        cancellation: noloong_agent_core::CancellationToken,
+    ) -> noloong_agent_core::BoxFuture<'a, Option<BeforeModelRequestHookResult>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let prompt = resolved_system_prompt_from_inner(&self.inner);
+            let mut request = context.request.clone();
+            request.messages.insert(
+                0,
+                system_prompt_message(&prompt, context.run_id, context.turn_id),
+            );
+            Ok(Some(BeforeModelRequestHookResult { request }))
+        })
+    }
+}
+
+fn resolved_system_prompt_from_inner(inner: &AgentSessionInner) -> ResolvedSystemPrompt {
+    let (locale, system_prompt) = {
+        let manifest = inner
+            .manifest
+            .lock()
+            .expect("agent session manifest lock poisoned");
+        (manifest.locale, manifest.system_prompt.clone())
+    };
+    let model = inner
+        .system_prompt_model_context
+        .lock()
+        .expect("agent session model context lock poisoned")
+        .clone();
+    crate::system_prompt::resolve_system_prompt(locale, &system_prompt, model.as_ref())
+}
+
+fn system_prompt_message(
+    prompt: &ResolvedSystemPrompt,
+    run_id: &str,
+    turn_id: u64,
+) -> AgentMessage {
+    let mut metadata = Map::new();
+    metadata.insert("noloong.kind".into(), json!("system_prompt"));
+    metadata.insert("noloong.source".into(), json!(prompt.source.as_str()));
+    if let Some(configured_profile) = prompt.configured_profile {
+        metadata.insert(
+            "noloong.configuredProfile".into(),
+            json!(configured_profile.as_str()),
+        );
+    }
+    if let Some(resolved_profile) = prompt.resolved_profile {
+        metadata.insert(
+            "noloong.resolvedProfile".into(),
+            json!(resolved_profile.as_str()),
+        );
+    }
+    metadata.insert(
+        "noloong.enabledAdditionIds".into(),
+        json!(prompt.enabled_addition_ids.clone()),
+    );
+    AgentMessage {
+        id: format!("noloong-system-prompt-{run_id}-{turn_id}"),
+        role: MessageRole::System,
+        content: vec![ContentBlock::Text {
+            text: prompt.effective_text.clone(),
+        }],
+        metadata,
+    }
+}
+
 fn completion_message(
     completion: &HostProcessCompletion,
     config: &BackgroundCompletionConfig,
@@ -324,6 +419,7 @@ impl AgentSessionBuilder {
                 proposal_store: self.proposal_store,
                 tool_output_overflow_config: self.tool_output_overflow_config,
                 approval_cache: self.approval_cache,
+                system_prompt_model_context: Mutex::new(None),
             }),
         }
     }
@@ -562,6 +658,13 @@ impl AgentSessionRuntimeBuilder {
     }
 
     pub fn build(mut self) -> Result<AgentRuntime> {
+        self.sync_model_provider_metadata_from_core();
+        let model_context = self.default_model_context();
+        *self
+            .inner
+            .system_prompt_model_context
+            .lock()
+            .expect("agent session model context lock poisoned") = model_context;
         self.core = self
             .core
             .without_tool(WRITE_FILE_TOOL_NAME)
@@ -591,14 +694,30 @@ impl AgentSessionRuntimeBuilder {
     }
 
     fn default_model_name(&self) -> Option<&str> {
-        let provider_id = self
-            .default_model_provider
-            .as_deref()
-            .or_else(|| self.model_names_by_id.keys().next().map(String::as_str))?;
+        let provider_id = self.default_model_provider_id()?;
         self.model_names_by_id
             .get(provider_id)
             .map(String::as_str)
             .or(Some(provider_id))
+    }
+
+    fn default_model_context(&self) -> Option<SystemPromptModelContext> {
+        let provider_id = self.default_model_provider_id()?;
+        let model_name = self
+            .model_names_by_id
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_else(|| provider_id.to_owned());
+        Some(SystemPromptModelContext {
+            provider_id: provider_id.to_owned(),
+            model_name,
+        })
+    }
+
+    fn default_model_provider_id(&self) -> Option<&str> {
+        self.default_model_provider
+            .as_deref()
+            .or_else(|| self.model_names_by_id.keys().next().map(String::as_str))
     }
 
     fn sync_model_provider_metadata_from_core(&mut self) {

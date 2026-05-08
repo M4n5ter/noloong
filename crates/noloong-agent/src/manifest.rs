@@ -14,7 +14,8 @@ use std::{
 #[serde(rename_all = "camelCase")]
 pub struct AgentManifest {
     pub locale: Locale,
-    pub system_prompt: String,
+    #[serde(default)]
+    pub system_prompt: AgentSystemPrompt,
     #[serde(default)]
     pub enabled_tools: BTreeSet<BuiltInToolName>,
     #[serde(default)]
@@ -27,10 +28,10 @@ pub struct AgentManifest {
 }
 
 impl AgentManifest {
-    pub fn new(system_prompt: impl Into<String>) -> Self {
+    pub fn new(system_prompt: AgentSystemPrompt) -> Self {
         Self {
             locale: Locale::En,
-            system_prompt: system_prompt.into(),
+            system_prompt,
             enabled_tools: BTreeSet::new(),
             file_edit_tool_policy: FileEditToolPolicy::default(),
             approval_policy: ApprovalPolicy::RequireApproval,
@@ -49,12 +50,17 @@ impl AgentManifest {
         self
     }
 
+    pub fn effective_system_prompt(&self) -> String {
+        self.system_prompt.effective_text(self.locale, None)
+    }
+
     pub fn with_plugin(mut self, plugin: AgentPluginDeclaration) -> Result<Self, ManifestError> {
         self.register_plugin(plugin)?;
         Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), ManifestError> {
+        self.system_prompt.validate()?;
         for (plugin_id, plugin) in &self.plugins {
             if plugin_id != &plugin.plugin_id {
                 return Err(ManifestError::Invalid(format!(
@@ -71,7 +77,44 @@ impl AgentManifest {
         patch.validate()?;
         match patch {
             ManifestPatch::ReplaceSystemPrompt { prompt } => {
-                self.system_prompt = prompt;
+                let additions = self.system_prompt.additions().to_vec();
+                self.system_prompt = AgentSystemPrompt::Custom { prompt, additions };
+            }
+            ManifestPatch::UseBuiltInSystemPrompt => {
+                let additions = self.system_prompt.additions().to_vec();
+                self.system_prompt = AgentSystemPrompt::BuiltIn {
+                    profile: BuiltInSystemPromptProfile::Auto,
+                    additions,
+                };
+            }
+            ManifestPatch::SetBuiltInSystemPromptProfile { profile } => {
+                let additions = self.system_prompt.additions().to_vec();
+                self.system_prompt = AgentSystemPrompt::BuiltIn { profile, additions };
+            }
+            ManifestPatch::UpsertSystemPromptAddition { addition } => {
+                let additions = self.system_prompt.additions_mut();
+                match additions.iter_mut().find(|item| item.id == addition.id) {
+                    Some(existing) => *existing = addition,
+                    None => additions.push(addition),
+                }
+            }
+            ManifestPatch::RemoveSystemPromptAddition { id } => {
+                remove_system_prompt_addition(self.system_prompt.additions_mut(), &id)?;
+            }
+            ManifestPatch::SetSystemPromptAdditionEnabled { id, enabled } => {
+                let addition = self
+                    .system_prompt
+                    .additions_mut()
+                    .iter_mut()
+                    .find(|addition| addition.id == id)
+                    .ok_or_else(|| ManifestError::UnknownSystemPromptAddition(id.clone()))?;
+                addition.enabled = enabled;
+            }
+            ManifestPatch::ReorderSystemPromptAdditions { ids } => {
+                reorder_system_prompt_additions(self.system_prompt.additions_mut(), ids)?;
+            }
+            ManifestPatch::ClearSystemPromptAdditions => {
+                self.system_prompt.additions_mut().clear();
             }
             ManifestPatch::SetLocale { locale } => {
                 self.locale = locale;
@@ -124,7 +167,152 @@ impl AgentManifest {
 
 impl Default for AgentManifest {
     fn default() -> Self {
-        Self::new("You are Noloong, a host-first evolvable AI agent.")
+        Self::new(AgentSystemPrompt::BuiltIn {
+            profile: BuiltInSystemPromptProfile::Auto,
+            additions: Vec::new(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(
+    tag = "source",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AgentSystemPrompt {
+    BuiltIn {
+        #[serde(default, skip_serializing_if = "BuiltInSystemPromptProfile::is_auto")]
+        profile: BuiltInSystemPromptProfile,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additions: Vec<SystemPromptAddition>,
+    },
+    Custom {
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additions: Vec<SystemPromptAddition>,
+    },
+}
+
+impl Default for AgentSystemPrompt {
+    fn default() -> Self {
+        Self::BuiltIn {
+            profile: BuiltInSystemPromptProfile::Auto,
+            additions: Vec::new(),
+        }
+    }
+}
+
+impl AgentSystemPrompt {
+    pub fn custom(prompt: impl Into<String>) -> Self {
+        Self::Custom {
+            prompt: prompt.into(),
+            additions: Vec::new(),
+        }
+    }
+
+    pub fn effective_text(
+        &self,
+        locale: Locale,
+        model: Option<&crate::system_prompt::SystemPromptModelContext>,
+    ) -> String {
+        crate::system_prompt::resolve_system_prompt(locale, self, model).effective_text
+    }
+
+    pub const fn source(&self) -> SystemPromptSource {
+        match self {
+            Self::BuiltIn { .. } => SystemPromptSource::BuiltIn,
+            Self::Custom { .. } => SystemPromptSource::Custom,
+        }
+    }
+
+    pub fn additions(&self) -> &[SystemPromptAddition] {
+        match self {
+            Self::BuiltIn { additions, .. } | Self::Custom { additions, .. } => additions,
+        }
+    }
+
+    fn additions_mut(&mut self) -> &mut Vec<SystemPromptAddition> {
+        match self {
+            Self::BuiltIn { additions, .. } | Self::Custom { additions, .. } => additions,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ManifestError> {
+        match self {
+            Self::Custom { prompt, additions } => {
+                if prompt.trim().is_empty() {
+                    return Err(ManifestError::Invalid(
+                        "system prompt must not be empty".into(),
+                    ));
+                }
+                validate_system_prompt_additions(additions)
+            }
+            Self::BuiltIn { additions, .. } => validate_system_prompt_additions(additions),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPromptSource {
+    BuiltIn,
+    Custom,
+}
+
+impl SystemPromptSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built_in",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltInSystemPromptProfile {
+    #[default]
+    Auto,
+    General,
+    #[serde(rename = "gpt_5_5")]
+    Gpt55,
+}
+
+impl BuiltInSystemPromptProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::General => "general",
+            Self::Gpt55 => "gpt_5_5",
+        }
+    }
+
+    const fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SystemPromptAddition {
+    pub id: String,
+    pub text: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl SystemPromptAddition {
+    pub fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+            enabled: true,
+        }
     }
 }
 
@@ -135,6 +323,24 @@ pub enum ManifestPatch {
     ReplaceSystemPrompt {
         prompt: String,
     },
+    UseBuiltInSystemPrompt,
+    SetBuiltInSystemPromptProfile {
+        profile: BuiltInSystemPromptProfile,
+    },
+    UpsertSystemPromptAddition {
+        addition: SystemPromptAddition,
+    },
+    RemoveSystemPromptAddition {
+        id: String,
+    },
+    SetSystemPromptAdditionEnabled {
+        id: String,
+        enabled: bool,
+    },
+    ReorderSystemPromptAdditions {
+        ids: Vec<String>,
+    },
+    ClearSystemPromptAdditions,
     SetLocale {
         locale: Locale,
     },
@@ -173,6 +379,14 @@ impl ManifestPatch {
             Self::ReplaceSystemPrompt { prompt } if prompt.trim().is_empty() => Err(
                 ManifestError::Invalid("system prompt must not be empty".into()),
             ),
+            Self::UpsertSystemPromptAddition { addition } => {
+                validate_system_prompt_addition(addition)
+            }
+            Self::RemoveSystemPromptAddition { id }
+            | Self::SetSystemPromptAdditionEnabled { id, .. } => {
+                validate_non_empty("system prompt addition id", id)
+            }
+            Self::ReorderSystemPromptAdditions { ids } => validate_system_prompt_addition_ids(ids),
             Self::ReservedPhaseProfile { .. } => Err(ManifestError::Unsupported(
                 "phase profile patches are reserved for a later version".into(),
             )),
@@ -187,6 +401,21 @@ impl ManifestPatch {
     pub fn summary(&self) -> String {
         match self {
             Self::ReplaceSystemPrompt { .. } => "replace system prompt".into(),
+            Self::UseBuiltInSystemPrompt => "use built-in system prompt".into(),
+            Self::SetBuiltInSystemPromptProfile { profile } => {
+                format!("set built-in system prompt profile to {}", profile.as_str())
+            }
+            Self::UpsertSystemPromptAddition { addition } => {
+                format!("upsert system prompt addition {}", addition.id)
+            }
+            Self::RemoveSystemPromptAddition { id } => {
+                format!("remove system prompt addition {id}")
+            }
+            Self::SetSystemPromptAdditionEnabled { id, enabled } => {
+                format!("set system prompt addition {id} enabled={enabled}")
+            }
+            Self::ReorderSystemPromptAdditions { .. } => "reorder system prompt additions".into(),
+            Self::ClearSystemPromptAdditions => "clear system prompt additions".into(),
             Self::SetLocale { locale } => format!("set locale to {}", locale.code()),
             Self::EnableTool { tool_name } => format!("enable tool {}", tool_name.as_str()),
             Self::DisableTool { tool_name } => format!("disable tool {}", tool_name.as_str()),
@@ -426,6 +655,7 @@ impl ManifestProposalStore {
 pub enum ManifestError {
     Invalid(String),
     UnknownTool(String),
+    UnknownSystemPromptAddition(String),
     UnknownPlugin(String),
     PluginAlreadyExists(String),
     UnknownProposal(String),
@@ -437,6 +667,9 @@ impl std::fmt::Display for ManifestError {
         match self {
             Self::Invalid(message) => write!(formatter, "invalid manifest patch: {message}"),
             Self::UnknownTool(tool_name) => write!(formatter, "unknown built-in tool: {tool_name}"),
+            Self::UnknownSystemPromptAddition(id) => {
+                write!(formatter, "unknown system prompt addition: {id}")
+            }
             Self::UnknownPlugin(plugin_id) => write!(formatter, "unknown plugin: {plugin_id}"),
             Self::PluginAlreadyExists(plugin_id) => {
                 write!(formatter, "plugin already exists: {plugin_id}")
@@ -462,6 +695,91 @@ fn validate_plugin(plugin: &AgentPluginDeclaration) -> Result<(), ManifestError>
 fn validate_non_empty(field: &str, value: &str) -> Result<(), ManifestError> {
     if value.trim().is_empty() {
         return Err(ManifestError::Invalid(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn validate_system_prompt_additions(
+    additions: &[SystemPromptAddition],
+) -> Result<(), ManifestError> {
+    let ids = additions
+        .iter()
+        .map(|addition| {
+            validate_system_prompt_addition(addition)?;
+            Ok(addition.id.as_str())
+        })
+        .collect::<Result<Vec<_>, ManifestError>>()?;
+    validate_unique_system_prompt_addition_ids(ids)
+}
+
+fn validate_system_prompt_addition(addition: &SystemPromptAddition) -> Result<(), ManifestError> {
+    validate_non_empty("system prompt addition id", &addition.id)?;
+    validate_non_empty("system prompt addition text", &addition.text)
+}
+
+fn validate_system_prompt_addition_ids(ids: &[String]) -> Result<(), ManifestError> {
+    let ids = ids
+        .iter()
+        .map(|id| {
+            validate_non_empty("system prompt addition id", id)?;
+            Ok(id.as_str())
+        })
+        .collect::<Result<Vec<_>, ManifestError>>()?;
+    validate_unique_system_prompt_addition_ids(ids)
+}
+
+fn validate_unique_system_prompt_addition_ids(ids: Vec<&str>) -> Result<(), ManifestError> {
+    let mut seen = BTreeSet::new();
+    for id in ids {
+        if !seen.insert(id) {
+            return Err(ManifestError::Invalid(format!(
+                "duplicate system prompt addition id: {id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn remove_system_prompt_addition(
+    additions: &mut Vec<SystemPromptAddition>,
+    id: &str,
+) -> Result<(), ManifestError> {
+    let index = additions
+        .iter()
+        .position(|addition| addition.id == id)
+        .ok_or_else(|| ManifestError::UnknownSystemPromptAddition(id.into()))?;
+    additions.remove(index);
+    Ok(())
+}
+
+fn reorder_system_prompt_additions(
+    additions: &mut Vec<SystemPromptAddition>,
+    ids: Vec<String>,
+) -> Result<(), ManifestError> {
+    let current_ids = additions
+        .iter()
+        .map(|addition| addition.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let requested_ids = ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if current_ids != requested_ids {
+        return Err(ManifestError::Invalid(
+            "system prompt addition reorder ids must match current addition ids".into(),
+        ));
+    }
+
+    let mut by_id = additions
+        .drain(..)
+        .map(|addition| (addition.id.clone(), addition))
+        .collect::<BTreeMap<_, _>>();
+    for id in ids {
+        let addition = by_id
+            .remove(&id)
+            .ok_or_else(|| ManifestError::UnknownSystemPromptAddition(id.clone()))?;
+        additions.push(addition);
     }
     Ok(())
 }

@@ -8,6 +8,7 @@ pub mod openai;
 pub mod plugin;
 pub mod process;
 pub mod session;
+pub mod system_prompt;
 pub mod tools;
 
 mod text;
@@ -16,8 +17,9 @@ pub use approval::{ApprovalPolicy, ApprovalReviewer, BuiltInApprovalHook};
 pub use host::{HostEnvironment, Locale, PathStyle};
 pub use i18n::{Catalog, MessageKey};
 pub use manifest::{
-    AgentManifest, BuiltInToolName, FileEditToolPolicy, ManifestPatch, ManifestPatchProposal,
-    ManifestProposalStore,
+    AgentManifest, AgentSystemPrompt, BuiltInSystemPromptProfile, BuiltInToolName,
+    FileEditToolPolicy, ManifestPatch, ManifestPatchProposal, ManifestProposalStore,
+    SystemPromptAddition, SystemPromptSource,
 };
 pub use plugin::{
     AgentPluginDeclaration, PluginEnvSource, PluginLoadError, PluginLoadFailurePolicy,
@@ -31,6 +33,10 @@ pub use process::{
 pub use session::{
     AgentSession, AgentSessionBuilder, AgentSessionRuntimeBuilder, BackgroundCompletionConfig,
     BackgroundCompletionSteering, DEFAULT_BACKGROUND_COMPLETION_PREVIEW_BYTES,
+};
+pub use system_prompt::{
+    BUILT_IN_SYSTEM_PROMPT_HOOK_ID, ResolvedSystemPrompt, SystemPromptModelContext,
+    built_in_system_prompt, built_in_system_prompt_for_profile,
 };
 pub use tools::{
     APPLY_PATCH_TOOL_NAME, ApplyPatchTool, BuiltInToolOutputOverflowHook,

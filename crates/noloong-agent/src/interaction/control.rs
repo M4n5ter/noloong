@@ -334,6 +334,15 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .manifest(),
                     )?
                 }
+                "manifest/system_prompt/get" => {
+                    let request = parse_params::<SessionRequest>(params)?;
+                    value(
+                        self.session(&request.session_id)
+                            .await?
+                            .session()
+                            .resolved_system_prompt(),
+                    )?
+                }
                 "manifest/proposals/list" => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(

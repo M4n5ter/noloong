@@ -7,7 +7,7 @@ use super::{
         current_unix_ms, duplicate_session_error, missing_session_error,
     },
 };
-use crate::{AgentManifest, AgentSession};
+use crate::{AgentManifest, AgentSession, ManifestPatch};
 use noloong_agent_core::{
     Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentMessage, AgentState, RunStatus,
 };
@@ -34,6 +34,8 @@ pub struct AgentSessionCreateRequest {
     pub profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<AgentManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest_patches: Vec<ManifestPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +52,8 @@ pub struct SubagentSpawnRequest {
     pub profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<AgentManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest_patches: Vec<ManifestPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default)]
@@ -222,7 +226,11 @@ impl AgentSessionRegistry {
                 InteractionError::not_found(format!("profile not found: {profile_id}"))
             })?;
         let profile_descriptor = profile.descriptor();
-        let manifest = manifest_for_request(request.manifest.clone(), &profile_descriptor)?;
+        let manifest = manifest_for_request(
+            request.manifest.clone(),
+            &profile_descriptor,
+            &request.manifest_patches,
+        )?;
         let session_id = request
             .session_id
             .clone()
@@ -274,6 +282,7 @@ impl AgentSessionRegistry {
                 session_id: None,
                 profile_id: request.profile_id.or(Some(parent.profile_id)),
                 manifest: request.manifest,
+                manifest_patches: request.manifest_patches,
                 parent_session_id: Some(request.parent_session_id),
                 role: request.role,
                 metadata: request.metadata,
@@ -568,19 +577,36 @@ fn restore_agent_queues(agent: &Agent, queues: AgentSessionQueueSnapshot) {
 fn manifest_for_request(
     manifest: Option<AgentManifest>,
     profile: &InteractionProfileDescriptor,
+    manifest_patches: &[ManifestPatch],
 ) -> Result<AgentManifest, InteractionError> {
-    let Some(manifest) = manifest else {
-        let mut manifest = AgentManifest::default();
-        for patch in profile.default_manifest_patches.iter().cloned() {
-            manifest.apply_patch(patch).map_err(|error| {
-                InteractionError::invalid_params(format!(
-                    "profile {} default manifest patch failed: {error}",
-                    profile.profile_id
-                ))
-            })?;
+    let mut manifest = match manifest {
+        Some(manifest) => manifest,
+        None => {
+            let mut manifest = AgentManifest::default();
+            for patch in profile.default_manifest_patches.iter().cloned() {
+                manifest.apply_patch(patch).map_err(|error| {
+                    InteractionError::invalid_params(format!(
+                        "profile {} default manifest patch failed: {error}",
+                        profile.profile_id
+                    ))
+                })?;
+            }
+            manifest
         }
-        return Ok(manifest);
     };
+
+    for patch in manifest_patches.iter().cloned() {
+        manifest.apply_patch(patch).map_err(|error| {
+            InteractionError::invalid_params(format!(
+                "session manifest patch failed for profile {}: {error}",
+                profile.profile_id,
+            ))
+        })?;
+    }
+
+    manifest
+        .validate()
+        .map_err(|error| InteractionError::invalid_params(error.to_string()))?;
     Ok(manifest)
 }
 

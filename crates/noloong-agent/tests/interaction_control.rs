@@ -493,11 +493,66 @@ async fn interaction_control_lists_approves_and_applies_manifest_proposals() {
     );
     assert_eq!(
         response(&messages, 5)["result"]["systemPrompt"],
-        "Updated prompt."
+        serde_json::json!({"source": "custom", "prompt": "Updated prompt."})
     );
     assert_eq!(
         response(&messages, 6)["result"]["manifest"]["systemPrompt"],
-        "Updated prompt."
+        serde_json::json!({"source": "custom", "prompt": "Updated prompt."})
+    );
+}
+
+#[tokio::test]
+async fn interaction_control_reads_resolved_system_prompt() {
+    let handler = test_handler("default").await;
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(1, "initialize", json!({"name": "manifest-client"})),
+            rpc(
+                2,
+                "session/create",
+                json!({
+                    "sessionId": "root",
+                    "manifestPatches": [
+                        {
+                            "op": "upsert_system_prompt_addition",
+                            "addition": {
+                                "id": "interaction.test",
+                                "text": "Current interaction channel: test client."
+                            }
+                        }
+                    ]
+                }),
+            ),
+            rpc(
+                3,
+                "manifest/system_prompt/get",
+                json!({"sessionId": "root"}),
+            ),
+            rpc(4, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    let result = &response(&messages, 3)["result"];
+    assert_eq!(result["source"], "built_in");
+    assert_eq!(result["configuredProfile"], "auto");
+    assert_eq!(result["resolvedProfile"], "general");
+    assert_eq!(
+        result["additions"][0],
+        json!({
+            "id": "interaction.test",
+            "text": "Current interaction channel: test client.",
+            "enabled": true
+        })
+    );
+    assert_eq!(result["enabledAdditionIds"], json!(["interaction.test"]));
+    assert!(
+        result["effectiveText"]
+            .as_str()
+            .unwrap()
+            .contains("Current interaction channel: test client.")
     );
 }
 
@@ -554,14 +609,9 @@ async fn interaction_control_manifest_apply_is_persisted() {
         response(&messages, 3)["result"]["appliedProposalIds"][0],
         proposal.proposal_id
     );
+    let record = store.get("root").await.unwrap().unwrap();
     assert_eq!(
-        store
-            .get("root")
-            .await
-            .unwrap()
-            .unwrap()
-            .manifest
-            .system_prompt,
+        record.manifest.effective_system_prompt(),
         "Persisted prompt."
     );
 }

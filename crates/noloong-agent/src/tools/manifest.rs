@@ -79,6 +79,65 @@ fn manifest_patch_input_schema() -> Value {
                             }
                         },
                         {
+                            "required": ["op"],
+                            "properties": {
+                                "op": {"const": "use_built_in_system_prompt"}
+                            }
+                        },
+                        {
+                            "required": ["op", "profile"],
+                            "properties": {
+                                "op": {"const": "set_built_in_system_prompt_profile"},
+                                "profile": {"enum": ["auto", "general", "gpt_5_5"]}
+                            }
+                        },
+                        {
+                            "required": ["op", "addition"],
+                            "properties": {
+                                "op": {"const": "upsert_system_prompt_addition"},
+                                "addition": {
+                                    "type": "object",
+                                    "required": ["id", "text"],
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "text": {"type": "string"},
+                                        "enabled": {"type": "boolean"}
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "required": ["op", "id"],
+                            "properties": {
+                                "op": {"const": "remove_system_prompt_addition"},
+                                "id": {"type": "string"}
+                            }
+                        },
+                        {
+                            "required": ["op", "id", "enabled"],
+                            "properties": {
+                                "op": {"const": "set_system_prompt_addition_enabled"},
+                                "id": {"type": "string"},
+                                "enabled": {"type": "boolean"}
+                            }
+                        },
+                        {
+                            "required": ["op", "ids"],
+                            "properties": {
+                                "op": {"const": "reorder_system_prompt_additions"},
+                                "ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                }
+                            }
+                        },
+                        {
+                            "required": ["op"],
+                            "properties": {
+                                "op": {"const": "clear_system_prompt_additions"}
+                            }
+                        },
+                        {
                             "required": ["op", "locale"],
                             "properties": {
                                 "op": {"const": "set_locale"},
@@ -259,8 +318,14 @@ mod tests {
     #[test]
     fn manifest_patch_schema_matches_capability_selector_shapes() {
         let schema = manifest_patch_input_schema();
-        let variants = schema["properties"]["patch"]["oneOf"][4]["properties"]["plugin"]
-            ["properties"]["allowedCapabilities"]["items"]["oneOf"]
+        let plugin_variant = schema["properties"]["patch"]["oneOf"]
+            .as_array()
+            .expect("manifest patch schema should use oneOf")
+            .iter()
+            .find(|variant| variant["properties"]["op"]["const"] == "register_plugin")
+            .expect("register plugin schema should exist");
+        let variants = plugin_variant["properties"]["plugin"]["properties"]["allowedCapabilities"]
+            ["items"]["oneOf"]
             .as_array()
             .expect("capability selector schema should use oneOf");
 

@@ -22,7 +22,7 @@ This matrix tracks the application-layer interaction control plane. The core ker
 | Raw events | `event/subscribe`, `event/unsubscribe`, `agent/event` notification | `cargo test -p noloong-agent --test interaction_control` |
 | Display events | `display/subscribe`, `display/event`, streaming/final-only, bounded text | `cargo test -p noloong-agent --test interaction_control` |
 | Approval | `approval/list`, `approval/resolve`, `approval/resume_timeouts` | `cargo test -p noloong-agent --test interaction_control` |
-| Manifest | `manifest/get`, `manifest/proposals/list`, `manifest/proposals/approve`, `manifest/apply_approved` | `cargo test -p noloong-agent --test interaction_control` |
+| Manifest | `manifest/get`, `manifest/system_prompt/get`, `manifest/proposals/list`, `manifest/proposals/approve`, `manifest/apply_approved` | `cargo test -p noloong-agent --test interaction_control` |
 | Process control | `process/list`, `process/read`, `process/wait`, `process/write`, `process/terminate` | `cargo test -p noloong-agent --test interaction_control` |
 | Bridge examples | TypeScript and Python stdio JSON-RPC clients | `node --check examples/interaction/typescript-bridge/bridge.mjs`; `python3 -m py_compile examples/interaction/python-bridge/bridge.py` |
 

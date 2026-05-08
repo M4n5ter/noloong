@@ -1,15 +1,17 @@
 use noloong_agent::{
-    AgentManifest, AgentSession, ApprovalPolicy, BackgroundCompletionConfig, BuiltInToolName,
-    FileEditToolPolicy, Locale, ManifestPatch, StartCommandRequest,
+    AgentManifest, AgentSession, ApprovalPolicy, BackgroundCompletionConfig,
+    BuiltInSystemPromptProfile, BuiltInToolName, FileEditToolPolicy, Locale, ManifestPatch,
+    StartCommandRequest, SystemPromptAddition,
     approval::{
         allow_decision as approval_allow_decision, deny_decision as approval_deny_decision,
     },
+    built_in_system_prompt, built_in_system_prompt_for_profile,
 };
 use noloong_agent_core::{
-    Agent, AgentEventKind, AgentMessage, BoxFuture, CancellationToken, ContentBlock, ModelProvider,
-    ModelRequest, ModelStreamEvent, ModelStreamSink, RunStatus, StopReason, ToolApprovalRequest,
-    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolOutput, ToolProvider,
-    ToolRequest, ToolSpec,
+    Agent, AgentEventKind, AgentMessage, BoxFuture, CancellationToken, ContentBlock, MessageRole,
+    ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, RunStatus, StopReason,
+    ToolApprovalRequest, ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolOutput,
+    ToolProvider, ToolRequest, ToolSpec,
 };
 use std::{
     collections::BTreeMap,
@@ -313,6 +315,156 @@ async fn background_completion_during_active_run_uses_steering_boundary() {
         &format!("host-exec-completed-{}", snapshot.job_id),
     );
     assert!(message_text(&second_messages[completion_index]).contains("active"));
+}
+
+#[tokio::test]
+async fn agent_session_injects_locale_selected_built_in_system_prompt() {
+    let session = AgentSession::builder()
+        .with_manifest(AgentManifest {
+            locale: Locale::Zh,
+            ..Default::default()
+        })
+        .build();
+    let model = Arc::new(CapturingModelProvider::default());
+    let agent = Agent::builder()
+        .with_runtime(Arc::new(
+            session
+                .runtime_builder()
+                .with_model_provider(model.clone())
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap();
+
+    agent.prompt("capture system prompt").await.unwrap();
+
+    let requests = model.requests();
+    let messages = &requests.first().expect("first request exists").messages;
+    let system_prompt = messages.first().expect("system prompt is first");
+    assert_eq!(system_prompt.role, MessageRole::System);
+    assert_eq!(system_prompt.metadata["noloong.kind"], "system_prompt");
+    assert_eq!(system_prompt.metadata["noloong.source"], "built_in");
+    assert_eq!(
+        message_text(system_prompt),
+        built_in_system_prompt(Locale::Zh)
+    );
+
+    let state = agent.state().await;
+    assert!(
+        state
+            .messages
+            .iter()
+            .all(|message| !message.id.starts_with("noloong-system-prompt-"))
+    );
+}
+
+#[tokio::test]
+async fn agent_session_system_prompt_hook_reads_current_manifest() {
+    let session = AgentSession::builder().build();
+    let model = Arc::new(CapturingModelProvider::default());
+    let agent = Agent::builder()
+        .with_runtime(Arc::new(
+            session
+                .runtime_builder()
+                .with_model_provider(model.clone())
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let proposal = session
+        .proposal_store()
+        .record_pending_proposal(ManifestPatch::ReplaceSystemPrompt {
+            prompt: "Custom runtime prompt.".into(),
+        })
+        .unwrap();
+    session
+        .proposal_store()
+        .approve_proposal(&proposal.proposal_id)
+        .unwrap();
+    session.apply_approved_manifest_patches().unwrap();
+
+    agent.prompt("capture updated prompt").await.unwrap();
+
+    let requests = model.requests();
+    let messages = &requests.first().expect("first request exists").messages;
+    let system_prompt = messages.first().expect("system prompt is first");
+    assert_eq!(system_prompt.role, MessageRole::System);
+    assert_eq!(system_prompt.metadata["noloong.source"], "custom");
+    assert_eq!(message_text(system_prompt), "Custom runtime prompt.");
+}
+
+#[tokio::test]
+async fn agent_session_auto_system_prompt_profile_uses_model_context() {
+    let session = AgentSession::builder().build();
+    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.5-mini"));
+    let agent = Agent::builder()
+        .with_runtime(Arc::new(
+            session
+                .runtime_builder()
+                .with_model_provider(model.clone())
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap();
+
+    agent.prompt("capture gpt prompt").await.unwrap();
+
+    let requests = model.requests();
+    let messages = &requests.first().expect("first request exists").messages;
+    let system_prompt = messages.first().expect("system prompt is first");
+    assert_eq!(system_prompt.metadata["noloong.configuredProfile"], "auto");
+    assert_eq!(system_prompt.metadata["noloong.resolvedProfile"], "gpt_5_5");
+    assert_eq!(
+        message_text(system_prompt),
+        built_in_system_prompt_for_profile(Locale::En, BuiltInSystemPromptProfile::Gpt55)
+    );
+}
+
+#[tokio::test]
+async fn agent_session_system_prompt_additions_are_injected_and_reported() {
+    let mut manifest = AgentManifest::default();
+    manifest
+        .apply_patch(ManifestPatch::UpsertSystemPromptAddition {
+            addition: SystemPromptAddition::new(
+                "test.channel",
+                "Current interaction channel: test harness.",
+            ),
+        })
+        .unwrap();
+    let session = AgentSession::builder().with_manifest(manifest).build();
+    let model = Arc::new(CapturingModelProvider::default());
+    let agent = Agent::builder()
+        .with_runtime(Arc::new(
+            session
+                .runtime_builder()
+                .with_model_provider(model.clone())
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap();
+
+    let resolved = session.resolved_system_prompt();
+    assert_eq!(resolved.enabled_addition_ids, vec!["test.channel"]);
+    assert!(
+        resolved
+            .effective_text
+            .contains("Current interaction channel: test harness.")
+    );
+
+    agent.prompt("capture prompt additions").await.unwrap();
+
+    let requests = model.requests();
+    let messages = &requests.first().expect("first request exists").messages;
+    let system_prompt = messages.first().expect("system prompt is first");
+    assert_eq!(
+        system_prompt.metadata["noloong.enabledAdditionIds"],
+        serde_json::json!(["test.channel"])
+    );
+    assert!(message_text(system_prompt).contains("Current interaction channel: test harness."));
 }
 
 #[test]

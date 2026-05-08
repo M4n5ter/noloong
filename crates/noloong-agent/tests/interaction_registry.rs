@@ -1,5 +1,6 @@
 use noloong_agent::{
-    AgentManifest, AgentSession, BuiltInToolName, ManifestPatch,
+    AgentManifest, AgentSession, AgentSystemPrompt, BuiltInToolName, ManifestPatch,
+    SystemPromptAddition,
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
         AgentSessionDeleteOptions, AgentSessionListFilter, AgentSessionQueueSnapshot,
@@ -59,7 +60,7 @@ fn snapshot_record_serde_round_trips() {
         parent_session_id: Some("parent".into()),
         role: Some("worker".into()),
         manifest: AgentManifest {
-            system_prompt: "Persisted prompt".into(),
+            system_prompt: AgentSystemPrompt::custom("Persisted prompt"),
             ..AgentManifest::default()
         },
         state: AgentState {
@@ -164,13 +165,52 @@ async fn interaction_registry_applies_profile_default_manifest_patches() {
 
     assert_eq!(
         created.manifest.system_prompt,
-        "Use the runtime profile prompt."
+        AgentSystemPrompt::custom("Use the runtime profile prompt.")
     );
     assert!(
         created
             .manifest
             .enabled_tools
             .contains(&BuiltInToolName::HostExecStart)
+    );
+}
+
+#[tokio::test]
+async fn interaction_registry_applies_request_manifest_patches_after_profile_defaults() {
+    let mut descriptor = descriptor("patched");
+    descriptor.default_manifest_patches = vec![ManifestPatch::ReplaceSystemPrompt {
+        prompt: "Use the runtime profile prompt.".into(),
+    }];
+    let registry = AgentSessionRegistry::new(Arc::new(TestProfile {
+        descriptor,
+        model: Arc::new(TextModel),
+        build_delay_ms: 0,
+        build_count: None,
+    }))
+    .unwrap();
+
+    let created = registry
+        .create_session(AgentSessionCreateRequest {
+            manifest_patches: vec![ManifestPatch::UpsertSystemPromptAddition {
+                addition: SystemPromptAddition::new(
+                    "interaction.telegram",
+                    "Current interaction channel: Telegram.",
+                ),
+            }],
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        created.manifest.system_prompt,
+        AgentSystemPrompt::Custom {
+            prompt: "Use the runtime profile prompt.".into(),
+            additions: vec![SystemPromptAddition::new(
+                "interaction.telegram",
+                "Current interaction channel: Telegram."
+            )],
+        }
     );
 }
 
@@ -353,7 +393,7 @@ async fn registry_restore_uses_persisted_manifest() {
     }];
     let store = Arc::new(InMemoryAgentSessionRegistryStore::default());
     let mut record = stored_record("stored");
-    record.manifest.system_prompt = "Persisted prompt".into();
+    record.manifest.system_prompt = AgentSystemPrompt::custom("Persisted prompt");
     store.insert(record).await.unwrap();
     let profile: Arc<dyn AgentRuntimeProfile> = Arc::new(TestProfile {
         descriptor,
@@ -375,7 +415,7 @@ async fn registry_restore_uses_persisted_manifest() {
         .expect("session restores");
 
     assert_eq!(
-        restored.session().manifest().system_prompt,
+        restored.session().manifest().effective_system_prompt(),
         "Persisted prompt"
     );
 }

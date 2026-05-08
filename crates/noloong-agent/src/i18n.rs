@@ -399,6 +399,25 @@ impl Catalog {
         match (self.locale, patch) {
             (Locale::En, _) => patch.summary(),
             (Locale::Zh, ManifestPatch::ReplaceSystemPrompt { .. }) => "替换系统提示词".into(),
+            (Locale::Zh, ManifestPatch::UseBuiltInSystemPrompt) => "使用内置系统提示词".into(),
+            (Locale::Zh, ManifestPatch::SetBuiltInSystemPromptProfile { profile }) => {
+                format!("设置内置系统提示词 profile 为 {}", profile.as_str())
+            }
+            (Locale::Zh, ManifestPatch::UpsertSystemPromptAddition { addition }) => {
+                format!("新增或更新系统提示词追加项 {}", addition.id)
+            }
+            (Locale::Zh, ManifestPatch::RemoveSystemPromptAddition { id }) => {
+                format!("移除系统提示词追加项 {id}")
+            }
+            (Locale::Zh, ManifestPatch::SetSystemPromptAdditionEnabled { id, enabled }) => {
+                format!("设置系统提示词追加项 {id} enabled={enabled}")
+            }
+            (Locale::Zh, ManifestPatch::ReorderSystemPromptAdditions { .. }) => {
+                "重排系统提示词追加项".into()
+            }
+            (Locale::Zh, ManifestPatch::ClearSystemPromptAdditions) => {
+                "清空系统提示词追加项".into()
+            }
             (Locale::Zh, ManifestPatch::SetLocale { locale }) => {
                 format!("设置语言为 {}", locale.code())
             }
@@ -435,6 +454,9 @@ impl Catalog {
             }
             (Locale::Zh, ManifestError::UnknownTool(tool_name)) => {
                 format!("未知内置工具：{tool_name}")
+            }
+            (Locale::Zh, ManifestError::UnknownSystemPromptAddition(id)) => {
+                format!("未知系统提示词追加项：{id}")
             }
             (Locale::Zh, ManifestError::UnknownPlugin(plugin_id)) => {
                 format!("未知插件：{plugin_id}")

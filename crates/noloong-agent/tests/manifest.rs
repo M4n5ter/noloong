@@ -1,8 +1,9 @@
 use noloong_agent::manifest::ManifestError;
 use noloong_agent::{
-    AgentManifest, AgentPluginDeclaration, ApprovalPolicy, BuiltInToolName, FileEditToolPolicy,
-    Locale, ManifestPatch, ManifestProposalStore, PluginEnvSource, PluginLoadFailurePolicy,
-    PluginTransport, StdioPluginTransport,
+    AgentManifest, AgentPluginDeclaration, AgentSystemPrompt, ApprovalPolicy,
+    BuiltInSystemPromptProfile, BuiltInToolName, FileEditToolPolicy, Locale, ManifestPatch,
+    ManifestProposalStore, PluginEnvSource, PluginLoadFailurePolicy, PluginTransport,
+    StdioPluginTransport, SystemPromptAddition, built_in_system_prompt,
 };
 use noloong_agent_core::ExtensionCapabilitySelector;
 use std::collections::BTreeMap;
@@ -35,7 +36,11 @@ fn manifest_patch_applies_prompt_tools_policy() {
         })
         .unwrap();
 
-    assert_eq!(manifest.system_prompt, "New prompt");
+    assert_eq!(
+        manifest.system_prompt,
+        AgentSystemPrompt::custom("New prompt")
+    );
+    assert_eq!(manifest.effective_system_prompt(), "New prompt");
     assert_eq!(manifest.locale, Locale::Zh);
     assert!(
         manifest
@@ -47,6 +52,153 @@ fn manifest_patch_applies_prompt_tools_policy() {
         manifest.file_edit_tool_policy,
         FileEditToolPolicy::ApplyPatch
     );
+}
+
+#[test]
+fn manifest_default_system_prompt_is_locale_selected_builtin() {
+    let mut manifest = AgentManifest::default();
+    let value = serde_json::to_value(&manifest).unwrap();
+
+    assert_eq!(
+        value["systemPrompt"],
+        serde_json::json!({"source": "built_in"})
+    );
+    assert_eq!(
+        manifest.effective_system_prompt(),
+        built_in_system_prompt(Locale::En)
+    );
+
+    manifest
+        .apply_patch(ManifestPatch::SetLocale { locale: Locale::Zh })
+        .unwrap();
+
+    assert_eq!(
+        manifest.effective_system_prompt(),
+        built_in_system_prompt(Locale::Zh)
+    );
+}
+
+#[test]
+fn manifest_custom_system_prompt_does_not_follow_locale() {
+    let mut manifest = AgentManifest::default();
+
+    manifest
+        .apply_patch(ManifestPatch::ReplaceSystemPrompt {
+            prompt: "Custom prompt".into(),
+        })
+        .unwrap();
+    manifest
+        .apply_patch(ManifestPatch::SetLocale { locale: Locale::Zh })
+        .unwrap();
+
+    assert_eq!(manifest.effective_system_prompt(), "Custom prompt");
+}
+
+#[test]
+fn manifest_patch_restores_built_in_system_prompt() {
+    let mut manifest = AgentManifest::default();
+
+    manifest
+        .apply_patch(ManifestPatch::ReplaceSystemPrompt {
+            prompt: "Custom prompt".into(),
+        })
+        .unwrap();
+    manifest
+        .apply_patch(ManifestPatch::UseBuiltInSystemPrompt)
+        .unwrap();
+
+    assert_eq!(manifest.system_prompt, AgentSystemPrompt::default());
+    assert_eq!(
+        manifest.effective_system_prompt(),
+        built_in_system_prompt(Locale::En)
+    );
+}
+
+#[test]
+fn manifest_system_prompt_additions_are_crud_and_ordered() {
+    let mut manifest = AgentManifest::default();
+
+    manifest
+        .apply_patch(ManifestPatch::UpsertSystemPromptAddition {
+            addition: SystemPromptAddition::new("channel.telegram", "Use Telegram."),
+        })
+        .unwrap();
+    manifest
+        .apply_patch(ManifestPatch::UpsertSystemPromptAddition {
+            addition: SystemPromptAddition::new("workspace", "Use the current workspace."),
+        })
+        .unwrap();
+    manifest
+        .apply_patch(ManifestPatch::SetSystemPromptAdditionEnabled {
+            id: "channel.telegram".into(),
+            enabled: false,
+        })
+        .unwrap();
+    manifest
+        .apply_patch(ManifestPatch::ReorderSystemPromptAdditions {
+            ids: vec!["workspace".into(), "channel.telegram".into()],
+        })
+        .unwrap();
+
+    let additions = manifest.system_prompt.additions();
+    assert_eq!(additions[0].id, "workspace");
+    assert_eq!(additions[1].id, "channel.telegram");
+    assert!(!additions[1].enabled);
+    assert!(
+        manifest
+            .effective_system_prompt()
+            .contains("Use the current workspace.")
+    );
+    assert!(!manifest.effective_system_prompt().contains("Use Telegram."));
+
+    manifest
+        .apply_patch(ManifestPatch::RemoveSystemPromptAddition {
+            id: "channel.telegram".into(),
+        })
+        .unwrap();
+    assert_eq!(manifest.system_prompt.additions().len(), 1);
+
+    manifest
+        .apply_patch(ManifestPatch::ClearSystemPromptAdditions)
+        .unwrap();
+    assert!(manifest.system_prompt.additions().is_empty());
+}
+
+#[test]
+fn manifest_system_prompt_base_changes_preserve_additions() {
+    let mut manifest = AgentManifest::default();
+    manifest
+        .apply_patch(ManifestPatch::UpsertSystemPromptAddition {
+            addition: SystemPromptAddition::new("channel.telegram", "Use Telegram."),
+        })
+        .unwrap();
+
+    manifest
+        .apply_patch(ManifestPatch::ReplaceSystemPrompt {
+            prompt: "Custom base.".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        manifest.effective_system_prompt(),
+        "Custom base.\n\n## System Prompt Additions\n\n### channel.telegram\nUse Telegram.\n"
+    );
+
+    manifest
+        .apply_patch(ManifestPatch::UseBuiltInSystemPrompt)
+        .unwrap();
+    assert_eq!(manifest.system_prompt.additions().len(), 1);
+
+    manifest
+        .apply_patch(ManifestPatch::SetBuiltInSystemPromptProfile {
+            profile: BuiltInSystemPromptProfile::Gpt55,
+        })
+        .unwrap();
+    match manifest.system_prompt {
+        AgentSystemPrompt::BuiltIn { profile, .. } => {
+            assert_eq!(profile, BuiltInSystemPromptProfile::Gpt55)
+        }
+        AgentSystemPrompt::Custom { .. } => panic!("expected built-in prompt"),
+    }
 }
 
 #[test]
@@ -65,7 +217,7 @@ fn manifest_file_edit_policy_round_trips_as_snake_case() {
     ] {
         let manifest: AgentManifest = serde_json::from_value(serde_json::json!({
             "locale": "en",
-            "systemPrompt": "test",
+            "systemPrompt": {"source": "custom", "prompt": "test"},
             "fileEditToolPolicy": json_value,
             "approvalPolicy": {"mode": "require_approval"}
         }))
@@ -161,7 +313,7 @@ fn manifest_proposal_store_approves_pending_proposals() {
 fn manifest_plugin_declaration_round_trips_and_defaults() {
     let manifest: AgentManifest = serde_json::from_value(serde_json::json!({
         "locale": "en",
-        "systemPrompt": "test",
+        "systemPrompt": {"source": "custom", "prompt": "test"},
         "approvalPolicy": {"mode": "require_approval"},
         "plugins": {
             "echo": {

@@ -7,7 +7,7 @@
 - Kernel: `AgentRuntime`, typed phase graph, `AgentEvent`, `AgentEffect`, reducer, and `EventStore`.
 - Native extensions: Rust `ModelProvider`, `ToolProvider`, `ContextProvider`, `PhaseNode`, and `ToolCallHook`.
 - Process extensions: newline-delimited JSON-RPC 2.0 over stdio.
-- Product plugins: `noloong-agent` manifest/profile declarations that start stdio extensions with approval, env isolation, and capability allowlists.
+- Runtime plugins: `noloong-agent` manifest/profile declarations that start stdio extensions with approval, env isolation, and capability allowlists.
 - UX layer: `Agent` with persistent state, subscriptions, `prompt`, `continue_run`, `reset`, `abort`, `wait_for_idle`, steering, and follow-up queues.
 
 Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md). Extension authoring details live in [`crates/noloong-agent-core/docs/EXTENSIONS.md`](crates/noloong-agent-core/docs/EXTENSIONS.md).

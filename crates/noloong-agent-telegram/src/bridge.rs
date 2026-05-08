@@ -9,6 +9,7 @@ use noloong_agent::interaction::{
     InteractionSessionDescriptor, InteractionSessionStatus, InteractionUxCapabilities,
     InteractionWsClient, InteractionWsNotification,
 };
+use noloong_agent::{ManifestPatch, SystemPromptAddition};
 use noloong_agent_core::{AgentMessage, ToolPermissionDecision};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +29,7 @@ const METHOD_APPROVAL_RESOLVE: &str = "approval/resolve";
 const METHOD_SESSION_CREATE: &str = "session/create";
 const METHOD_SESSION_GET: &str = "session/get";
 const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
+const TELEGRAM_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.telegram";
 
 pub type TelegramBridgeResult<T> = Result<T, TelegramBridgeError>;
 pub type TelegramInteractionFuture<'a, T> =
@@ -280,6 +282,7 @@ impl TelegramBridge {
                 json!({
                     "sessionId": session_id,
                     "profileId": profile_id,
+                    "manifestPatches": [telegram_system_prompt_patch()],
                     "metadata": telegram_session_metadata(
                         input.chat_id,
                         input.thread_id,
@@ -400,6 +403,15 @@ impl TelegramBridge {
     }
 }
 
+fn telegram_system_prompt_patch() -> ManifestPatch {
+    ManifestPatch::UpsertSystemPromptAddition {
+        addition: SystemPromptAddition::new(
+            TELEGRAM_SYSTEM_PROMPT_ADDITION_ID,
+            "Current interaction channel: Telegram. User messages arrive from Telegram chats, and assistant replies are delivered back to Telegram automatically by the bridge. Keep responses suitable for Telegram: concise, split-safe, Markdown-friendly, and useful without requiring the user to see raw JSON-RPC events or host logs.",
+        ),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionInitializeResult {
@@ -423,7 +435,10 @@ struct SubscriptionResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramBridge, TelegramBridgeError, TelegramInteractionClient};
+    use super::{
+        TELEGRAM_SYSTEM_PROMPT_ADDITION_ID, TelegramBridge, TelegramBridgeError,
+        TelegramInteractionClient,
+    };
     use crate::{
         access::{TelegramAccessPolicy, TelegramChatKind, TelegramTextInput},
         config::TelegramBridgeConfig,
@@ -490,6 +505,14 @@ mod tests {
         let calls = fake.calls();
         assert_eq!(calls[1].0, "session/create");
         assert_eq!(calls[1].1["metadata"]["channel"], "telegram");
+        assert_eq!(
+            calls[1].1["manifestPatches"][0]["op"],
+            "upsert_system_prompt_addition"
+        );
+        assert_eq!(
+            calls[1].1["manifestPatches"][0]["addition"]["id"],
+            TELEGRAM_SYSTEM_PROMPT_ADDITION_ID
+        );
         assert_eq!(calls[2].0, "display/subscribe");
         assert_eq!(calls[3].0, "agent/prompt");
     }

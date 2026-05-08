@@ -275,6 +275,14 @@
         }
       ]
     },
+    "BuiltInSystemPromptProfile": {
+      "enum": [
+        "auto",
+        "general",
+        "gpt_5_5"
+      ],
+      "type": "string"
+    },
     "BuiltInToolName": {
       "enum": [
         "host.exec.start",
@@ -545,6 +553,117 @@
           "required": [
             "op",
             "prompt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "use_built_in_system_prompt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "set_built_in_system_prompt_profile",
+              "type": "string"
+            },
+            "profile": {
+              "$ref": "#/$defs/BuiltInSystemPromptProfile"
+            }
+          },
+          "required": [
+            "op",
+            "profile"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "addition": {
+              "$ref": "#/$defs/SystemPromptAddition"
+            },
+            "op": {
+              "const": "upsert_system_prompt_addition",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "addition"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "remove_system_prompt_addition",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "set_system_prompt_addition_enabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "reorder_system_prompt_additions",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ids"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "clear_system_prompt_additions",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
           ],
           "type": "object"
         },
@@ -1053,6 +1172,25 @@
       },
       "required": [
         "command"
+      ],
+      "type": "object"
+    },
+    "SystemPromptAddition": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
       ],
       "type": "object"
     }

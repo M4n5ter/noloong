@@ -75,7 +75,7 @@ Authority capabilities:
 | `subagent.spawn` | `subagent/spawn` |
 | `session.delete` | `session/delete` |
 
-Read-only methods such as `profile/list`, `session/list`, `session/get`, `agent/state`, `queue/list`, `approval/list`, `manifest/get`, `manifest/proposals/list`, `process/list`, and `process/read` do not require a sensitive authority capability.
+Read-only methods such as `profile/list`, `session/list`, `session/get`, `agent/state`, `queue/list`, `approval/list`, `manifest/get`, `manifest/system_prompt/get`, `manifest/proposals/list`, `process/list`, and `process/read` do not require a sensitive authority capability.
 
 ## Sessions and Profiles
 
@@ -212,14 +212,65 @@ Resume timed-out approvals:
 
 ```json
 {"jsonrpc":"2.0","id":26,"method":"manifest/get","params":{"sessionId":"root"}}
-{"jsonrpc":"2.0","id":27,"method":"manifest/proposals/list","params":{"sessionId":"root"}}
-{"jsonrpc":"2.0","id":28,"method":"manifest/proposals/approve","params":{"sessionId":"root","proposalId":"manifest-proposal-1"}}
-{"jsonrpc":"2.0","id":29,"method":"manifest/apply_approved","params":{"sessionId":"root"}}
+{"jsonrpc":"2.0","id":27,"method":"manifest/system_prompt/get","params":{"sessionId":"root"}}
+{"jsonrpc":"2.0","id":28,"method":"manifest/proposals/list","params":{"sessionId":"root"}}
+{"jsonrpc":"2.0","id":29,"method":"manifest/proposals/approve","params":{"sessionId":"root","proposalId":"manifest-proposal-1"}}
+{"jsonrpc":"2.0","id":30,"method":"manifest/apply_approved","params":{"sessionId":"root"}}
 ```
 
 `manifest/apply_approved` drains approved proposals and applies supported manifest patches. Reserved phase profile patches remain rejected.
 
-Product plugins use the same manifest proposal flow. A bridge should not start plugin processes or send provider credentials itself; it asks the agent to propose a manifest patch, lets a human approve it, then calls `manifest/apply_approved`. Enabled plugins are loaded the next time a live runtime is built for a run or mutation. Read-only `session/list` and `session/get` descriptor operations do not start plugin processes, and v1 does not hot-reload an already running runtime.
+`systemPrompt` is structured. The default is model-aware, locale-selected built-in text:
+
+```json
+{"source":"built_in"}
+```
+
+Built-in prompts may pin a profile. `auto` is the default, `general` is model-neutral, and `gpt_5_5` is tuned for GPT-5.5 family models:
+
+```json
+{"source":"built_in","profile":"gpt_5_5"}
+```
+
+Custom text uses:
+
+```json
+{"source":"custom","prompt":"Use this session-specific system prompt."}
+```
+
+Both built-in and custom prompts may carry additions. Additions are stable, queryable append-only sections layered after the base prompt, so bridges and plugins can add channel-specific instructions without replacing the host prompt:
+
+```json
+{
+  "source": "built_in",
+  "additions": [
+    {
+      "id": "interaction.telegram",
+      "text": "Current interaction channel: Telegram.",
+      "enabled": true
+    }
+  ]
+}
+```
+
+Supported system-prompt patches are:
+
+```json
+{"op":"replace_system_prompt","prompt":"Use this session-specific system prompt."}
+{"op":"use_built_in_system_prompt"}
+{"op":"set_built_in_system_prompt_profile","profile":"gpt_5_5"}
+{"op":"upsert_system_prompt_addition","addition":{"id":"interaction.telegram","text":"Current interaction channel: Telegram."}}
+{"op":"set_system_prompt_addition_enabled","id":"interaction.telegram","enabled":false}
+{"op":"reorder_system_prompt_additions","ids":["interaction.telegram","workspace.policy"]}
+{"op":"remove_system_prompt_addition","id":"interaction.telegram"}
+{"op":"clear_system_prompt_additions"}
+```
+
+`manifest/system_prompt/get` returns the resolved prompt that will be injected on the next model request. The response includes `baseText`, `effectiveText`, `additions`, `enabledAdditionIds`, `configuredProfile`, `resolvedProfile`, `locale`, and optional model context.
+
+The built-in prompt is injected by the Rust host before each model request. It is not persisted as a transcript message. Changing locale or model profile affects only `built_in` prompts; a `custom` prompt stays literal until replaced or reset to built-in. Additions are preserved when switching between built-in and custom base prompts unless explicitly removed or cleared.
+
+Runtime plugins use the same manifest proposal flow. A bridge should not start plugin processes or send provider credentials itself; it asks the agent to propose a manifest patch, lets a human approve it, then calls `manifest/apply_approved`. Enabled plugins are loaded the next time a live runtime is built for a run or mutation. Read-only `session/list` and `session/get` descriptor operations do not start plugin processes, and v1 does not hot-reload an already running runtime.
 
 Register a stdio plugin:
 
