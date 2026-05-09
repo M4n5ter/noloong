@@ -3,8 +3,10 @@ use noloong_agent_core::{
     HttpAuthRefreshResult, MediaBlock, MediaKind, MessageRole, ModelProvider, ModelRequest,
     ModelStreamEvent, ResponsesApiProvider, ResponsesApiProviderConfig,
     ResponsesApiRequestRenderConfig, ResponsesReasoningConfig, ResponsesReasoningEffort,
-    ResponsesReasoningSummary, Result, RunReport, SseReconnectConfig, StopReason, ThinkingBlock,
-    ThinkingKind, ToolCall, ToolPermissionRequirement, ToolSpec, render_responses_api_request,
+    ResponsesReasoningSummary, ResponsesReplayItemSource, ResponsesStateMode, Result, RunReport,
+    SseReconnectConfig, StopReason, ThinkingBlock, ThinkingKind, ToolCall,
+    ToolPermissionRequirement, ToolSpec, normalize_responses_replay_item,
+    render_responses_api_request,
 };
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex};
@@ -23,6 +25,120 @@ fn reconnect_config_builder_sets_stream_reconnect() {
         .stream_reconnect(SseReconnectConfig::disabled());
 
     assert_eq!(config.stream_reconnect, SseReconnectConfig::disabled());
+}
+
+#[test]
+fn state_mode_controls_store_rendering() -> Result<()> {
+    let stateless = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model"),
+        &simple_request(),
+    )?;
+    let stateful = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model").stateful(),
+        &simple_request(),
+    )?;
+    let store_compat = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model").store(true),
+        &simple_request(),
+    )?;
+
+    assert_eq!(stateless["store"], false);
+    assert_eq!(stateful["store"], true);
+    assert_eq!(store_compat["store"], true);
+    Ok(())
+}
+
+#[test]
+fn stateless_reasoning_requests_encrypted_content() -> Result<()> {
+    let stateless = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model")
+            .reasoning(ResponsesReasoningConfig::new().effort(ResponsesReasoningEffort::Low)),
+        &simple_request(),
+    )?;
+    let stateful = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model")
+            .stateful()
+            .reasoning(ResponsesReasoningConfig::new().effort(ResponsesReasoningEffort::Low)),
+        &simple_request(),
+    )?;
+    let explicit = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model")
+            .stateful()
+            .reasoning(ResponsesReasoningConfig::new().effort(ResponsesReasoningEffort::Low))
+            .include_encrypted_reasoning(true),
+        &simple_request(),
+    )?;
+
+    assert_eq!(stateless["include"][0], "reasoning.encrypted_content");
+    assert!(stateful.get("include").is_none());
+    assert_eq!(explicit["include"][0], "reasoning.encrypted_content");
+    Ok(())
+}
+
+#[test]
+fn responses_extra_body_cannot_override_state_fields() {
+    for reserved in ["store", "include"] {
+        let error = render_responses_api_request(
+            &ResponsesApiRequestRenderConfig::new("test-responses", "test-model")
+                .extra_body(reserved, json!(true)),
+            &simple_request(),
+        )
+        .expect_err("reserved Responses extra body field should fail");
+
+        assert!(error.to_string().contains("reserved field"));
+    }
+}
+
+#[test]
+fn replay_item_policy_normalizes_stateless_safe_items() -> Result<()> {
+    let normalized = normalize_responses_replay_item(
+        json!({
+            "type": "reasoning",
+            "id": "rs-1",
+            "encrypted_content": "ciphertext",
+        }),
+        ResponsesStateMode::Stateless,
+        ResponsesReplayItemSource::RequestHistory,
+    )?;
+
+    assert_eq!(
+        normalized,
+        Some(json!({
+            "type": "reasoning",
+            "encrypted_content": "ciphertext",
+        }))
+    );
+    Ok(())
+}
+
+#[test]
+fn replay_item_policy_rejects_stateless_unencrypted_history() {
+    let error = normalize_responses_replay_item(
+        json!({
+            "type": "reasoning",
+            "id": "rs-1",
+        }),
+        ResponsesStateMode::Stateless,
+        ResponsesReplayItemSource::RequestHistory,
+    )
+    .expect_err("unencrypted reasoning cannot be replayed in stateless mode");
+
+    assert!(error.to_string().contains("encrypted_content"));
+}
+
+#[test]
+fn replay_item_policy_drops_stateless_unsafe_compact_output() -> Result<()> {
+    let dropped = normalize_responses_replay_item(
+        json!({
+            "type": "function_call",
+            "id": "fc-1",
+        }),
+        ResponsesStateMode::Stateless,
+        ResponsesReplayItemSource::CompactOutput,
+    )?;
+
+    assert!(dropped.is_none());
+    Ok(())
 }
 
 const EMPTY_COMPLETED_STREAM: &str = concat!(
@@ -162,7 +278,13 @@ fn request_renderer_maps_controls_and_provider_payload_without_http() -> Result<
     assert_eq!(payload["text"]["verbosity"], "medium");
     assert_eq!(payload["reasoning"]["summary"], "auto");
     assert_eq!(payload["include"][0], "reasoning.encrypted_content");
-    assert_eq!(payload["input"][0], raw_item);
+    assert_eq!(
+        payload["input"][0],
+        json!({
+            "type": "reasoning",
+            "encrypted_content": "ciphertext",
+        })
+    );
     assert_eq!(payload["tools"][0]["strict"], true);
     assert_eq!(payload["tools"][1]["type"], "web_search_preview");
     Ok(())
@@ -220,7 +342,7 @@ async fn config_defaults_headers_and_request_body() -> Result<()> {
 }
 
 #[tokio::test]
-async fn provider_payload_response_items_are_replayed() -> Result<()> {
+async fn stateful_provider_payload_response_items_preserve_ids() -> Result<()> {
     let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
     let raw_item = json!({
         "type": "reasoning",
@@ -230,6 +352,7 @@ async fn provider_payload_response_items_are_replayed() -> Result<()> {
     let provider = ResponsesApiProvider::new(
         ResponsesApiProviderConfig::new("test-responses", "test-model")
             .base_url(server.url())
+            .stateful()
             .api_key("secret"),
     )?;
 
@@ -254,6 +377,49 @@ async fn provider_payload_response_items_are_replayed() -> Result<()> {
         .await?;
 
     assert_eq!(server.request().json["input"][0], raw_item);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stateless_provider_payload_response_items_strip_ids() -> Result<()> {
+    let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .api_key("secret"),
+    )?;
+
+    provider
+        .stream_model(
+            ModelRequest {
+                messages: vec![AgentMessage {
+                    id: "assistant-raw-1".into(),
+                    role: MessageRole::Assistant,
+                    content: vec![ContentBlock::ProviderPayload {
+                        provider: "openai.responses".into(),
+                        kind: "response_item".into(),
+                        value: json!({
+                            "type": "reasoning",
+                            "id": "rs-1",
+                            "encrypted_content": "ciphertext",
+                        }),
+                    }],
+                    metadata: Map::new(),
+                }],
+                ..simple_request()
+            },
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_eq!(
+        server.request().json["input"][0],
+        json!({
+            "type": "reasoning",
+            "encrypted_content": "ciphertext",
+        })
+    );
     Ok(())
 }
 

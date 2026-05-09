@@ -69,9 +69,10 @@ pub use providers::{
 };
 pub use reducer::{apply_event, reduce_events};
 pub use responses::{
-    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesApiRequestRenderConfig,
-    ResponsesReasoningConfig, ResponsesReasoningEffort, ResponsesReasoningSummary,
-    render_responses_api_request,
+    RESPONSES_PROVIDER_PAYLOAD, RESPONSES_RESPONSE_ITEM_PAYLOAD, ResponsesApiProvider,
+    ResponsesApiProviderConfig, ResponsesApiRequestRenderConfig, ResponsesReasoningConfig,
+    ResponsesReasoningEffort, ResponsesReasoningSummary, ResponsesReplayItemSource,
+    ResponsesStateMode, normalize_responses_replay_item, render_responses_api_request,
 };
 pub use runtime::{
     AgentEventSink, AgentInput, AgentRuntime, AgentRuntimeBuilder, QueuedAgentMessage,

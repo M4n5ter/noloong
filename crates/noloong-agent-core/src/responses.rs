@@ -12,6 +12,8 @@ use crate::{
     StopReason, ThinkingBlock, ThinkingDelta, ThinkingKind, ToolCall, ToolSpec,
 };
 use reqwest::header::HeaderMap;
+#[cfg(feature = "json-schema")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -24,8 +26,33 @@ use std::{
 const DEFAULT_RESPONSES_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const RESPONSES_REASONING_REPLAY_KIND: &str = "openai_responses_reasoning_replay";
-const RESPONSES_PROVIDER_PAYLOAD: &str = "openai.responses";
-const RESPONSES_RESPONSE_ITEM_PAYLOAD: &str = "response_item";
+pub const RESPONSES_PROVIDER_PAYLOAD: &str = "openai.responses";
+pub const RESPONSES_RESPONSE_ITEM_PAYLOAD: &str = "response_item";
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ResponsesStateMode {
+    #[default]
+    Stateless,
+    Stateful,
+}
+
+impl ResponsesStateMode {
+    pub const fn store(self) -> bool {
+        matches!(self, Self::Stateful)
+    }
+
+    pub const fn is_stateless(self) -> bool {
+        matches!(self, Self::Stateless)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponsesReplayItemSource {
+    RequestHistory,
+    CompactOutput,
+}
 
 #[derive(Clone)]
 pub struct ResponsesApiProviderConfig {
@@ -44,7 +71,7 @@ pub struct ResponsesApiProviderConfig {
     pub request_timeout: Duration,
     pub stream_idle_timeout: Duration,
     pub stream_reconnect: SseReconnectConfig,
-    pub store: bool,
+    pub state_mode: ResponsesStateMode,
     pub reasoning: Option<ResponsesReasoningConfig>,
     pub include_encrypted_reasoning: bool,
     pub native_tools: Vec<Value>,
@@ -140,7 +167,7 @@ impl Debug for ResponsesApiProviderConfig {
             .field("request_timeout", &self.request_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("stream_reconnect", &self.stream_reconnect)
-            .field("store", &self.store)
+            .field("state_mode", &self.state_mode)
             .field("reasoning", &self.reasoning)
             .field(
                 "include_encrypted_reasoning",
@@ -171,7 +198,7 @@ impl ResponsesApiProviderConfig {
             request_timeout: Duration::from_secs(60),
             stream_idle_timeout: Duration::from_secs(300),
             stream_reconnect: SseReconnectConfig::default(),
-            store: false,
+            state_mode: ResponsesStateMode::default(),
             reasoning: None,
             include_encrypted_reasoning: false,
             native_tools: Vec::new(),
@@ -252,7 +279,26 @@ impl ResponsesApiProviderConfig {
     }
 
     pub fn store(mut self, store: bool) -> Self {
-        self.store = store;
+        self.state_mode = if store {
+            ResponsesStateMode::Stateful
+        } else {
+            ResponsesStateMode::Stateless
+        };
+        self
+    }
+
+    pub fn with_state_mode(mut self, state_mode: ResponsesStateMode) -> Self {
+        self.state_mode = state_mode;
+        self
+    }
+
+    pub fn stateless(mut self) -> Self {
+        self.state_mode = ResponsesStateMode::Stateless;
+        self
+    }
+
+    pub fn stateful(mut self) -> Self {
+        self.state_mode = ResponsesStateMode::Stateful;
         self
     }
 
@@ -296,7 +342,7 @@ pub struct ResponsesApiRequestRenderConfig {
     pub temperature: Option<f64>,
     pub text: Option<Value>,
     pub fallback_instructions: Option<String>,
-    pub store: bool,
+    pub state_mode: ResponsesStateMode,
     pub reasoning: Option<ResponsesReasoningConfig>,
     pub include_encrypted_reasoning: bool,
     pub native_tools: Vec<Value>,
@@ -314,7 +360,7 @@ impl ResponsesApiRequestRenderConfig {
             temperature: None,
             text: None,
             fallback_instructions: None,
-            store: false,
+            state_mode: ResponsesStateMode::default(),
             reasoning: None,
             include_encrypted_reasoning: false,
             native_tools: Vec::new(),
@@ -349,7 +395,26 @@ impl ResponsesApiRequestRenderConfig {
     }
 
     pub fn store(mut self, store: bool) -> Self {
-        self.store = store;
+        self.state_mode = if store {
+            ResponsesStateMode::Stateful
+        } else {
+            ResponsesStateMode::Stateless
+        };
+        self
+    }
+
+    pub fn with_state_mode(mut self, state_mode: ResponsesStateMode) -> Self {
+        self.state_mode = state_mode;
+        self
+    }
+
+    pub fn stateless(mut self) -> Self {
+        self.state_mode = ResponsesStateMode::Stateless;
+        self
+    }
+
+    pub fn stateful(mut self) -> Self {
+        self.state_mode = ResponsesStateMode::Stateful;
         self
     }
 
@@ -394,7 +459,7 @@ impl From<&ResponsesApiProviderConfig> for ResponsesApiRequestRenderConfig {
             temperature: config.temperature,
             text: config.text.clone(),
             fallback_instructions: config.fallback_instructions.clone(),
-            store: config.store,
+            state_mode: config.state_mode,
             reasoning: config.reasoning.clone(),
             include_encrypted_reasoning: config.include_encrypted_reasoning,
             native_tools: config.native_tools.clone(),
@@ -559,12 +624,13 @@ fn render_responses_api_request_with_tool_names(
     tool_names: &ProviderToolNameCodec,
     request: &ModelRequest,
 ) -> Result<Value> {
+    validate_responses_extra_body(&config.extra_body)?;
     let mut payload = Map::new();
     let rendered_messages = render_responses_messages(config, tool_names, &request.messages)?;
     payload.insert("model".into(), Value::String(config.model.clone()));
     payload.insert("input".into(), Value::Array(rendered_messages.input));
     payload.insert("stream".into(), Value::Bool(true));
-    payload.insert("store".into(), Value::Bool(config.store));
+    payload.insert("store".into(), Value::Bool(config.state_mode.store()));
     if let Some(max_output_tokens) = config.max_output_tokens {
         payload.insert(
             "max_output_tokens".into(),
@@ -580,7 +646,7 @@ fn render_responses_api_request_with_tool_names(
     if let Some(reasoning) = &config.reasoning {
         payload.insert("reasoning".into(), reasoning_to_value(reasoning));
     }
-    if config.include_encrypted_reasoning {
+    if should_include_encrypted_reasoning(config) {
         payload.insert(
             "include".into(),
             Value::Array(vec![Value::String("reasoning.encrypted_content".into())]),
@@ -599,6 +665,22 @@ fn render_responses_api_request_with_tool_names(
     }
     payload.extend(config.extra_body.clone());
     Ok(Value::Object(payload))
+}
+
+fn validate_responses_extra_body(extra_body: &Map<String, Value>) -> Result<()> {
+    for reserved in ["store", "include"] {
+        if extra_body.contains_key(reserved) {
+            return Err(AgentCoreError::Provider(format!(
+                "responses extra body cannot override reserved field: {reserved}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn should_include_encrypted_reasoning(config: &ResponsesApiRequestRenderConfig) -> bool {
+    config.include_encrypted_reasoning
+        || (config.state_mode.is_stateless() && config.reasoning.is_some())
 }
 
 fn reasoning_to_value(reasoning: &ResponsesReasoningConfig) -> Value {
@@ -625,7 +707,9 @@ fn render_responses_messages(
     let mut input = Vec::new();
     let mut instruction_parts = Vec::new();
     for message in messages {
-        if let Some(items) = render_responses_provider_payload_items(&message.content)? {
+        if let Some(items) =
+            render_responses_provider_payload_items(config.state_mode, &message.content)?
+        {
             input.extend(items);
             continue;
         }
@@ -661,7 +745,10 @@ fn render_responses_messages(
     })
 }
 
-fn render_responses_provider_payload_items(content: &[ContentBlock]) -> Result<Option<Vec<Value>>> {
+fn render_responses_provider_payload_items(
+    state_mode: ResponsesStateMode,
+    content: &[ContentBlock],
+) -> Result<Option<Vec<Value>>> {
     let payload_count = content
         .iter()
         .filter(|block| matches!(block, ContentBlock::ProviderPayload { .. }))
@@ -690,9 +777,83 @@ fn render_responses_provider_payload_items(content: &[ContentBlock]) -> Result<O
                 "unsupported responses provider payload: {provider}/{kind}"
             )));
         }
-        items.push(value.clone());
+        let Some(item) = normalize_responses_replay_item(
+            value.clone(),
+            state_mode,
+            ResponsesReplayItemSource::RequestHistory,
+        )?
+        else {
+            continue;
+        };
+        items.push(item);
     }
     Ok(Some(items))
+}
+
+pub fn normalize_responses_replay_item(
+    item: Value,
+    state_mode: ResponsesStateMode,
+    source: ResponsesReplayItemSource,
+) -> Result<Option<Value>> {
+    if matches!(state_mode, ResponsesStateMode::Stateful) {
+        return Ok(Some(item));
+    }
+
+    let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+        return unsafe_responses_replay_item(source, "responses replay item is missing type");
+    };
+    match item_type {
+        "message" => Ok(Some(strip_response_item_id(item))),
+        "reasoning" => {
+            if has_non_empty_string(&item, "encrypted_content") {
+                Ok(Some(strip_response_item_id(item)))
+            } else {
+                unsafe_responses_replay_item(
+                    source,
+                    "stateless responses reasoning replay requires encrypted_content",
+                )
+            }
+        }
+        "compaction" | "context_compaction" => {
+            if has_non_empty_string(&item, "encrypted_content") {
+                Ok(Some(strip_response_item_id(item)))
+            } else {
+                unsafe_responses_replay_item(
+                    source,
+                    "stateless responses compaction replay requires encrypted_content",
+                )
+            }
+        }
+        _ => unsafe_responses_replay_item(
+            source,
+            &format!("stateless responses replay item is not safe to replay: {item_type}"),
+        ),
+    }
+}
+
+fn strip_response_item_id(mut item: Value) -> Value {
+    if let Value::Object(object) = &mut item {
+        object.remove("id");
+    }
+    item
+}
+
+fn has_non_empty_string(item: &Value, key: &str) -> bool {
+    item.get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+}
+
+fn unsafe_responses_replay_item(
+    source: ResponsesReplayItemSource,
+    message: &str,
+) -> Result<Option<Value>> {
+    match source {
+        ResponsesReplayItemSource::RequestHistory => {
+            Err(AgentCoreError::Provider(message.to_string()))
+        }
+        ResponsesReplayItemSource::CompactOutput => Ok(None),
+    }
 }
 
 fn render_user_content(

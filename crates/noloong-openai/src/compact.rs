@@ -5,7 +5,12 @@ use noloong_agent_core::{
     AgentCoreError, AgentMessage, BoxFuture, CancellationToken, ContentBlock,
     ContextCompactionOutput, ContextCompactionRequest, ContextCompactor, HttpAuthContext,
     HttpAuthHeader, HttpAuthProvider, HttpAuthRefreshContext, ModelRequest,
-    ResponsesApiRequestRenderConfig, ToolSpec, render_responses_api_request,
+    ResponsesApiRequestRenderConfig, ResponsesReplayItemSource, ResponsesStateMode, ToolSpec,
+    normalize_responses_replay_item, render_responses_api_request,
+};
+pub use noloong_agent_core::{
+    RESPONSES_PROVIDER_PAYLOAD as OPENAI_RESPONSES_PAYLOAD_PROVIDER,
+    RESPONSES_RESPONSE_ITEM_PAYLOAD as OPENAI_RESPONSES_RESPONSE_ITEM_KIND,
 };
 use reqwest::{
     StatusCode,
@@ -14,9 +19,6 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::{fmt::Debug, sync::Arc, time::Duration};
-
-pub const OPENAI_RESPONSES_PAYLOAD_PROVIDER: &str = "openai.responses";
-pub const OPENAI_RESPONSES_RESPONSE_ITEM_KIND: &str = "response_item";
 
 #[derive(Clone)]
 pub struct OpenAiResponsesCompactorConfig {
@@ -81,6 +83,11 @@ impl OpenAiResponsesCompactorConfig {
         self
     }
 
+    pub fn state_mode(mut self, state_mode: ResponsesStateMode) -> Self {
+        self.render = self.render.with_state_mode(state_mode);
+        self
+    }
+
     pub fn render(mut self, render: ResponsesApiRequestRenderConfig) -> Self {
         self.render = render;
         self
@@ -102,6 +109,7 @@ impl Debug for OpenAiResponsesCompactorConfig {
             .field("tools", &self.tools)
             .field("request_timeout", &self.request_timeout)
             .field("parallel_tool_calls", &self.parallel_tool_calls)
+            .field("state_mode", &self.render.state_mode)
             .finish()
     }
 }
@@ -156,14 +164,28 @@ impl OpenAiResponsesCompactor {
             let body = response.text().await?;
             if status.is_success() {
                 let response = serde_json::from_str::<CompactResponse>(&body)?;
-                let messages = response
-                    .output
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        response_item_message(&request.run_id, request.turn_id, index, item)
-                    })
-                    .collect();
+                let mut messages = Vec::new();
+                for item in response.output {
+                    let Some(item) = normalize_responses_replay_item(
+                        item,
+                        self.config.render.state_mode,
+                        ResponsesReplayItemSource::CompactOutput,
+                    )?
+                    else {
+                        continue;
+                    };
+                    messages.push(response_item_message(
+                        &request.run_id,
+                        request.turn_id,
+                        messages.len(),
+                        item,
+                    ));
+                }
+                if messages.is_empty() {
+                    return Err(AgentCoreError::Provider(
+                        "responses compact output did not contain replayable items".into(),
+                    ));
+                }
                 return Ok(ContextCompactionOutput::replacement(messages));
             }
             if status == StatusCode::UNAUTHORIZED
@@ -212,6 +234,7 @@ impl OpenAiResponsesCompactor {
         };
         object.remove("stream");
         object.remove("store");
+        object.remove("include");
         object.insert(
             "parallel_tool_calls".into(),
             Value::Bool(self.config.parallel_tool_calls),

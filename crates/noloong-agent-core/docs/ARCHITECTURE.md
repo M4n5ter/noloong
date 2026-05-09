@@ -1041,14 +1041,17 @@ merge 策略：
 
 ## Built-in Responses API Provider
 
-内置 `ResponsesApiProvider` 也是普通 `ModelProvider`。它只负责 OpenAI Responses / OpenResponses wire format，不拥有 hidden conversation state，也不改变 runtime、phase graph 或 event sourcing 模型。
+内置 `ResponsesApiProvider` 也是普通 `ModelProvider`。它只负责 OpenAI Responses / OpenResponses wire format，不拥有 hidden in-process conversation state，也不改变 runtime、phase graph 或 event sourcing 模型。
 
-v1 采用 stateless full-history 模式：
+Responses request chaining 始终采用 full input-array chaining：
 
 - 每次从 `AgentState.messages` 构造完整 `input`。
-- 默认 `store = false`。
+- 默认 `state_mode = Stateless`，即 `store = false`。
+- 显式 `state_mode = Stateful` 时渲染 `store = true`，允许上游 Responses service 持久化 response item。
 - 不自动维护 `previous_response_id`。
-- 如果未来需要 stateful Responses，应由 context/phase 扩展显式管理 response id，而不是让 provider 隐式持有会话状态。
+- 不使用 Conversations API 作为内置常规链路。
+
+这里的 `state_mode` 只描述上游 Responses service 是否保存 response item。它不同于 core `EventStore`，也不同于 `noloong-agent` 的 session registry store：event store 是本地 agent event replay/audit 的事实来源，registry store 是 product interaction session 索引，Responses `store` 是 provider-side item persistence。
 
 配置项：
 
@@ -1064,7 +1067,7 @@ v1 采用 stateless full-history 模式：
 - `text`
 - `request_timeout`
 - `stream_idle_timeout`
-- `store`
+- `state_mode`
 - `reasoning`
 - `include_encrypted_reasoning`
 - `native_tools`
@@ -1078,7 +1081,7 @@ v1 采用 stateless full-history 模式：
 - API key env：`OPENAI_API_KEY`
 - auth header：Bearer token
 - `stream: true`
-- `store: false`
+- `store: false` when `state_mode = Stateless`
 
 Responses-compatible endpoint 仍由调用方配置。比如 OpenRouter Responses Beta 可以在测试或应用层使用：
 
@@ -1096,7 +1099,7 @@ core 不提供 OpenRouter、OpenAI model 或任何 vendor preset。
 - `model`
 - `input`
 - `stream: true`
-- `store`
+- `store`，由 `state_mode` 唯一决定
 - `max_output_tokens`
 - `temperature`
 - `text`
@@ -1106,7 +1109,7 @@ core 不提供 OpenRouter、OpenAI model 或任何 vendor preset。
 - `tools`
 - caller-owned `extra_body`
 
-注意 `extra_body` 最后 merge，因此调用方可以为兼容 provider 添加或覆盖字段。
+`extra_body` 可为兼容 provider 添加扩展字段，但不能覆盖 `store` 或 `include`。这两个字段分别由 `state_mode` 和 encrypted reasoning replay policy 管理，避免配置绕过后在 replay 阶段失败。
 
 message 映射规则：
 
@@ -1116,6 +1119,7 @@ message 映射规则：
 - `Assistant` tool calls -> `function_call` items。
 - `Assistant` thinking -> 只有同 provider/model replay descriptor 匹配时，才渲染为 reasoning item。
 - `ToolResult` -> `function_call_output` item。
+- `ProviderPayload { provider: "openai.responses", kind: "response_item" }` -> raw Responses item replay；stateless mode 会先规范化 item。
 - `Custom(role)` fail-fast，因为 Responses API 不接受 arbitrary role。
 
 tool 映射规则：
@@ -1165,6 +1169,7 @@ Responses reasoning request config 是显式 opt-in：
 - `ResponsesReasoningEffort::{Minimal, Low, Medium, High, XHigh, Custom}`
 - `ResponsesReasoningSummary::{Auto, Concise, Detailed, None, Custom}`
 - `include_encrypted_reasoning(true)` 会添加 `include: ["reasoning.encrypted_content"]`。
+- `state_mode = Stateless` 且存在 reasoning config 时，会自动添加 encrypted reasoning include。
 
 每个 Responses thinking delta 会携带 replay descriptor：
 
@@ -1178,6 +1183,19 @@ Responses reasoning request config 是显式 opt-in：
 ```
 
 历史 assistant message replay 时，只有 descriptor 的 provider id 和 model 都匹配当前 config，才会把 prior `ThinkingBlock.raw` 渲染为 Responses reasoning item。跨 provider 或跨 model 的 thinking 会被忽略。
+
+### Responses Provider Payload Replay
+
+`ContentBlock::ProviderPayload` 可保存 OpenAI Responses raw item，用于 remote compact 或 provider-owned history。`ResponsesApiProvider` 只消费 `openai.responses` / `response_item`。
+
+replay policy 按 `state_mode` 区分：
+
+- `Stateful`：raw item 原样回放，保留服务端 item id。
+- `Stateless`：只回放可安全重放的 item，并移除顶层 `id`。
+- stateless `reasoning` 必须带 `encrypted_content`。
+- stateless `compaction` / `context_compaction` 必须带 `encrypted_content`。
+- request history 中出现 unsafe item 会 fail-fast。
+- compact output 中出现 unsafe item 会被丢弃；如果没有任何可 replay item，compactor 返回错误。
 
 ## Built-in Anthropic Messages Provider
 
@@ -1422,7 +1440,7 @@ cargo test -p noloong-openai --test live_chatgpt -- --ignored --nocapture
 
 1. PostgreSQL event store：复用当前 SQL-first contract，把 SQLite 的 Toasty schema、append uniqueness、replay ordering 推广到 PostgreSQL backend。
 2. 多 model provider routing：按 phase、tool、context 或 budget 选择 provider。
-3. Stateful Responses support：通过 context/phase 显式管理 `previous_response_id`。
+3. Responses `previous_response_id` / Conversations mode：仅在需要减少 request payload 且能接受 provider-side chain dependency 时，作为独立 provider mode 设计。
 4. `MediaStore`：大 blob 的持久化、去重、加密、权限和生命周期管理。
 5. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
 6. approval UX adapters：core 已内置 event-sourced pause/resume/timeout 状态机；具体的人机审批 UI、通知、队列持久化和组织策略应作为 hook/应用层适配器实现。

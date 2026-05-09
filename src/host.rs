@@ -3,6 +3,7 @@ use crate::config::{
     ChatCompletionsReasoningConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig,
     HostProfileConfig, ProfileCompactionConfig, ProfileEventStoreConfig, RegistryStoreConfig,
     ResponsesProviderReasoningConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
+    validate_responses_reasoning_state_mode,
 };
 use noloong_agent::{
     AgentManifest, AgentSession, ManifestPatch,
@@ -19,8 +20,8 @@ use noloong_agent_core::{
     BoxFuture, CancellationToken, ChatCompletionsProvider, ChatCompletionsProviderConfig,
     ContextCompactionConfig, ContextCompactionMode, ContextCompactor, EventStore, HttpAuthContext,
     HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, InMemoryEventStore, ModelProvider,
-    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesReasoningConfig, SqliteEventStore,
-    SqliteEventStoreConfig,
+    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesReasoningConfig, ResponsesStateMode,
+    SqliteEventStore, SqliteEventStoreConfig,
 };
 use noloong_openai::{
     auth::{ChatGptAuthManager, ChatGptTokenStorage, ChatGptTokenStore},
@@ -210,6 +211,7 @@ struct ChatGptCompactSource {
     provider_id: String,
     model: String,
     auth_provider: Arc<dyn HttpAuthProvider>,
+    state_mode: ResponsesStateMode,
 }
 
 fn build_provider(
@@ -259,12 +261,14 @@ fn build_provider(
             headers,
             extra_body,
             max_output_tokens,
+            state_mode,
             reasoning,
         } => {
             let mut provider = ResponsesApiProviderConfig::new(
                 provider_id.clone().unwrap_or_else(|| profile_id.into()),
                 model,
-            );
+            )
+            .with_state_mode(*state_mode);
             if let Some(base_url) = base_url {
                 provider = provider.base_url(base_url);
             }
@@ -274,7 +278,7 @@ fn build_provider(
             for (name, value) in headers {
                 provider = provider.header(name, value);
             }
-            provider = apply_responses_reasoning(provider, reasoning.as_ref());
+            provider = apply_responses_reasoning(provider, reasoning.as_ref(), *state_mode)?;
             for (name, value) in extra_body {
                 provider = provider.extra_body(name, value.clone());
             }
@@ -323,6 +327,7 @@ fn build_provider(
             provider_id,
             model,
             auth,
+            state_mode,
             reasoning,
         } => {
             let provider_id = provider_id.clone().unwrap_or_else(|| profile_id.into());
@@ -331,8 +336,10 @@ fn build_provider(
                 provider_id.clone(),
                 model,
                 Arc::clone(&auth_provider),
-            );
-            let provider_config = apply_responses_reasoning(provider_config, reasoning.as_ref());
+            )
+            .with_state_mode(*state_mode);
+            let provider_config =
+                apply_responses_reasoning(provider_config, reasoning.as_ref(), *state_mode)?;
             let provider = ResponsesApiProvider::new(provider_config)?;
             Ok(BuiltProvider {
                 provider: Arc::new(provider),
@@ -340,6 +347,7 @@ fn build_provider(
                     provider_id,
                     model: model.clone(),
                     auth_provider,
+                    state_mode: *state_mode,
                 }),
             })
         }
@@ -388,17 +396,21 @@ fn chat_completions_reasoning_extra_body(
 fn apply_responses_reasoning(
     mut provider: ResponsesApiProviderConfig,
     reasoning: Option<&ResponsesProviderReasoningConfig>,
-) -> ResponsesApiProviderConfig {
+    state_mode: ResponsesStateMode,
+) -> Result<ResponsesApiProviderConfig, HostBuildError> {
     let Some(reasoning) = reasoning else {
-        return provider;
+        return Ok(provider);
     };
+    validate_responses_reasoning_state_mode(state_mode, Some(reasoning))?;
     if let Some(core_reasoning) = responses_reasoning_config(reasoning) {
         provider = provider.reasoning(core_reasoning);
     }
-    if reasoning.enabled && reasoning.include_encrypted {
+    if reasoning.enabled
+        && (reasoning.include_encrypted.unwrap_or(false) || state_mode.is_stateless())
+    {
         provider = provider.include_encrypted_reasoning(true);
     }
-    provider
+    Ok(provider)
 }
 
 fn responses_reasoning_config(
@@ -539,7 +551,8 @@ fn openai_responses_runtime_compaction(
         .unwrap_or_else(|| format!("{}.compact", source.provider_id));
     let model = options.model.unwrap_or_else(|| source.model.clone());
     let mut compactor_config = OpenAiResponsesCompactorConfig::new(compactor_id, model)
-        .auth_provider(Arc::clone(&source.auth_provider));
+        .auth_provider(Arc::clone(&source.auth_provider))
+        .state_mode(source.state_mode);
     if let Some(request_timeout_secs) = options.request_timeout_secs {
         if request_timeout_secs == 0 {
             return Err(CliConfigError::ParseConfig(
@@ -651,7 +664,8 @@ mod tests {
         AnthropicThinkingConfig, BoxFuture, CancellationToken, ChatCompletionsProviderConfig,
         ContextCompactionMode, EventStore as _, ModelProvider, ModelRequest, ModelStreamEvent,
         ModelStreamSink, ResponsesApiProviderConfig, ResponsesReasoningEffort,
-        ResponsesReasoningSummary, SqliteEventStore, SqliteEventStoreConfig, StopReason,
+        ResponsesReasoningSummary, ResponsesStateMode, SqliteEventStore, SqliteEventStoreConfig,
+        StopReason,
     };
     use std::{
         path::{Path, PathBuf},
@@ -739,14 +753,14 @@ mod tests {
             enabled: true,
             effort: Some(ResponsesProviderReasoningEffort::High),
             summary: Some(ResponsesProviderReasoningSummary::Concise),
-            include_encrypted: true,
+            include_encrypted: Some(true),
         })
         .expect("enabled reasoning config should render");
         let disabled = responses_reasoning_config(&ResponsesProviderReasoningConfig {
             enabled: false,
             effort: Some(ResponsesProviderReasoningEffort::High),
             summary: Some(ResponsesProviderReasoningSummary::Concise),
-            include_encrypted: true,
+            include_encrypted: Some(true),
         });
 
         assert_eq!(reasoning.effort, Some(ResponsesReasoningEffort::High));
@@ -762,23 +776,62 @@ mod tests {
                 enabled: true,
                 effort: None,
                 summary: None,
-                include_encrypted: true,
+                include_encrypted: Some(true),
             }),
-        );
+            ResponsesStateMode::Stateless,
+        )
+        .unwrap();
         let disabled = apply_responses_reasoning(
             ResponsesApiProviderConfig::new("openai", "gpt-5.4-mini"),
             Some(&ResponsesProviderReasoningConfig {
                 enabled: false,
                 effort: Some(ResponsesProviderReasoningEffort::High),
                 summary: Some(ResponsesProviderReasoningSummary::Detailed),
-                include_encrypted: true,
+                include_encrypted: Some(true),
             }),
-        );
+            ResponsesStateMode::Stateless,
+        )
+        .unwrap();
 
         assert!(enabled.include_encrypted_reasoning);
         assert!(enabled.reasoning.is_none());
         assert!(!disabled.include_encrypted_reasoning);
         assert!(disabled.reasoning.is_none());
+    }
+
+    #[test]
+    fn responses_reasoning_rejects_explicit_false_include_in_stateless_mode() {
+        let error = apply_responses_reasoning(
+            ResponsesApiProviderConfig::new("openai", "gpt-5.4-mini"),
+            Some(&ResponsesProviderReasoningConfig {
+                enabled: true,
+                effort: Some(ResponsesProviderReasoningEffort::Medium),
+                summary: None,
+                include_encrypted: Some(false),
+            }),
+            ResponsesStateMode::Stateless,
+        )
+        .expect_err("stateless reasoning must not explicitly disable encrypted replay");
+
+        assert!(error.to_string().contains("includeEncrypted"));
+    }
+
+    #[test]
+    fn responses_reasoning_allows_explicit_false_include_in_stateful_mode() {
+        let provider = apply_responses_reasoning(
+            ResponsesApiProviderConfig::new("openai", "gpt-5.4-mini"),
+            Some(&ResponsesProviderReasoningConfig {
+                enabled: true,
+                effort: Some(ResponsesProviderReasoningEffort::Medium),
+                summary: None,
+                include_encrypted: Some(false),
+            }),
+            ResponsesStateMode::Stateful,
+        )
+        .unwrap();
+
+        assert!(!provider.include_encrypted_reasoning);
+        assert!(provider.reasoning.is_some());
     }
 
     #[test]

@@ -2,6 +2,7 @@ use jsonc_parser::{ParseOptions, parse_to_serde_value};
 use noloong_agent::{AgentPluginDeclaration, ManifestPatch};
 use noloong_agent_core::{
     AnthropicEffort, ContextCompactionMode, ResponsesReasoningEffort, ResponsesReasoningSummary,
+    ResponsesStateMode,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -63,6 +64,12 @@ impl HostProfileConfig {
             ));
         }
         for profile in &self.profiles {
+            profile.provider.validate().map_err(|error| {
+                CliConfigError::ParseConfig(format!(
+                    "profile {} provider is invalid: {error}",
+                    profile.profile_id
+                ))
+            })?;
             for plugin in &profile.plugins {
                 plugin.validate().map_err(|error| {
                     CliConfigError::ParseConfig(format!(
@@ -73,6 +80,24 @@ impl HostProfileConfig {
             }
         }
         Ok(())
+    }
+}
+
+impl BuiltInProviderConfig {
+    fn validate(&self) -> Result<(), CliConfigError> {
+        match self {
+            Self::Responses {
+                state_mode,
+                reasoning,
+                ..
+            }
+            | Self::ChatgptResponses {
+                state_mode,
+                reasoning,
+                ..
+            } => validate_responses_reasoning_state_mode(*state_mode, reasoning.as_ref()),
+            Self::ChatCompletions { .. } | Self::AnthropicMessages { .. } => Ok(()),
+        }
     }
 }
 
@@ -134,6 +159,8 @@ pub enum BuiltInProviderConfig {
         extra_body: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u64>,
+        #[serde(default)]
+        state_mode: ResponsesStateMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<ResponsesProviderReasoningConfig>,
     },
@@ -160,6 +187,8 @@ pub enum BuiltInProviderConfig {
         model: String,
         #[serde(default)]
         auth: ChatGptAuthConfig,
+        #[serde(default)]
+        state_mode: ResponsesStateMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<ResponsesProviderReasoningConfig>,
     },
@@ -204,8 +233,25 @@ pub struct ResponsesProviderReasoningConfig {
     pub effort: Option<ResponsesProviderReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<ResponsesProviderReasoningSummary>,
-    #[serde(default)]
-    pub include_encrypted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool")]
+    pub include_encrypted: Option<bool>,
+}
+
+pub(crate) fn validate_responses_reasoning_state_mode(
+    state_mode: ResponsesStateMode,
+    reasoning: Option<&ResponsesProviderReasoningConfig>,
+) -> Result<(), CliConfigError> {
+    if state_mode.is_stateless()
+        && let Some(reasoning) = reasoning
+        && reasoning.enabled
+        && reasoning.include_encrypted == Some(false)
+    {
+        return Err(CliConfigError::ParseConfig(
+            "stateless responses reasoning requires includeEncrypted to be omitted or true".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -562,7 +608,7 @@ mod tests {
         AnthropicProviderReasoningEffort, AnthropicProviderThinkingMode, BuiltInProviderConfig,
         ChatCompletionsReasoningEffort, ChatGptAuthConfig, HostProfileConfig,
         ProfileCompactionConfig, ProfileEventStoreConfig, ResponsesProviderReasoningEffort,
-        ResponsesProviderReasoningSummary, RuntimeProfileConfig,
+        ResponsesProviderReasoningSummary, ResponsesStateMode, RuntimeProfileConfig,
         resolve_chatgpt_token_file_with_env,
     };
     use crate::test_support::{remove_temp_file, write_temp_file};
@@ -664,7 +710,56 @@ mod tests {
             reasoning.summary,
             Some(ResponsesProviderReasoningSummary::Detailed)
         );
-        assert!(reasoning.include_encrypted);
+        assert_eq!(reasoning.include_encrypted, Some(true));
+    }
+
+    #[test]
+    fn profile_config_loads_responses_state_mode() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {
+                    "type": "responses",
+                    "model": "gpt-5.4-mini",
+                    "stateMode": "stateful"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::Responses { state_mode, .. } = config.provider else {
+            panic!("expected Responses provider");
+        };
+        assert_eq!(state_mode, ResponsesStateMode::Stateful);
+    }
+
+    #[test]
+    fn profile_config_rejects_stateless_reasoning_without_encrypted_replay() {
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {
+                        "type": "chatgpt_responses",
+                        "model": "gpt-5.4-mini",
+                        "stateMode": "stateless",
+                        "reasoning": {
+                            "enabled": true,
+                            "includeEncrypted": false
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let error = config
+            .validate()
+            .expect_err("invalid stateless reasoning config");
+
+        assert!(error.to_string().contains("includeEncrypted"));
     }
 
     #[test]

@@ -3,7 +3,7 @@ mod support;
 use noloong_agent_core::{
     AgentCoreError, AgentMessage, CancellationToken, ContentBlock, ContextCompactionOutput,
     ContextCompactionRequest, ResponsesApiRequestRenderConfig, ResponsesReasoningConfig,
-    ResponsesReasoningEffort, ToolSpec,
+    ResponsesReasoningEffort, ResponsesStateMode, ToolSpec,
 };
 use noloong_openai::auth::{
     ChatGptAuthManager, ChatGptAuthManagerConfig, ChatGptEphemeralTokenStorage, ChatGptTokenData,
@@ -79,6 +79,106 @@ async fn compact_posts_rendered_payload_and_returns_provider_payload_replacement
     assert!(requests[0].contains(r#""name":"lookup""#));
     assert!(!request_body(&requests[0]).contains(r#""stream""#));
     assert!(!request_body(&requests[0]).contains(r#""store""#));
+    assert!(!request_body(&requests[0]).contains(r#""include""#));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_filters_stateless_unsafe_output_items() -> Result<(), Box<dyn Error>> {
+    let encrypted_reasoning = json!({
+        "type": "reasoning",
+        "id": "rs-1",
+        "encrypted_content": "ciphertext"
+    });
+    let unsafe_reasoning = json!({
+        "type": "reasoning",
+        "id": "rs-2"
+    });
+    let server = MockHttpServer::spawn(vec![MockResponse::json(
+        200,
+        json!({ "output": [unsafe_reasoning, encrypted_reasoning.clone()] }),
+    )])
+    .await?;
+    let compactor = OpenAiResponsesCompactor::new(
+        OpenAiResponsesCompactorConfig::new("compact-provider", "model-under-test")
+            .base_url(server.base_url()),
+    )?;
+
+    let output = compactor
+        .compact_request(sample_request(), CancellationToken::new())
+        .await?;
+
+    let ContextCompactionOutput::Replacement(replacement) = output else {
+        panic!("compact endpoint should return replacement output");
+    };
+    assert_eq!(replacement.replacement_messages.len(), 1);
+    let ContentBlock::ProviderPayload { value, .. } =
+        &replacement.replacement_messages[0].content[0]
+    else {
+        panic!("replacement should preserve raw Responses item");
+    };
+    assert_eq!(
+        value,
+        &json!({
+            "type": "reasoning",
+            "encrypted_content": "ciphertext"
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_errors_when_stateless_output_has_no_replayable_items() -> Result<(), Box<dyn Error>>
+{
+    let server = MockHttpServer::spawn(vec![MockResponse::json(
+        200,
+        json!({ "output": [{ "type": "function_call", "id": "fc-1" }] }),
+    )])
+    .await?;
+    let compactor = OpenAiResponsesCompactor::new(
+        OpenAiResponsesCompactorConfig::new("compact-provider", "model-under-test")
+            .base_url(server.base_url()),
+    )?;
+
+    let error = compactor
+        .compact_request(sample_request(), CancellationToken::new())
+        .await
+        .expect_err("empty replayable compact output should fail");
+
+    assert!(error.to_string().contains("replayable"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_preserves_stateful_output_item_ids() -> Result<(), Box<dyn Error>> {
+    let output_item = json!({
+        "type": "reasoning",
+        "id": "rs-stateful",
+    });
+    let server = MockHttpServer::spawn(vec![MockResponse::json(
+        200,
+        json!({ "output": [output_item.clone()] }),
+    )])
+    .await?;
+    let compactor = OpenAiResponsesCompactor::new(
+        OpenAiResponsesCompactorConfig::new("compact-provider", "model-under-test")
+            .base_url(server.base_url())
+            .state_mode(ResponsesStateMode::Stateful),
+    )?;
+
+    let output = compactor
+        .compact_request(sample_request(), CancellationToken::new())
+        .await?;
+
+    let ContextCompactionOutput::Replacement(replacement) = output else {
+        panic!("compact endpoint should return replacement output");
+    };
+    let ContentBlock::ProviderPayload { value, .. } =
+        &replacement.replacement_messages[0].content[0]
+    else {
+        panic!("replacement should preserve raw Responses item");
+    };
+    assert_eq!(value, &output_item);
     Ok(())
 }
 

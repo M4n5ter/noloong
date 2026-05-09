@@ -92,6 +92,7 @@ async fn main() -> noloong_agent_core::Result<()> {
     let provider = ResponsesApiProvider::new(
         ResponsesApiProviderConfig::new("openai-responses", "gpt-5.4-mini")
             .api_key_env("OPENAI_API_KEY")
+            .stateless()
             .max_output_tokens(1024)
             .reasoning(
                 ResponsesReasoningConfig::new()
@@ -111,6 +112,8 @@ async fn main() -> noloong_agent_core::Result<()> {
 ```
 
 Responses-compatible routers stay caller-owned as well. For example, OpenRouter can be configured with `base_url("https://openrouter.ai/api/v1")`, `api_key_env("OPENROUTER_API_KEY")`, optional headers such as `X-Title`, and provider-specific request fields through `extra_body`; core does not provide an OpenRouter or model preset.
+
+Responses state is controlled by `ResponsesStateMode`. The default is stateless full input-array chaining with `store=false`; reasoning requests in this mode automatically ask for `reasoning.encrypted_content` so prior reasoning can be replayed without service-side item persistence. Use `.stateful()` or profile `stateMode: "stateful"` only when you intentionally want the upstream Responses service to persist response items with `store=true`.
 
 Built-in Anthropic Messages provider:
 
@@ -152,13 +155,14 @@ cargo run -p noloong -- chatgpt login --flow browser
 cargo run -p noloong -- chatgpt status
 ```
 
-The profile example below uses token-file auth by default, uses `gpt-5.4-mini`, and enables Codex compact automatically:
+The profile example below uses token-file auth by default, uses `gpt-5.4-mini`, runs the ChatGPT Responses backend in stateless mode, and enables Codex compact automatically:
 
 ```bash
 cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json
 ```
 
 Set `"compaction": {"type": "none"}` in the profile to disable the ChatGPT Codex compact endpoint.
+Use [`examples/profile-configs/chatgpt-codex-subscription-stateful.json`](examples/profile-configs/chatgpt-codex-subscription-stateful.json) only when service-side Responses item storage is desired.
 
 ## Profile Config Schema
 
@@ -173,6 +177,7 @@ Root profile config has a checked-in JSON Schema at [`schemas/profile-config.sch
     "provider": {
       "type": "responses",
       "model": "gpt-5.4-mini",
+      "stateMode": "stateless",
       "reasoning": {
         "effort": "medium",
         "summary": "auto"
@@ -182,7 +187,7 @@ Root profile config has a checked-in JSON Schema at [`schemas/profile-config.sch
 }
 ```
 
-Provider `reasoning` is typed by API format. Chat Completions supports `enabled` plus `effort` and maps common compatible thinking switches, including `reasoning_effort`. Responses and ChatGPT subscription profiles map to the Responses API reasoning object. Anthropic Messages maps `effort` to `output_config.effort` and can opt into `thinking: "adaptive"` or `thinking: "disabled"`. In every provider, `extraBody` is applied last so advanced users can override the generated top-level fields.
+Provider `reasoning` is typed by API format. Chat Completions supports `enabled` plus `effort` and maps common compatible thinking switches, including `reasoning_effort`. Responses and ChatGPT subscription profiles map to the Responses API reasoning object and expose `stateMode: "stateless" | "stateful"`; stateless reasoning requires encrypted reasoning replay, so `includeEncrypted: false` is valid only in stateful mode. Anthropic Messages maps `effort` to `output_config.effort` and can opt into `thinking: "adaptive"` or `thinking: "disabled"`. Chat Completions still applies `extraBody` last as an escape hatch; Responses reserves `store` and `include` for `stateMode` and reasoning replay.
 
 Regenerate or check the artifact with the root CLI:
 
@@ -255,7 +260,7 @@ The root `noloong` profile config has two separate persistence layers. `registry
 }
 ```
 
-`eventStore` defaults to `{"type":"memory"}`. Use a SQLite file URL, not `sqlite::memory:`, when a profile needs paused approval resume or event replay across process restarts. A persisted event store does not make interrupted `running` sessions continue automatically; they are still marked failed on restore.
+`eventStore` defaults to `{"type":"memory"}`. Use a SQLite file URL, not `sqlite::memory:`, when a profile needs paused approval resume or event replay across process restarts. A persisted event store does not make interrupted `running` sessions continue automatically; they are still marked failed on restore. `registryStore` tracks interaction sessions and profile bindings, while `eventStore` tracks agent events for replay/audit. Neither setting is the same as Responses `stateMode`: `stateMode` controls whether the upstream Responses service stores response items.
 
 ## Thinking
 

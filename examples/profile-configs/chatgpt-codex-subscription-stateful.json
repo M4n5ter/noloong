@@ -1,20 +1,21 @@
 {
-  "defaultProfileId": "chatgpt-codex",
+  "defaultProfileId": "chatgpt-codex-stateful",
   "registryStore": {
     "type": "memory"
   },
   "profiles": [
     {
-      "profileId": "chatgpt-codex",
-      "displayName": "ChatGPT Codex",
-      "description": "ChatGPT subscription through the Codex Responses backend.",
+      "profileId": "chatgpt-codex-stateful",
+      "displayName": "ChatGPT Codex Stateful",
+      "description": "ChatGPT subscription through the Codex Responses backend with service-side Responses item storage enabled.",
       "provider": {
         "type": "chatgpt_responses",
         "model": "gpt-5.4-mini",
-        "stateMode": "stateless",
+        "stateMode": "stateful",
         "reasoning": {
           "effort": "medium",
-          "summary": "auto"
+          "summary": "auto",
+          "includeEncrypted": false
         }
       },
       "compaction": {
@@ -32,7 +33,8 @@
       ],
       "metadata": {
         "channel": "telegram",
-        "example": true
+        "example": true,
+        "stateMode": "stateful"
       }
     }
   ]

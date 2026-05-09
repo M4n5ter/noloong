@@ -246,6 +246,10 @@
                 }
               ]
             },
+            "stateMode": {
+              "$ref": "#/$defs/ResponsesStateMode",
+              "default": "stateless"
+            },
             "type": {
               "const": "responses",
               "type": "string"
@@ -344,6 +348,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "stateMode": {
+              "$ref": "#/$defs/ResponsesStateMode",
+              "default": "stateless"
             },
             "type": {
               "const": "chatgpt_responses",
@@ -1206,7 +1214,6 @@
           "type": "boolean"
         },
         "includeEncrypted": {
-          "default": false,
           "type": "boolean"
         },
         "summary": {
@@ -1238,6 +1245,13 @@
         "concise",
         "detailed",
         "none"
+      ],
+      "type": "string"
+    },
+    "ResponsesStateMode": {
+      "enum": [
+        "stateless",
+        "stateful"
       ],
       "type": "string"
     },
