@@ -51,6 +51,7 @@ impl ResponsesStateMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponsesReplayItemSource {
     RequestHistory,
+    ThinkingHistory,
     CompactOutput,
 }
 
@@ -796,7 +797,7 @@ pub fn normalize_responses_replay_item(
     source: ResponsesReplayItemSource,
 ) -> Result<Option<Value>> {
     if matches!(state_mode, ResponsesStateMode::Stateful) {
-        return Ok(Some(item));
+        return normalize_stateful_responses_replay_item(item).map(Some);
     }
 
     let Some(item_type) = item.get("type").and_then(Value::as_str) else {
@@ -805,12 +806,19 @@ pub fn normalize_responses_replay_item(
     match item_type {
         "message" => Ok(Some(strip_response_item_id(item))),
         "reasoning" => {
-            if has_non_empty_string(&item, "encrypted_content") {
-                Ok(Some(strip_response_item_id(item)))
+            if source == ResponsesReplayItemSource::ThinkingHistory
+                && !has_non_empty_string(&item, "encrypted_content")
+            {
+                return Ok(None);
+            }
+            if is_stateless_reasoning_replayable(&item) {
+                Ok(Some(ensure_reasoning_summary_array(
+                    strip_response_item_id(item),
+                )?))
             } else {
                 unsafe_responses_replay_item(
                     source,
-                    "stateless responses reasoning replay requires encrypted_content",
+                    "stateless responses reasoning replay requires encrypted_content, non-empty summary, or non-empty content",
                 )
             }
         }
@@ -831,6 +839,31 @@ pub fn normalize_responses_replay_item(
     }
 }
 
+fn normalize_stateful_responses_replay_item(item: Value) -> Result<Value> {
+    if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+        ensure_reasoning_summary_array(item)
+    } else {
+        Ok(item)
+    }
+}
+
+fn ensure_reasoning_summary_array(mut item: Value) -> Result<Value> {
+    if let Value::Object(object) = &mut item {
+        match object.get("summary") {
+            Some(Value::Array(_)) => {}
+            Some(_) => {
+                return Err(AgentCoreError::Provider(
+                    "responses reasoning replay summary must be an array".into(),
+                ));
+            }
+            None => {
+                object.insert("summary".into(), Value::Array(Vec::new()));
+            }
+        }
+    }
+    Ok(item)
+}
+
 fn strip_response_item_id(mut item: Value) -> Value {
     if let Value::Object(object) = &mut item {
         object.remove("id");
@@ -844,6 +877,18 @@ fn has_non_empty_string(item: &Value, key: &str) -> bool {
         .is_some_and(|value| !value.is_empty())
 }
 
+fn has_non_empty_array(item: &Value, key: &str) -> bool {
+    item.get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|value| !value.is_empty())
+}
+
+fn is_stateless_reasoning_replayable(item: &Value) -> bool {
+    has_non_empty_string(item, "encrypted_content")
+        || has_non_empty_array(item, "summary")
+        || has_non_empty_array(item, "content")
+}
+
 fn unsafe_responses_replay_item(
     source: ResponsesReplayItemSource,
     message: &str,
@@ -852,6 +897,7 @@ fn unsafe_responses_replay_item(
         ResponsesReplayItemSource::RequestHistory => {
             Err(AgentCoreError::Provider(message.to_string()))
         }
+        ResponsesReplayItemSource::ThinkingHistory => Ok(None),
         ResponsesReplayItemSource::CompactOutput => Ok(None),
     }
 }
@@ -901,7 +947,7 @@ fn render_assistant_items(
             ContentBlock::Json { value } => text_parts.push(output_text_part(value.to_string())),
             ContentBlock::Thinking { thinking } => {
                 flush_assistant_text_message(&mut items, &mut text_parts);
-                if let Some(item) = replay_reasoning(config, thinking) {
+                if let Some(item) = replay_reasoning(config, thinking)? {
                     items.push(item);
                 }
             }
@@ -1183,11 +1229,17 @@ fn to_responses_function_tool(
 fn replay_reasoning(
     config: &ResponsesApiRequestRenderConfig,
     thinking: &ThinkingBlock,
-) -> Option<Value> {
+) -> Result<Option<Value>> {
     let descriptor = serde_json::from_value::<ResponsesReasoningReplayDescriptor>(
-        thinking.replay_descriptor.as_ref()?.clone(),
+        match thinking.replay_descriptor.as_ref() {
+            Some(descriptor) => descriptor.clone(),
+            None => return Ok(None),
+        },
     )
-    .ok()?;
+    .ok();
+    let Some(descriptor) = descriptor else {
+        return Ok(None);
+    };
     match replay_scope_match(
         descriptor.v,
         &descriptor.kind,
@@ -1198,9 +1250,21 @@ fn replay_reasoning(
         &config.model,
     ) {
         ReplayScopeMatch::Match => {}
-        ReplayScopeMatch::Ignore | ReplayScopeMatch::Unsupported => return None,
+        ReplayScopeMatch::Ignore | ReplayScopeMatch::Unsupported => return Ok(None),
     }
-    thinking.raw.clone()
+    let Some(raw) = thinking.raw.as_ref() else {
+        return Ok(None);
+    };
+    if config.state_mode == ResponsesStateMode::Stateless
+        && !has_non_empty_string(raw, "encrypted_content")
+    {
+        return Ok(None);
+    }
+    normalize_responses_replay_item(
+        raw.clone(),
+        config.state_mode,
+        ResponsesReplayItemSource::ThinkingHistory,
+    )
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1220,6 +1284,7 @@ struct ResponsesStreamState {
     model: String,
     run_id: String,
     turn_id: u64,
+    state_mode: ResponsesStateMode,
     tool_names: ProviderToolNameCodec,
     started: bool,
     tool_calls: BTreeMap<String, PartialResponsesToolCall>,
@@ -1243,6 +1308,7 @@ impl ResponsesStreamState {
             model: config.model.clone(),
             run_id: request.run_id.clone(),
             turn_id: request.turn_id,
+            state_mode: config.state_mode,
             tool_names,
             ..Self::default()
         }
@@ -1416,7 +1482,7 @@ impl ResponsesStreamState {
         state.kind = kind.clone();
         state.text.push_str(text);
         let mut events = self.ensure_started();
-        events.push(self.thinking_delta(kind, Some(text.into()), None, Some(key)));
+        events.push(self.thinking_delta(kind, Some(text.into()), None, Some(key), false));
         Ok(events)
     }
 
@@ -1429,21 +1495,28 @@ impl ResponsesStreamState {
         let Some(state) = self.reasoning.get(&key).cloned() else {
             return Ok(Vec::new());
         };
-        let raw_snapshot = json!({
-            "type": "reasoning",
-            "id": key.clone(),
-            "content": [{
-                "type": if state.kind == ThinkingKind::Summary {
-                    "summary_text"
-                } else {
-                    "reasoning_text"
-                },
-                "text": state.text,
-            }],
-        });
+        let raw_snapshot = if state.kind == ThinkingKind::Summary {
+            json!({
+                "type": "reasoning",
+                "id": key.clone(),
+                "summary": [{
+                    "type": "summary_text",
+                    "text": state.text,
+                }],
+            })
+        } else {
+            json!({
+                "type": "reasoning",
+                "id": key.clone(),
+                "summary": [],
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": state.text,
+                }],
+            })
+        };
         let mut events = self.ensure_started();
-        self.emitted_reasoning_items.insert(key.clone());
-        events.push(self.thinking_delta(state.kind, None, Some(raw_snapshot), Some(key)));
+        events.push(self.thinking_delta(state.kind, None, Some(raw_snapshot), Some(key), false));
         Ok(events)
     }
 
@@ -1521,7 +1594,8 @@ impl ResponsesStreamState {
         } else {
             ThinkingKind::Raw
         };
-        vec![self.thinking_delta(kind, None, Some(raw_snapshot), item_id)]
+        let replayable = self.is_replayable_reasoning_item(item);
+        vec![self.thinking_delta(kind, None, Some(raw_snapshot), item_id, replayable)]
     }
 
     fn absorb_function_call_item(&mut self, item: &Map<String, Value>, output_index: Option<u64>) {
@@ -1594,15 +1668,20 @@ impl ResponsesStreamState {
         text_delta: Option<String>,
         raw_snapshot: Option<Value>,
         item_id: Option<String>,
+        replayable: bool,
     ) -> ModelStreamEvent {
-        let replay_descriptor = serde_json::to_value(ResponsesReasoningReplayDescriptor {
-            v: 1,
-            kind: RESPONSES_REASONING_REPLAY_KIND.into(),
-            provider_id: self.provider_id.clone(),
-            model: self.model.clone(),
-            item_id: item_id.clone(),
-        })
-        .ok();
+        let replay_descriptor = replayable
+            .then(|| {
+                serde_json::to_value(ResponsesReasoningReplayDescriptor {
+                    v: 1,
+                    kind: RESPONSES_REASONING_REPLAY_KIND.into(),
+                    provider_id: self.provider_id.clone(),
+                    model: self.model.clone(),
+                    item_id: item_id.clone(),
+                })
+                .ok()
+            })
+            .flatten();
         let mut metadata = Map::new();
         if let Some(item_id) = item_id {
             metadata.insert("itemId".into(), Value::String(item_id));
@@ -1615,6 +1694,19 @@ impl ResponsesStreamState {
                 replay_descriptor,
                 metadata,
             },
+        }
+    }
+
+    fn is_replayable_reasoning_item(&self, item: &Map<String, Value>) -> bool {
+        match self.state_mode {
+            ResponsesStateMode::Stateless => item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.is_empty()),
+            ResponsesStateMode::Stateful => item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty()),
         }
     }
 

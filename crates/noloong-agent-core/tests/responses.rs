@@ -19,6 +19,50 @@ use support::{
     ValueEchoTool, fast_one_retry_reconnect, is_provider_safe_tool_name,
 };
 
+fn reasoning_item(id: Option<&str>, encrypted_content: Option<&str>) -> Value {
+    let mut item = Map::new();
+    item.insert("type".into(), json!("reasoning"));
+    if let Some(id) = id {
+        item.insert("id".into(), json!(id));
+    }
+    if let Some(encrypted_content) = encrypted_content {
+        item.insert("encrypted_content".into(), json!(encrypted_content));
+    }
+    Value::Object(item)
+}
+
+fn with_empty_reasoning_summary(mut item: Value) -> Value {
+    item.as_object_mut()
+        .expect("test reasoning item must be an object")
+        .insert("summary".into(), json!([]));
+    item
+}
+
+fn without_response_item_id(mut item: Value) -> Value {
+    item.as_object_mut()
+        .expect("test response item must be an object")
+        .remove("id");
+    item
+}
+
+fn stateless_reasoning_item(id: Option<&str>, encrypted_content: &str) -> Value {
+    without_response_item_id(with_empty_reasoning_summary(reasoning_item(
+        id,
+        Some(encrypted_content),
+    )))
+}
+
+fn reasoning_summary_item(id: &str, text: &str) -> Value {
+    json!({
+        "type": "reasoning",
+        "id": id,
+        "summary": [{
+            "type": "summary_text",
+            "text": text,
+        }],
+    })
+}
+
 #[test]
 fn reconnect_config_builder_sets_stream_reconnect() {
     let config = ResponsesApiProviderConfig::new("test-responses", "test-model")
@@ -92,21 +136,14 @@ fn responses_extra_body_cannot_override_state_fields() {
 #[test]
 fn replay_item_policy_normalizes_stateless_safe_items() -> Result<()> {
     let normalized = normalize_responses_replay_item(
-        json!({
-            "type": "reasoning",
-            "id": "rs-1",
-            "encrypted_content": "ciphertext",
-        }),
+        reasoning_item(Some("rs-1"), Some("ciphertext")),
         ResponsesStateMode::Stateless,
         ResponsesReplayItemSource::RequestHistory,
     )?;
 
     assert_eq!(
         normalized,
-        Some(json!({
-            "type": "reasoning",
-            "encrypted_content": "ciphertext",
-        }))
+        Some(stateless_reasoning_item(Some("rs-1"), "ciphertext"))
     );
     Ok(())
 }
@@ -124,6 +161,29 @@ fn replay_item_policy_rejects_stateless_unencrypted_history() {
     .expect_err("unencrypted reasoning cannot be replayed in stateless mode");
 
     assert!(error.to_string().contains("encrypted_content"));
+}
+
+#[test]
+fn replay_item_policy_rejects_stateless_empty_reasoning_arrays() {
+    for item in [
+        json!({
+            "type": "reasoning",
+            "summary": [],
+        }),
+        json!({
+            "type": "reasoning",
+            "content": [],
+        }),
+    ] {
+        let error = normalize_responses_replay_item(
+            item,
+            ResponsesStateMode::Stateless,
+            ResponsesReplayItemSource::RequestHistory,
+        )
+        .expect_err("empty reasoning arrays should not be replayed in stateless mode");
+
+        assert!(error.to_string().contains("encrypted_content"));
+    }
 }
 
 #[test]
@@ -180,7 +240,7 @@ const REASONING_STREAM: &str = concat!(
     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-reasoning\"}}\n\n",
     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-1\",\"delta\":\"summary\"}\n\n",
     "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs-1\",\"text\":\"summary\"}\n\n",
-    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs-2\",\"type\":\"reasoning\",\"encrypted_content\":\"ciphertext\"}}\n\n",
+    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs-1\",\"type\":\"reasoning\",\"encrypted_content\":\"ciphertext\"}}\n\n",
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-reasoning\",\"status\":\"completed\",\"output\":[]}}\n\n",
 );
 
@@ -242,11 +302,7 @@ fn provider_payload_block_serde_round_trip() -> Result<()> {
 
 #[test]
 fn request_renderer_maps_controls_and_provider_payload_without_http() -> Result<()> {
-    let raw_item = json!({
-        "type": "reasoning",
-        "id": "rs-render",
-        "encrypted_content": "ciphertext",
-    });
+    let raw_item = reasoning_item(Some("rs-render"), Some("ciphertext"));
     let payload = render_responses_api_request(
         &ResponsesApiRequestRenderConfig::new("test-responses", "test-model")
             .max_output_tokens(512)
@@ -280,10 +336,7 @@ fn request_renderer_maps_controls_and_provider_payload_without_http() -> Result<
     assert_eq!(payload["include"][0], "reasoning.encrypted_content");
     assert_eq!(
         payload["input"][0],
-        json!({
-            "type": "reasoning",
-            "encrypted_content": "ciphertext",
-        })
+        stateless_reasoning_item(Some("rs-render"), "ciphertext")
     );
     assert_eq!(payload["tools"][0]["strict"], true);
     assert_eq!(payload["tools"][1]["type"], "web_search_preview");
@@ -344,11 +397,7 @@ async fn config_defaults_headers_and_request_body() -> Result<()> {
 #[tokio::test]
 async fn stateful_provider_payload_response_items_preserve_ids() -> Result<()> {
     let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
-    let raw_item = json!({
-        "type": "reasoning",
-        "id": "rs-1",
-        "encrypted_content": "ciphertext",
-    });
+    let raw_item = reasoning_item(Some("rs-1"), Some("ciphertext"));
     let provider = ResponsesApiProvider::new(
         ResponsesApiProviderConfig::new("test-responses", "test-model")
             .base_url(server.url())
@@ -376,7 +425,10 @@ async fn stateful_provider_payload_response_items_preserve_ids() -> Result<()> {
         )
         .await?;
 
-    assert_eq!(server.request().json["input"][0], raw_item);
+    assert_eq!(
+        server.request().json["input"][0],
+        with_empty_reasoning_summary(raw_item)
+    );
     Ok(())
 }
 
@@ -398,11 +450,7 @@ async fn stateless_provider_payload_response_items_strip_ids() -> Result<()> {
                     content: vec![ContentBlock::ProviderPayload {
                         provider: "openai.responses".into(),
                         kind: "response_item".into(),
-                        value: json!({
-                            "type": "reasoning",
-                            "id": "rs-1",
-                            "encrypted_content": "ciphertext",
-                        }),
+                        value: reasoning_item(Some("rs-1"), Some("ciphertext")),
                     }],
                     metadata: Map::new(),
                 }],
@@ -415,10 +463,7 @@ async fn stateless_provider_payload_response_items_strip_ids() -> Result<()> {
 
     assert_eq!(
         server.request().json["input"][0],
-        json!({
-            "type": "reasoning",
-            "encrypted_content": "ciphertext",
-        })
+        stateless_reasoning_item(Some("rs-1"), "ciphertext")
     );
     Ok(())
 }
@@ -851,11 +896,7 @@ async fn payload_replays_responses_reasoning_with_matching_scope() -> Result<()>
     let thinking = ThinkingBlock {
         kind: ThinkingKind::Encrypted,
         text: None,
-        raw: Some(json!({
-            "type": "reasoning",
-            "id": "rs-1",
-            "encrypted_content": "ciphertext"
-        })),
+        raw: Some(reasoning_item(Some("rs-1"), Some("ciphertext"))),
         replay_descriptor: Some(json!({
             "v": 1,
             "kind": "openai_responses_reasoning_replay",
@@ -882,9 +923,48 @@ async fn payload_replays_responses_reasoning_with_matching_scope() -> Result<()>
     )
     .await?;
 
-    assert_eq!(body["input"][0]["type"], "reasoning");
-    assert_eq!(body["input"][0]["encrypted_content"], "ciphertext");
+    assert_eq!(
+        body["input"][0],
+        stateless_reasoning_item(Some("rs-1"), "ciphertext")
+    );
     assert_eq!(body["input"][1]["type"], "message");
+    Ok(())
+}
+
+#[tokio::test]
+async fn payload_skips_unencrypted_responses_thinking_replay_in_stateless_mode() -> Result<()> {
+    let thinking = ThinkingBlock {
+        kind: ThinkingKind::Summary,
+        text: Some("summary".into()),
+        raw: Some(reasoning_summary_item("rs-summary", "summary")),
+        replay_descriptor: Some(json!({
+            "v": 1,
+            "kind": "openai_responses_reasoning_replay",
+            "providerId": "test-responses",
+            "model": "test-model",
+            "itemId": "rs-summary"
+        })),
+        metadata: Map::new(),
+    };
+    let body = captured_request_body(
+        ModelRequest {
+            messages: vec![AgentMessage::assistant(
+                "assistant-1",
+                vec![
+                    ContentBlock::Thinking { thinking },
+                    ContentBlock::Text {
+                        text: "visible".into(),
+                    },
+                ],
+            )],
+            ..simple_request()
+        },
+        ResponsesApiProviderConfig::new("test-responses", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["input"][0]["type"], "message");
+    assert_eq!(body["input"][0]["content"][0]["text"], "visible");
     Ok(())
 }
 
@@ -1055,9 +1135,20 @@ async fn stream_reasoning_summary_and_encrypted_item() -> Result<()> {
         matches!(
             event,
             ModelStreamEvent::ThinkingDelta { delta }
+                if delta.kind == ThinkingKind::Summary
+                    && delta.raw_snapshot.as_ref() == Some(&reasoning_summary_item("rs-1", "summary"))
+                    && delta.replay_descriptor.is_none()
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ModelStreamEvent::ThinkingDelta { delta }
                 if delta.kind == ThinkingKind::Encrypted
                     && delta.raw_snapshot.as_ref().and_then(|raw| raw.get("encrypted_content"))
                         == Some(&json!("ciphertext"))
+                    && delta.metadata.get("itemId") == Some(&json!("rs-1"))
+                    && delta.replay_descriptor.is_some()
         )
     }));
     Ok(())

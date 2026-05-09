@@ -13,9 +13,42 @@ use noloong_openai::compact::{
     OPENAI_RESPONSES_PAYLOAD_PROVIDER, OPENAI_RESPONSES_RESPONSE_ITEM_KIND,
     OpenAiResponsesCompactor, OpenAiResponsesCompactorConfig,
 };
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use std::{error::Error, sync::Arc};
 use support::{MockHttpServer, MockResponse, unsigned_jwt};
+
+fn reasoning_item(id: Option<&str>, encrypted_content: Option<&str>) -> Value {
+    let mut item = Map::new();
+    item.insert("type".into(), json!("reasoning"));
+    if let Some(id) = id {
+        item.insert("id".into(), json!(id));
+    }
+    if let Some(encrypted_content) = encrypted_content {
+        item.insert("encrypted_content".into(), json!(encrypted_content));
+    }
+    Value::Object(item)
+}
+
+fn with_empty_reasoning_summary(mut item: Value) -> Value {
+    item.as_object_mut()
+        .expect("test reasoning item must be an object")
+        .insert("summary".into(), json!([]));
+    item
+}
+
+fn without_response_item_id(mut item: Value) -> Value {
+    item.as_object_mut()
+        .expect("test response item must be an object")
+        .remove("id");
+    item
+}
+
+fn stateless_reasoning_item(id: Option<&str>, encrypted_content: &str) -> Value {
+    without_response_item_id(with_empty_reasoning_summary(reasoning_item(
+        id,
+        Some(encrypted_content),
+    )))
+}
 
 #[tokio::test]
 async fn compact_posts_rendered_payload_and_returns_provider_payload_replacement()
@@ -63,7 +96,7 @@ async fn compact_posts_rendered_payload_and_returns_provider_payload_replacement
         value,
     } = &replacement.replacement_messages[0].content[0]
     else {
-        panic!("replacement should preserve raw Responses item");
+        panic!("replacement should preserve Responses item");
     };
     assert_eq!(provider, OPENAI_RESPONSES_PAYLOAD_PROVIDER);
     assert_eq!(kind, OPENAI_RESPONSES_RESPONSE_ITEM_KIND);
@@ -85,11 +118,7 @@ async fn compact_posts_rendered_payload_and_returns_provider_payload_replacement
 
 #[tokio::test]
 async fn compact_filters_stateless_unsafe_output_items() -> Result<(), Box<dyn Error>> {
-    let encrypted_reasoning = json!({
-        "type": "reasoning",
-        "id": "rs-1",
-        "encrypted_content": "ciphertext"
-    });
+    let encrypted_reasoning = reasoning_item(Some("rs-1"), Some("ciphertext"));
     let unsafe_reasoning = json!({
         "type": "reasoning",
         "id": "rs-2"
@@ -115,15 +144,9 @@ async fn compact_filters_stateless_unsafe_output_items() -> Result<(), Box<dyn E
     let ContentBlock::ProviderPayload { value, .. } =
         &replacement.replacement_messages[0].content[0]
     else {
-        panic!("replacement should preserve raw Responses item");
+        panic!("replacement should preserve Responses item");
     };
-    assert_eq!(
-        value,
-        &json!({
-            "type": "reasoning",
-            "encrypted_content": "ciphertext"
-        })
-    );
+    assert_eq!(value, &stateless_reasoning_item(Some("rs-1"), "ciphertext"));
     Ok(())
 }
 
@@ -151,10 +174,7 @@ async fn compact_errors_when_stateless_output_has_no_replayable_items() -> Resul
 
 #[tokio::test]
 async fn compact_preserves_stateful_output_item_ids() -> Result<(), Box<dyn Error>> {
-    let output_item = json!({
-        "type": "reasoning",
-        "id": "rs-stateful",
-    });
+    let output_item = reasoning_item(Some("rs-stateful"), None);
     let server = MockHttpServer::spawn(vec![MockResponse::json(
         200,
         json!({ "output": [output_item.clone()] }),
@@ -176,9 +196,9 @@ async fn compact_preserves_stateful_output_item_ids() -> Result<(), Box<dyn Erro
     let ContentBlock::ProviderPayload { value, .. } =
         &replacement.replacement_messages[0].content[0]
     else {
-        panic!("replacement should preserve raw Responses item");
+        panic!("replacement should preserve Responses item");
     };
-    assert_eq!(value, &output_item);
+    assert_eq!(value, &with_empty_reasoning_summary(output_item));
     Ok(())
 }
 
