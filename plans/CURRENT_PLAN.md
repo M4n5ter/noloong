@@ -252,14 +252,16 @@
 **Description:** 新增 Telegram command layer，启动时注册本地化 bot commands，并将命令从普通 prompt 中分离。命令只操作当前 chat 的 active session，除非显式指定 session id。
 
 **Acceptance criteria:**
-- [ ] 支持 `/start`、`/help`、`/status`、`/new`、`/switch`、`/sessions`、`/profiles`、`/continue`、`/abort`、`/queue`、`/approvals`、`/processes`、`/process`、`/manifest`、`/subagent`、`/settings`。
-- [ ] `set_my_commands` 在 bridge 初始化后执行，按 locale 注册描述。
-- [ ] 命令解析支持 `/cmd@bot_username`。
-- [ ] 未知命令返回本地化 help，不进入 agent prompt。
+- [x] 支持 `/start`、`/help`、`/status`、`/new`、`/switch`、`/sessions`、`/profiles`、`/continue`、`/abort`、`/queue`、`/approvals`、`/processes`、`/process`、`/manifest`、`/subagent`、`/settings`。
+- [x] `set_my_commands` 在 bridge 初始化后执行，按 locale 注册描述。
+- [x] 命令解析支持 `/cmd@bot_username`。
+- [x] 未知命令返回本地化 help，不进入 agent prompt。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram commands`
-- [ ] fake API 验证 command menu payload。
+- [x] `cargo test -p noloong-agent-telegram commands`
+- [x] `cargo test -p noloong-agent-telegram input`
+- [x] `cargo test -p noloong telegram_`
+- [x] fake API 验证 command menu payload。
 
 **Dependencies:** Task 1, Task 4
 

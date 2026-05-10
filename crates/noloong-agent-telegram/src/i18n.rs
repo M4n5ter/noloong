@@ -1,3 +1,4 @@
+use crate::commands::TelegramCockpitCommand;
 use noloong_agent::Locale;
 use noloong_agent_core::ToolPermissionOutcome;
 use serde_json::Value;
@@ -97,6 +98,78 @@ impl TelegramUiCatalog {
         match self.locale {
             Locale::En => format!("... and {remaining} more"),
             Locale::Zh => format!("... 另有 {remaining} 个"),
+        }
+    }
+
+    pub fn command_description(self, command: TelegramCockpitCommand) -> &'static str {
+        match (self.locale, command) {
+            (Locale::En, TelegramCockpitCommand::Start) => "Open the Noloong cockpit",
+            (Locale::En, TelegramCockpitCommand::Help) => "Show command help",
+            (Locale::En, TelegramCockpitCommand::Status) => "Show active session status",
+            (Locale::En, TelegramCockpitCommand::New) => "Start a new session",
+            (Locale::En, TelegramCockpitCommand::Switch) => "Switch active session",
+            (Locale::En, TelegramCockpitCommand::Sessions) => "List chat sessions",
+            (Locale::En, TelegramCockpitCommand::Profiles) => "List runtime profiles",
+            (Locale::En, TelegramCockpitCommand::Continue) => "Continue the active run",
+            (Locale::En, TelegramCockpitCommand::Abort) => "Abort the active run",
+            (Locale::En, TelegramCockpitCommand::Queue) => "Inspect message queues",
+            (Locale::En, TelegramCockpitCommand::Approvals) => "List pending approvals",
+            (Locale::En, TelegramCockpitCommand::Processes) => "List background processes",
+            (Locale::En, TelegramCockpitCommand::Process) => "Inspect one background process",
+            (Locale::En, TelegramCockpitCommand::Manifest) => "Inspect manifest and proposals",
+            (Locale::En, TelegramCockpitCommand::Subagent) => "Spawn a subagent session",
+            (Locale::En, TelegramCockpitCommand::Settings) => "Show bridge settings",
+            (Locale::Zh, TelegramCockpitCommand::Start) => "打开 Noloong 控制台",
+            (Locale::Zh, TelegramCockpitCommand::Help) => "显示命令帮助",
+            (Locale::Zh, TelegramCockpitCommand::Status) => "查看当前会话状态",
+            (Locale::Zh, TelegramCockpitCommand::New) => "开始新会话",
+            (Locale::Zh, TelegramCockpitCommand::Switch) => "切换当前会话",
+            (Locale::Zh, TelegramCockpitCommand::Sessions) => "列出聊天会话",
+            (Locale::Zh, TelegramCockpitCommand::Profiles) => "列出运行配置",
+            (Locale::Zh, TelegramCockpitCommand::Continue) => "继续当前运行",
+            (Locale::Zh, TelegramCockpitCommand::Abort) => "中止当前运行",
+            (Locale::Zh, TelegramCockpitCommand::Queue) => "查看消息队列",
+            (Locale::Zh, TelegramCockpitCommand::Approvals) => "列出待处理审批",
+            (Locale::Zh, TelegramCockpitCommand::Processes) => "列出后台进程",
+            (Locale::Zh, TelegramCockpitCommand::Process) => "查看单个后台进程",
+            (Locale::Zh, TelegramCockpitCommand::Manifest) => "查看 manifest 与提案",
+            (Locale::Zh, TelegramCockpitCommand::Subagent) => "创建子智能体会话",
+            (Locale::Zh, TelegramCockpitCommand::Settings) => "查看桥接设置",
+        }
+    }
+
+    pub fn command_help_title(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Noloong cockpit commands:",
+            Locale::Zh => "Noloong 控制台命令：",
+        }
+    }
+
+    pub fn command_help_item(self, command: TelegramCockpitCommand) -> String {
+        format!(
+            "/{} - {}",
+            command.name(),
+            self.command_description(command)
+        )
+    }
+
+    pub fn unknown_command(self, name: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Unknown command: /{name}"),
+            Locale::Zh => format!("未知命令：/{name}"),
+        }
+    }
+
+    pub fn command_not_ready(self, command: TelegramCockpitCommand) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "/{} is in the cockpit menu. Its control surface is not implemented yet.",
+                command.name()
+            ),
+            Locale::Zh => format!(
+                "/{} 已在控制台菜单中，但对应控制面尚未实现。",
+                command.name()
+            ),
         }
     }
 
@@ -222,6 +295,7 @@ impl Default for TelegramUiCatalog {
 #[cfg(test)]
 mod tests {
     use super::TelegramUiCatalog;
+    use crate::commands::TelegramCockpitCommand;
     use noloong_agent::Locale;
     use noloong_agent_core::ToolPermissionOutcome;
 
@@ -240,6 +314,16 @@ mod tests {
         assert_eq!(
             catalog.approval_resolved(&ToolPermissionOutcome::Allow),
             "审批已处理：允许"
+        );
+    }
+
+    #[test]
+    fn ui_catalog_localizes_command_descriptions() {
+        let catalog = TelegramUiCatalog::new(Locale::Zh);
+
+        assert_eq!(
+            catalog.command_description(TelegramCockpitCommand::Approvals),
+            "列出待处理审批"
         );
     }
 }

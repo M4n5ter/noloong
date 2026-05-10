@@ -1,6 +1,7 @@
 pub mod access;
 pub mod approval;
 pub mod bridge;
+pub mod commands;
 pub mod config;
 pub mod delivery;
 pub mod display;

@@ -34,6 +34,10 @@ use noloong_agent_telegram::{
     access::TelegramAccessPolicy,
     approval::render_pending_approval_requests,
     bridge::TelegramBridge,
+    commands::{
+        TelegramCockpitCommand, render_command_help, render_unknown_command_help,
+        telegram_command_menu_request,
+    },
     config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
@@ -49,7 +53,9 @@ use noloong_agent_telegram::{
         TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
     session::TelegramSessionKey,
-    telegram_api::{ReqwestTelegramApi, TelegramApi, TelegramInlineKeyboardMarkup},
+    telegram_api::{
+        ReqwestTelegramApi, TelegramApi, TelegramApiError, TelegramInlineKeyboardMarkup,
+    },
 };
 use std::{
     collections::BTreeMap,
@@ -254,6 +260,7 @@ async fn run_telegram_bridge_with_config(
     let media_resolver =
         TelegramAttachmentResolver::new(Arc::clone(&api), config.file_policy.clone());
     let catalog = TelegramUiCatalog::new(config.locale);
+    register_telegram_commands(api.as_ref(), catalog).await?;
     let display_states = Arc::new(Mutex::new(
         BTreeMap::<TelegramSessionKey, SharedDisplayState>::new(),
     ));
@@ -291,6 +298,15 @@ async fn run_telegram_bridge_with_config(
         result = run_polling_loop(poller) => result.map_err(CliError::Polling),
         result = display_task => result.map_err(|error| CliError::Task(error.to_string()))?,
     }
+}
+
+async fn register_telegram_commands(
+    api: &dyn TelegramApi,
+    catalog: TelegramUiCatalog,
+) -> Result<(), CliError> {
+    api.set_my_commands(telegram_command_menu_request(catalog))
+        .await?;
+    Ok(())
 }
 
 async fn hydrate_telegram_fallback_addrs(
@@ -446,13 +462,39 @@ impl BridgeUpdateHandler {
                 noloong_agent_telegram::bridge::TelegramBridgeError::Unauthorized.to_string(),
             ));
         }
-        match command.name.as_str() {
-            "approvals" => self.send_pending_approvals(command).await,
-            _ => {
-                log::debug!("telegram command received: /{}", command.name);
-                Ok(())
+        match TelegramCockpitCommand::from_name(&command.name) {
+            Some(TelegramCockpitCommand::Start | TelegramCockpitCommand::Help) => {
+                self.send_command_help(command).await
             }
+            Some(TelegramCockpitCommand::Approvals) => self.send_pending_approvals(command).await,
+            Some(command_id) => self.send_command_not_ready(command, command_id).await,
+            None => self.send_unknown_command_help(command).await,
         }
+    }
+
+    async fn send_command_help(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        self.send_command_text(command, &render_command_help(self.catalog))
+            .await
+    }
+
+    async fn send_unknown_command_help(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        let text = render_unknown_command_help(&command.name, self.catalog);
+        self.send_command_text(command, &text).await
+    }
+
+    async fn send_command_not_ready(
+        &self,
+        command: TelegramCommand,
+        command_id: TelegramCockpitCommand,
+    ) -> Result<(), TelegramPollingError> {
+        self.send_command_text(command, &self.catalog.command_not_ready(command_id))
+            .await
     }
 
     async fn send_pending_approvals(
@@ -471,10 +513,18 @@ impl BridgeUpdateHandler {
             }
             None => self.catalog.pending_approvals_empty().into(),
         };
+        self.send_command_text(command, &text).await
+    }
+
+    async fn send_command_text(
+        &self,
+        command: TelegramCommand,
+        text: &str,
+    ) -> Result<(), TelegramPollingError> {
         self.delivery
             .send_text(
                 TelegramMessageTarget::new(command.context.chat_id, command.context.thread_id),
-                &text,
+                text,
                 None,
             )
             .await
@@ -1011,6 +1061,8 @@ enum CliError {
     TelegramConfig(#[from] noloong_agent_telegram::config::TelegramConfigError),
     #[error("Telegram network failed: {0}")]
     TelegramNetwork(#[from] noloong_agent_telegram::network::TelegramNetworkError),
+    #[error("Telegram API failed: {0}")]
+    TelegramApi(#[from] TelegramApiError),
     #[error("Telegram delivery failed: {0}")]
     TelegramDelivery(#[from] noloong_agent_telegram::delivery::TelegramDeliveryError),
     #[error("Telegram polling failed: {0}")]
@@ -1034,7 +1086,8 @@ mod tests {
     use super::{
         BridgeUpdateHandler, BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand,
         CliError, ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
-        run_profile_config_schema, telegram_config_from_values, validate_interaction_bind,
+        register_telegram_commands, run_profile_config_schema, telegram_config_from_values,
+        validate_interaction_bind,
     };
     use crate::schema::profile_config_schema_json;
     use crate::test_support::{remove_temp_file, write_temp_file};
@@ -1060,7 +1113,7 @@ mod tests {
         },
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
-            TelegramSendMessageRequest,
+            TelegramSendMessageRequest, TelegramSetMyCommandsRequest,
         },
     };
     use serde_json::{Value, json};
@@ -1441,6 +1494,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn telegram_registers_command_menu_payload() {
+        let api = Arc::new(FakeTelegramApi::default());
+
+        register_telegram_commands(api.as_ref(), TelegramUiCatalog::new(Locale::Zh))
+            .await
+            .unwrap();
+
+        let requests = api.command_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].language_code, None);
+        assert!(requests[0].commands.iter().any(|command| {
+            command.command == "approvals" && command.description == "列出待处理审批"
+        }));
+        assert_eq!(requests[0].commands.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn telegram_unknown_command_returns_help_without_prompt() {
+        let fixture = TelegramCallbackFixture::new().await;
+
+        fixture
+            .handler
+            .handle_command(unknown_command())
+            .await
+            .unwrap();
+
+        assert!(fixture.interaction.methods().is_empty());
+        let sent_texts = fixture.api.sent_texts();
+        let text = sent_texts.last().unwrap();
+        assert!(text.contains("Unknown command"));
+        assert!(text.contains("/approvals"));
+    }
+
+    #[tokio::test]
+    async fn telegram_known_future_command_returns_stub_without_prompt() {
+        let fixture = TelegramCallbackFixture::new().await;
+
+        fixture
+            .handler
+            .handle_command(status_command())
+            .await
+            .unwrap();
+
+        assert!(fixture.interaction.methods().is_empty());
+        assert!(fixture.api.sent_texts().last().unwrap().contains("/status"));
+    }
+
     struct TelegramCallbackFixture {
         handler: BridgeUpdateHandler,
         api: Arc<FakeTelegramApi>,
@@ -1563,12 +1664,24 @@ mod tests {
     }
 
     fn approvals_command() -> TelegramCommand {
+        telegram_command(3, "approvals")
+    }
+
+    fn unknown_command() -> TelegramCommand {
+        telegram_command(4, "unknown")
+    }
+
+    fn status_command() -> TelegramCommand {
+        telegram_command(5, "status")
+    }
+
+    fn telegram_command(message_id: i64, name: &str) -> TelegramCommand {
         TelegramCommand {
-            context: telegram_inbound_context(3),
-            name: "approvals".into(),
+            context: telegram_inbound_context(message_id),
+            name: name.into(),
             bot_username: None,
             args: String::new(),
-            raw_text: "/approvals".into(),
+            raw_text: format!("/{name}"),
         }
     }
 
@@ -1684,6 +1797,7 @@ mod tests {
         sent: StdMutex<Vec<TelegramSendMessageRequest>>,
         edited: StdMutex<Vec<TelegramEditMessageTextRequest>>,
         answered: StdMutex<Vec<(String, Option<String>)>>,
+        command_requests: StdMutex<Vec<TelegramSetMyCommandsRequest>>,
     }
 
     impl FakeTelegramApi {
@@ -1725,6 +1839,10 @@ mod tests {
                 .iter()
                 .map(|request| request.reply_markup.clone())
                 .collect()
+        }
+
+        fn command_requests(&self) -> Vec<TelegramSetMyCommandsRequest> {
+            self.command_requests.lock().unwrap().clone()
         }
     }
 
@@ -1778,6 +1896,16 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((callback_query_id.into(), text.map(str::to_owned)));
+                Ok(())
+            })
+        }
+
+        fn set_my_commands<'a>(
+            &'a self,
+            request: TelegramSetMyCommandsRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.command_requests.lock().unwrap().push(request);
                 Ok(())
             })
         }
