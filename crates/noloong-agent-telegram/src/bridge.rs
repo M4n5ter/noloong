@@ -14,7 +14,7 @@ use noloong_agent::interaction::{
     InteractionSessionDescriptor, InteractionSessionStatus, InteractionUxCapabilities,
     InteractionWsClient, InteractionWsNotification,
 };
-use noloong_agent::{ManifestPatch, SystemPromptAddition};
+use noloong_agent::{JobSnapshot, ManifestPatch, ProcessOutput, SystemPromptAddition, WaitOutcome};
 use noloong_agent_core::{
     AgentMessage, ContentBlock, MediaBlock, MessageRole, QueueMode, ToolApprovalRequest,
     ToolPermissionDecision,
@@ -45,6 +45,11 @@ const METHOD_SESSION_LIST: &str = "session/list";
 const METHOD_QUEUE_LIST: &str = "queue/list";
 const METHOD_QUEUE_CLEAR: &str = "queue/clear";
 const METHOD_QUEUE_SET_MODE: &str = "queue/set_mode";
+const METHOD_PROCESS_LIST: &str = "process/list";
+const METHOD_PROCESS_READ: &str = "process/read";
+const METHOD_PROCESS_WAIT: &str = "process/wait";
+const METHOD_PROCESS_WRITE: &str = "process/write";
+const METHOD_PROCESS_TERMINATE: &str = "process/terminate";
 const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
 const TELEGRAM_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.telegram";
 
@@ -391,6 +396,70 @@ impl TelegramBridge {
         self.request_as(
             METHOD_QUEUE_SET_MODE,
             json!({"sessionId": session_id, "queue": queue.as_str(), "mode": mode}),
+        )
+        .await
+    }
+
+    pub async fn list_processes(&self, session_id: &str) -> TelegramBridgeResult<Vec<JobSnapshot>> {
+        self.request_as(METHOD_PROCESS_LIST, json!({"sessionId": session_id}))
+            .await
+    }
+
+    pub async fn read_process(
+        &self,
+        session_id: &str,
+        job_id: &str,
+        after_seq: Option<u64>,
+        max_bytes: Option<usize>,
+        wait_ms: Option<u64>,
+    ) -> TelegramBridgeResult<ProcessOutput> {
+        self.request_as(
+            METHOD_PROCESS_READ,
+            json!({
+                "sessionId": session_id,
+                "jobId": job_id,
+                "afterSeq": after_seq,
+                "maxBytes": max_bytes,
+                "waitMs": wait_ms,
+            }),
+        )
+        .await
+    }
+
+    pub async fn wait_process(
+        &self,
+        session_id: &str,
+        job_id: &str,
+        timeout_ms: Option<u64>,
+    ) -> TelegramBridgeResult<WaitOutcome> {
+        self.request_as(
+            METHOD_PROCESS_WAIT,
+            json!({"sessionId": session_id, "jobId": job_id, "timeoutMs": timeout_ms}),
+        )
+        .await
+    }
+
+    pub async fn write_process(
+        &self,
+        session_id: &str,
+        job_id: &str,
+        text: &str,
+    ) -> TelegramBridgeResult<JobSnapshot> {
+        self.request_as(
+            METHOD_PROCESS_WRITE,
+            json!({"sessionId": session_id, "jobId": job_id, "text": text}),
+        )
+        .await
+    }
+
+    pub async fn terminate_process(
+        &self,
+        session_id: &str,
+        job_id: &str,
+    ) -> TelegramBridgeResult<JobSnapshot> {
+        self.request_as(
+            METHOD_PROCESS_TERMINATE,
+            json!({"sessionId": session_id, "jobId": job_id}),
         )
         .await
     }

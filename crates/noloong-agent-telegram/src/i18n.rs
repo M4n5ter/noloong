@@ -5,6 +5,7 @@ use crate::{
         TelegramQueuedMessageIntent,
     },
 };
+use noloong_agent::{JobSnapshot, JobStatus, WaitOutcome};
 use noloong_agent::{Locale, interaction::InteractionSessionStatus};
 use noloong_agent_core::{QueueMode, ToolPermissionOutcome};
 use serde_json::Value;
@@ -408,6 +409,174 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn process_usage(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Usage: /process <job_id> [write <text>]",
+            Locale::Zh => "用法：/process <job_id> [write <text>]",
+        }
+    }
+
+    pub fn process_list_title(self, count: usize) -> String {
+        match self.locale {
+            Locale::En => format!("Processes: {count}"),
+            Locale::Zh => format!("后台进程：{count}"),
+        }
+    }
+
+    pub fn no_processes(self) -> &'static str {
+        match self.locale {
+            Locale::En => "No background processes",
+            Locale::Zh => "没有后台进程",
+        }
+    }
+
+    pub fn process_item(self, index: usize, snapshot: &JobSnapshot) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "{index}. `{}`\nCommand: `{}`\nStatus: {}",
+                snapshot.job_id,
+                snapshot.command,
+                self.process_status(&snapshot.status)
+            ),
+            Locale::Zh => format!(
+                "{index}. `{}`\n命令：`{}`\n状态：{}",
+                snapshot.job_id,
+                snapshot.command,
+                self.process_status(&snapshot.status)
+            ),
+        }
+    }
+
+    pub fn process_output_card(
+        self,
+        job_id: &str,
+        status: &JobStatus,
+        output: &str,
+        truncated: bool,
+    ) -> String {
+        let truncated = if truncated {
+            match self.locale {
+                Locale::En => "\nOutput truncated",
+                Locale::Zh => "\n输出已截断",
+            }
+        } else {
+            ""
+        };
+        match self.locale {
+            Locale::En => format!(
+                "Process `{job_id}`\nStatus: {}\n{output}{truncated}",
+                self.process_status(status)
+            ),
+            Locale::Zh => format!(
+                "进程 `{job_id}`\n状态：{}\n{output}{truncated}",
+                self.process_status(status)
+            ),
+        }
+    }
+
+    pub fn process_output_attached(self, job_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Process output attached\nJob: `{job_id}`"),
+            Locale::Zh => format!("进程输出已作为文件发送\n任务：`{job_id}`"),
+        }
+    }
+
+    pub fn process_wait_result(self, outcome: &WaitOutcome) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "Wait result\nJob: `{}`\nStatus: {}\nTimed out: {}",
+                outcome.job_id,
+                self.process_status(&outcome.status),
+                outcome.timed_out
+            ),
+            Locale::Zh => format!(
+                "等待结果\n任务：`{}`\n状态：{}\n超时：{}",
+                outcome.job_id,
+                self.process_status(&outcome.status),
+                outcome.timed_out
+            ),
+        }
+    }
+
+    pub fn process_terminate_confirm(self, job_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Terminate process?\nJob: `{job_id}`"),
+            Locale::Zh => format!("终止进程？\n任务：`{job_id}`"),
+        }
+    }
+
+    pub fn process_terminated(self, snapshot: &JobSnapshot) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "Process terminated\nJob: `{}`\nStatus: {}",
+                snapshot.job_id,
+                self.process_status(&snapshot.status)
+            ),
+            Locale::Zh => format!(
+                "进程已终止\n任务：`{}`\n状态：{}",
+                snapshot.job_id,
+                self.process_status(&snapshot.status)
+            ),
+        }
+    }
+
+    pub fn process_write_confirm(self, job_id: &str, text: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Write to process stdin?\nJob: `{job_id}`\nText: {text}"),
+            Locale::Zh => format!("写入进程 stdin？\n任务：`{job_id}`\n文本：{text}"),
+        }
+    }
+
+    pub fn process_written(self, snapshot: &JobSnapshot) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "Wrote to process\nJob: `{}`\nStatus: {}",
+                snapshot.job_id,
+                self.process_status(&snapshot.status)
+            ),
+            Locale::Zh => format!(
+                "已写入进程\n任务：`{}`\n状态：{}",
+                snapshot.job_id,
+                self.process_status(&snapshot.status)
+            ),
+        }
+    }
+
+    pub fn open_process_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Open",
+            Locale::Zh => "打开",
+        }
+    }
+
+    pub fn read_process_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Read more",
+            Locale::Zh => "继续读取",
+        }
+    }
+
+    pub fn wait_process_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Wait",
+            Locale::Zh => "等待",
+        }
+    }
+
+    pub fn terminate_process_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Terminate",
+            Locale::Zh => "终止",
+        }
+    }
+
+    pub fn confirm_write_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Confirm write",
+            Locale::Zh => "确认写入",
+        }
+    }
+
     pub fn status_card(self, card: TelegramStatusCard<'_>) -> String {
         let status = self.session_status(card.status);
         match self.locale {
@@ -447,6 +616,19 @@ impl TelegramUiCatalog {
             (Locale::En, QueueMode::OneAtATime) => "one at a time",
             (Locale::Zh, QueueMode::All) => "全部",
             (Locale::Zh, QueueMode::OneAtATime) => "逐条",
+        }
+    }
+
+    pub fn process_status(self, status: &JobStatus) -> String {
+        match (self.locale, status) {
+            (Locale::En, JobStatus::Running) => "running".into(),
+            (Locale::En, JobStatus::Exited { code }) => format!("exited ({code:?})"),
+            (Locale::En, JobStatus::Terminated) => "terminated".into(),
+            (Locale::En, JobStatus::Failed { error }) => format!("failed ({error})"),
+            (Locale::Zh, JobStatus::Running) => "运行中".into(),
+            (Locale::Zh, JobStatus::Exited { code }) => format!("已退出（{code:?}）"),
+            (Locale::Zh, JobStatus::Terminated) => "已终止".into(),
+            (Locale::Zh, JobStatus::Failed { error }) => format!("失败（{error}）"),
         }
     }
 

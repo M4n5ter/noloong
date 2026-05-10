@@ -327,15 +327,16 @@
 **Description:** 将后台命令能力接入 Telegram：查看 jobs、读取输出、等待完成、写 stdin、终止进程。超长输出以 document 回传，短输出以卡片展示。
 
 **Acceptance criteria:**
-- [ ] `/processes` 调用 `process/list` 并显示 job status。
-- [ ] `/process <job_id>` 显示 read/wait/write/terminate 按钮。
-- [ ] `process/read` 支持增量读取和 max bytes。
-- [ ] terminate/write 等操作必须通过 confirmation callback。
-- [ ] 超长 stdout/stderr 作为 text file document 回传。
+- [x] `/processes` 调用 `process/list` 并显示 job status。
+- [x] `/process <job_id>` 显示 read/wait/write/terminate 按钮。
+- [x] `process/read` 支持增量读取和 max bytes。
+- [x] terminate/write 等操作必须通过 confirmation callback。
+- [x] 超长 stdout/stderr 作为 text file document 回传。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram process`
-- [ ] fake interaction 覆盖 list/read/wait/write/terminate。
+- [x] `cargo test -p noloong-agent-telegram process`
+- [x] `cargo test -p noloong telegram_`
+- [x] fake interaction 覆盖 list/read/wait/write/terminate。
 
 **Dependencies:** Task 11
 

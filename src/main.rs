@@ -53,12 +53,18 @@ use noloong_agent_telegram::{
         FileTelegramOffsetStore, TelegramCallbackQuery, TelegramPollOutcome, TelegramPoller,
         TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
+    process::{
+        PROCESS_OUTPUT_INLINE_CHAR_LIMIT, process_output_document_bytes, process_output_filename,
+        process_output_read_max_bytes, process_output_wait_ms, process_snapshot_label,
+        process_wait_timeout_ms, render_process_output,
+    },
     queue::TelegramQueueKind,
     session::{
         TelegramSessionAction, TelegramSessionActionStore, TelegramSessionKey, single_button_markup,
     },
     telegram_api::{
         ReqwestTelegramApi, TelegramApi, TelegramApiError, TelegramInlineKeyboardMarkup,
+        TelegramInputFile, TelegramMediaMessageOptions, TelegramSendDocumentRequest,
     },
 };
 use std::{
@@ -483,6 +489,8 @@ impl BridgeUpdateHandler {
             Some(TelegramCockpitCommand::Abort) => self.abort_active_session(command).await,
             Some(TelegramCockpitCommand::Queue) => self.send_or_update_queue(command).await,
             Some(TelegramCockpitCommand::Approvals) => self.send_pending_approvals(command).await,
+            Some(TelegramCockpitCommand::Processes) => self.send_processes(command).await,
+            Some(TelegramCockpitCommand::Process) => self.send_process(command).await,
             Some(command_id) => self.send_command_not_ready(command, command_id).await,
             None => self.send_unknown_command_help(command).await,
         }
@@ -826,6 +834,215 @@ impl BridgeUpdateHandler {
         self.bridge.session_id(&command_key(command))
     }
 
+    async fn send_processes(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let processes = self
+            .bridge
+            .list_processes(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        if processes.is_empty() {
+            return self
+                .send_command_text(command, self.catalog.no_processes())
+                .await;
+        }
+
+        let mut text = self.catalog.process_list_title(processes.len());
+        let mut keyboard = Vec::new();
+        {
+            let mut actions = self.session_actions.lock().await;
+            for (index, process) in processes.iter().enumerate() {
+                text.push('\n');
+                text.push_str(&self.catalog.process_item(index + 1, process));
+                keyboard.push(vec![actions.button(
+                    format!(
+                        "{} {}",
+                        self.catalog.open_process_button(),
+                        process_snapshot_label(process)
+                    ),
+                    TelegramSessionAction::OpenProcess {
+                        session_id: session_id.clone(),
+                        job_id: process.job_id.clone(),
+                    },
+                )]);
+            }
+        }
+        self.send_command_text_with_markup(
+            command,
+            &text,
+            Some(TelegramInlineKeyboardMarkup {
+                inline_keyboard: keyboard,
+            }),
+        )
+        .await
+    }
+
+    async fn send_process(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let Some((job_id, operation)) = parse_process_command_args(&command.args) else {
+            return self
+                .send_command_text(command, self.catalog.process_usage())
+                .await;
+        };
+        match operation {
+            ProcessCommandOperation::Inspect => {
+                let output = self.read_process_output(&session_id, &job_id, None).await?;
+                self.send_process_output(
+                    TelegramMessageTarget::new(command.context.chat_id, command.context.thread_id),
+                    None,
+                    &session_id,
+                    &output,
+                )
+                .await
+            }
+            ProcessCommandOperation::Write { text } => {
+                let button = self.session_actions.lock().await.button(
+                    self.catalog.confirm_write_button(),
+                    TelegramSessionAction::ConfirmWriteProcess {
+                        session_id,
+                        job_id: job_id.clone(),
+                        text: text.clone(),
+                    },
+                );
+                self.send_command_text_with_markup(
+                    command,
+                    &self.catalog.process_write_confirm(&job_id, &text),
+                    Some(single_button_markup(button)),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn read_process_output(
+        &self,
+        session_id: &str,
+        job_id: &str,
+        after_seq: Option<u64>,
+    ) -> Result<noloong_agent::ProcessOutput, TelegramPollingError> {
+        self.bridge
+            .read_process(
+                session_id,
+                job_id,
+                after_seq,
+                Some(process_output_read_max_bytes()),
+                Some(process_output_wait_ms()),
+            )
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))
+    }
+
+    async fn send_process_output(
+        &self,
+        target: TelegramMessageTarget,
+        message_id: Option<i64>,
+        session_id: &str,
+        output: &noloong_agent::ProcessOutput,
+    ) -> Result<(), TelegramPollingError> {
+        let output_text = render_process_output(output);
+        let buttons = self.process_output_markup(session_id, output).await;
+        if output_text.chars().count() > PROCESS_OUTPUT_INLINE_CHAR_LIMIT {
+            self.api
+                .send_document(TelegramSendDocumentRequest {
+                    chat_id: target.chat_id,
+                    document: TelegramInputFile::bytes(
+                        process_output_filename(&output.job_id),
+                        process_output_document_bytes(output),
+                    )
+                    .with_mime_type("text/plain"),
+                    options: TelegramMediaMessageOptions {
+                        message_thread_id: target.message_thread_id,
+                        caption: Some(self.catalog.process_output_attached(&output.job_id)),
+                        parse_mode: None,
+                        reply_markup: None,
+                    },
+                })
+                .await
+                .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            let text = self.catalog.process_output_attached(&output.job_id);
+            return self
+                .send_or_edit_process_card(target, message_id, &text, Some(buttons))
+                .await;
+        }
+
+        let text = self.catalog.process_output_card(
+            &output.job_id,
+            &output.status,
+            &output_text,
+            output.truncated,
+        );
+        self.send_or_edit_process_card(target, message_id, &text, Some(buttons))
+            .await
+    }
+
+    async fn send_or_edit_process_card(
+        &self,
+        target: TelegramMessageTarget,
+        message_id: Option<i64>,
+        text: &str,
+        reply_markup: Option<TelegramInlineKeyboardMarkup>,
+    ) -> Result<(), TelegramPollingError> {
+        match message_id {
+            Some(message_id) => {
+                self.delivery
+                    .edit_text(target, message_id, text, reply_markup)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            None => {
+                self.delivery
+                    .send_text(target, text, reply_markup)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_output_markup(
+        &self,
+        session_id: &str,
+        output: &noloong_agent::ProcessOutput,
+    ) -> TelegramInlineKeyboardMarkup {
+        let mut actions = self.session_actions.lock().await;
+        TelegramInlineKeyboardMarkup {
+            inline_keyboard: vec![
+                vec![
+                    actions.button(
+                        self.catalog.read_process_button(),
+                        TelegramSessionAction::ReadProcess {
+                            session_id: session_id.into(),
+                            job_id: output.job_id.clone(),
+                            after_seq: Some(output.next_cursor),
+                        },
+                    ),
+                    actions.button(
+                        self.catalog.wait_process_button(),
+                        TelegramSessionAction::WaitProcess {
+                            session_id: session_id.into(),
+                            job_id: output.job_id.clone(),
+                        },
+                    ),
+                ],
+                vec![actions.button(
+                    self.catalog.terminate_process_button(),
+                    TelegramSessionAction::RequestTerminateProcess {
+                        session_id: session_id.into(),
+                        job_id: output.job_id.clone(),
+                    },
+                )],
+            ],
+        }
+    }
+
     async fn send_command_text(
         &self,
         command: TelegramCommand,
@@ -1092,6 +1309,115 @@ impl BridgeUpdateHandler {
                     .await
                     .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
             }
+            TelegramSessionAction::OpenProcess { session_id, job_id } => {
+                let output = self.read_process_output(&session_id, &job_id, None).await?;
+                self.send_process_output(target, Some(message_id), &session_id, &output)
+                    .await?;
+            }
+            TelegramSessionAction::ReadProcess {
+                session_id,
+                job_id,
+                after_seq,
+            } => {
+                let output = self
+                    .read_process_output(&session_id, &job_id, after_seq)
+                    .await?;
+                self.send_process_output(target, Some(message_id), &session_id, &output)
+                    .await?;
+            }
+            TelegramSessionAction::WaitProcess { session_id, job_id } => {
+                let outcome = self
+                    .bridge
+                    .wait_process(&session_id, &job_id, Some(process_wait_timeout_ms()))
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.process_wait_result(&outcome),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::RequestTerminateProcess { session_id, job_id } => {
+                let button = self.session_actions.lock().await.button(
+                    self.catalog.terminate_process_button(),
+                    TelegramSessionAction::ConfirmTerminateProcess {
+                        session_id,
+                        job_id: job_id.clone(),
+                    },
+                );
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.process_terminate_confirm(&job_id),
+                        Some(single_button_markup(button)),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::ConfirmTerminateProcess { session_id, job_id } => {
+                let snapshot = self
+                    .bridge
+                    .terminate_process(&session_id, &job_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.process_terminated(&snapshot),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::RequestWriteProcess {
+                session_id,
+                job_id,
+                text,
+            } => {
+                let button = self.session_actions.lock().await.button(
+                    self.catalog.confirm_write_button(),
+                    TelegramSessionAction::ConfirmWriteProcess {
+                        session_id,
+                        job_id: job_id.clone(),
+                        text: text.clone(),
+                    },
+                );
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.process_write_confirm(&job_id, &text),
+                        Some(single_button_markup(button)),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::ConfirmWriteProcess {
+                session_id,
+                job_id,
+                text,
+            } => {
+                let snapshot = self
+                    .bridge
+                    .write_process(&session_id, &job_id, &text)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.process_written(&snapshot),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
         }
         self.api
             .answer_callback_query(&callback_id, Some(self.catalog.callback_recorded()))
@@ -1103,6 +1429,30 @@ impl BridgeUpdateHandler {
 
 fn command_key(command: &TelegramCommand) -> TelegramSessionKey {
     TelegramSessionKey::new(command.context.chat_id, command.context.thread_id)
+}
+
+enum ProcessCommandOperation {
+    Inspect,
+    Write { text: String },
+}
+
+fn parse_process_command_args(args: &str) -> Option<(String, ProcessCommandOperation)> {
+    let args = args.trim();
+    if args.is_empty() {
+        return None;
+    }
+    let (job_id, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some((job_id.into(), ProcessCommandOperation::Inspect));
+    }
+    let Some(text) = rest.strip_prefix("write").map(str::trim) else {
+        return Some((job_id.into(), ProcessCommandOperation::Inspect));
+    };
+    (!text.is_empty()).then_some((
+        job_id.into(),
+        ProcessCommandOperation::Write { text: text.into() },
+    ))
 }
 
 fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliError> {
@@ -1581,7 +1931,8 @@ mod tests {
     use crate::test_support::{remove_temp_file, write_temp_file};
     use clap::Parser;
     use noloong_agent::{
-        AgentManifest, Locale,
+        AgentManifest, JobSnapshot, JobStatus, Locale, OutputChunk, ProcessOutput,
+        ProcessOutputStream, WaitOutcome,
         interaction::{
             InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
             InteractionWsNotification,
@@ -1602,11 +1953,12 @@ mod tests {
         polling::{
             TelegramCallbackQuery, TelegramChat, TelegramMessage, TelegramUpdate, TelegramUser,
         },
+        process::{PROCESS_OUTPUT_INLINE_CHAR_LIMIT, process_output_read_max_bytes},
         queue::{TelegramQueueKind, TelegramQueuedMessage, TelegramQueuedMessageIntent},
         session::{TelegramSessionActionStore, telegram_session_metadata},
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
-            TelegramSendMessageRequest, TelegramSetMyCommandsRequest,
+            TelegramSendDocumentRequest, TelegramSendMessageRequest, TelegramSetMyCommandsRequest,
         },
     };
     use serde_json::{Value, json};
@@ -2027,14 +2379,14 @@ mod tests {
 
         fixture
             .handler
-            .handle_command(telegram_command(5, "processes"))
+            .handle_command(telegram_command(5, "manifest"))
             .await
             .unwrap();
 
         assert!(fixture.interaction.methods().is_empty());
         assert_eq!(
             fixture.api.sent_texts().last().unwrap(),
-            "/processes is in the cockpit menu\\. Its control surface is not implemented yet\\."
+            "/manifest is in the cockpit menu\\. Its control surface is not implemented yet\\."
         );
     }
 
@@ -2280,6 +2632,119 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn telegram_processes_command_lists_and_opens_job() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture
+            .interaction
+            .set_processes(vec![job_snapshot("job-1", JobStatus::Running)]);
+        fixture
+            .interaction
+            .set_process_output(process_output("job-1", "hello"));
+
+        fixture
+            .handler
+            .handle_command(telegram_command(15, "processes"))
+            .await
+            .unwrap();
+        let open_data = fixture.api.last_sent_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("process-open-cb", 621, &open_data)
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(calls.iter().any(|(method, params)| {
+            method == "process/list" && params["sessionId"] == "telegram:42"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "process/read"
+                && params["sessionId"] == "telegram:42"
+                && params["jobId"] == "job-1"
+                && params["maxBytes"] == process_output_read_max_bytes()
+        }));
+    }
+
+    #[tokio::test]
+    async fn telegram_process_command_confirms_write_and_terminate() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture
+            .interaction
+            .set_processes(vec![job_snapshot("job-1", JobStatus::Running)]);
+        fixture
+            .interaction
+            .set_process_output(process_output("job-1", "hello"));
+
+        fixture
+            .handler
+            .handle_command(telegram_command_with_args(
+                16,
+                "process",
+                "job-1 write input",
+            ))
+            .await
+            .unwrap();
+        let write_data = fixture.api.last_sent_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("process-write-cb", 621, &write_data)
+            .await
+            .unwrap();
+
+        fixture
+            .handler
+            .handle_command(telegram_command_with_args(17, "process", "job-1"))
+            .await
+            .unwrap();
+        let terminate_data = fixture.api.last_sent_callback_data(1, 0);
+        fixture
+            .handle_callback_with_data("process-terminate-request-cb", 621, &terminate_data)
+            .await
+            .unwrap();
+        let confirm_data = fixture.api.edited_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("process-terminate-cb", 621, &confirm_data)
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(calls.iter().any(|(method, params)| {
+            method == "process/write"
+                && params["sessionId"] == "telegram:42"
+                && params["jobId"] == "job-1"
+                && params["text"] == "input"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "process/terminate"
+                && params["sessionId"] == "telegram:42"
+                && params["jobId"] == "job-1"
+        }));
+    }
+
+    #[tokio::test]
+    async fn telegram_process_command_sends_long_output_as_document() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture.interaction.set_process_output(process_output(
+            "job-long",
+            &"x".repeat(PROCESS_OUTPUT_INLINE_CHAR_LIMIT + 1),
+        ));
+
+        fixture
+            .handler
+            .handle_command(telegram_command_with_args(18, "process", "job-long"))
+            .await
+            .unwrap();
+
+        assert_eq!(fixture.api.document_requests().len(), 1);
+        assert!(fixture.interaction.calls().iter().any(|(method, params)| {
+            method == "process/read"
+                && params["sessionId"] == "telegram:42"
+                && params["jobId"] == "job-long"
+        }));
+    }
+
     struct TelegramCallbackFixture {
         handler: BridgeUpdateHandler,
         api: Arc<FakeTelegramApi>,
@@ -2447,6 +2912,36 @@ mod tests {
         }
     }
 
+    fn job_snapshot(job_id: &str, status: JobStatus) -> JobSnapshot {
+        JobSnapshot {
+            job_id: job_id.into(),
+            command: "echo hello".into(),
+            shell: "sh".into(),
+            cwd: PathBuf::from("/tmp"),
+            status,
+            started_at_ms: 1,
+            ended_at_ms: None,
+            next_cursor: 1,
+            dropped_before_seq: 0,
+        }
+    }
+
+    fn process_output(job_id: &str, text: &str) -> ProcessOutput {
+        ProcessOutput {
+            job_id: job_id.into(),
+            chunks: vec![OutputChunk {
+                seq: 1,
+                stream: ProcessOutputStream::Stdout,
+                text: text.into(),
+                byte_len: text.len(),
+            }],
+            next_cursor: 2,
+            dropped_before_seq: 0,
+            truncated: false,
+            status: JobStatus::Running,
+        }
+    }
+
     fn telegram_text_input(text: &str) -> TelegramTextInput {
         TelegramTextInput {
             chat_id: 42,
@@ -2508,6 +3003,8 @@ mod tests {
         sessions: StdMutex<Vec<InteractionSessionDescriptor>>,
         queues: StdMutex<BTreeMap<(String, TelegramQueueKind), Vec<TelegramQueuedMessage>>>,
         queue_modes: StdMutex<BTreeMap<(String, TelegramQueueKind), QueueMode>>,
+        processes: StdMutex<Vec<JobSnapshot>>,
+        process_outputs: StdMutex<BTreeMap<String, ProcessOutput>>,
     }
 
     impl FakeInteraction {
@@ -2557,6 +3054,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert((session_id.into(), queue), messages);
+        }
+
+        fn set_processes(&self, processes: Vec<JobSnapshot>) {
+            *self.processes.lock().unwrap() = processes;
+        }
+
+        fn set_process_output(&self, output: ProcessOutput) {
+            self.process_outputs
+                .lock()
+                .unwrap()
+                .insert(output.job_id.clone(), output);
         }
     }
 
@@ -2687,6 +3195,61 @@ mod tests {
                         let messages = self.queue_messages(&session_id, queue);
                         Ok(serde_json::to_value(messages).unwrap())
                     }
+                    "process/list" => {
+                        let _request = parse_fake_request::<FakeSessionRequest>(params);
+                        Ok(serde_json::to_value(self.processes.lock().unwrap().clone()).unwrap())
+                    }
+                    "process/read" => {
+                        let request = parse_fake_request::<FakeProcessReadRequest>(params);
+                        let FakeProcessReadRequest {
+                            session_id: _session_id,
+                            job_id,
+                            after_seq: _after_seq,
+                            max_bytes: _max_bytes,
+                            wait_ms: _wait_ms,
+                        } = request;
+                        Ok(serde_json::to_value(self.process_output(&job_id)).unwrap())
+                    }
+                    "process/wait" => {
+                        let request = parse_fake_request::<FakeProcessWaitRequest>(params);
+                        let FakeProcessWaitRequest {
+                            session_id: _session_id,
+                            job_id,
+                            timeout_ms: _timeout_ms,
+                        } = request;
+                        let output = self.process_output(&job_id);
+                        Ok(serde_json::to_value(WaitOutcome {
+                            job_id,
+                            status: output.status,
+                            timed_out: false,
+                        })
+                        .unwrap())
+                    }
+                    "process/write" => {
+                        let request = parse_fake_request::<FakeProcessWriteRequest>(params);
+                        let FakeProcessWriteRequest {
+                            session_id: _session_id,
+                            job_id,
+                            text: _text,
+                        } = request;
+                        Ok(
+                            serde_json::to_value(
+                                self.process_snapshot(&job_id, JobStatus::Running),
+                            )
+                            .unwrap(),
+                        )
+                    }
+                    "process/terminate" => {
+                        let request = parse_fake_request::<FakeProcessJobRequest>(params);
+                        let FakeProcessJobRequest {
+                            session_id: _session_id,
+                            job_id,
+                        } = request;
+                        Ok(serde_json::to_value(
+                            self.process_snapshot(&job_id, JobStatus::Terminated),
+                        )
+                        .unwrap())
+                    }
                     "display/subscribe" => Ok(json!({"subscriptionId": "subscription-1"})),
                     _ => Ok(serde_json::to_value(session_descriptor()).unwrap()),
                 }
@@ -2729,6 +3292,29 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
         }
+
+        fn process_output(&self, job_id: &str) -> ProcessOutput {
+            self.process_outputs
+                .lock()
+                .unwrap()
+                .get(job_id)
+                .cloned()
+                .unwrap_or_else(|| process_output(job_id, ""))
+        }
+
+        fn process_snapshot(&self, job_id: &str, status: JobStatus) -> JobSnapshot {
+            self.processes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|snapshot| snapshot.job_id == job_id)
+                .cloned()
+                .map(|mut snapshot| {
+                    snapshot.status = status.clone();
+                    snapshot
+                })
+                .unwrap_or_else(|| job_snapshot(job_id, status))
+        }
     }
 
     #[derive(serde::Deserialize)]
@@ -2757,6 +3343,39 @@ mod tests {
         session_id: String,
         queue: TelegramQueueKind,
         mode: QueueMode,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeProcessJobRequest {
+        session_id: String,
+        job_id: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeProcessReadRequest {
+        session_id: String,
+        job_id: String,
+        after_seq: Option<u64>,
+        max_bytes: Option<usize>,
+        wait_ms: Option<u64>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeProcessWaitRequest {
+        session_id: String,
+        job_id: String,
+        timeout_ms: Option<u64>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeProcessWriteRequest {
+        session_id: String,
+        job_id: String,
+        text: String,
     }
 
     fn parse_fake_request<T>(params: Value) -> T
@@ -2823,6 +3442,7 @@ mod tests {
     struct FakeTelegramApi {
         sent: StdMutex<Vec<TelegramSendMessageRequest>>,
         edited: StdMutex<Vec<TelegramEditMessageTextRequest>>,
+        documents: StdMutex<Vec<TelegramSendDocumentRequest>>,
         answered: StdMutex<Vec<(String, Option<String>)>>,
         command_requests: StdMutex<Vec<TelegramSetMyCommandsRequest>>,
     }
@@ -2904,6 +3524,10 @@ mod tests {
         fn command_requests(&self) -> Vec<TelegramSetMyCommandsRequest> {
             self.command_requests.lock().unwrap().clone()
         }
+
+        fn document_requests(&self) -> Vec<TelegramSendDocumentRequest> {
+            self.documents.lock().unwrap().clone()
+        }
     }
 
     impl TelegramApi for FakeTelegramApi {
@@ -2942,6 +3566,21 @@ mod tests {
                 Ok(TelegramMessageHandle {
                     chat_id: request.chat_id,
                     message_id: request.message_id,
+                })
+            })
+        }
+
+        fn send_document<'a>(
+            &'a self,
+            request: TelegramSendDocumentRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TelegramMessageHandle, TelegramApiError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                self.documents.lock().unwrap().push(request.clone());
+                Ok(TelegramMessageHandle {
+                    chat_id: request.chat_id,
+                    message_id: 11,
                 })
             })
         }

@@ -125,6 +125,37 @@ pub enum TelegramSessionAction {
         queue: TelegramQueueKind,
         mode: QueueMode,
     },
+    OpenProcess {
+        session_id: String,
+        job_id: String,
+    },
+    ReadProcess {
+        session_id: String,
+        job_id: String,
+        after_seq: Option<u64>,
+    },
+    WaitProcess {
+        session_id: String,
+        job_id: String,
+    },
+    RequestTerminateProcess {
+        session_id: String,
+        job_id: String,
+    },
+    ConfirmTerminateProcess {
+        session_id: String,
+        job_id: String,
+    },
+    RequestWriteProcess {
+        session_id: String,
+        job_id: String,
+        text: String,
+    },
+    ConfirmWriteProcess {
+        session_id: String,
+        job_id: String,
+        text: String,
+    },
 }
 
 pub fn single_button_markup(button: TelegramInlineKeyboardButton) -> TelegramInlineKeyboardMarkup {
