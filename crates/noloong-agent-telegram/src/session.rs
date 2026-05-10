@@ -1,7 +1,9 @@
 use crate::{
     callback::ShortCallbackStore,
+    queue::TelegramQueueKind,
     telegram_api::{TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup},
 };
+use noloong_agent_core::QueueMode;
 use std::collections::BTreeMap;
 
 const SESSION_ACTION_PREFIX: &str = "sc:";
@@ -110,6 +112,18 @@ pub enum TelegramSessionAction {
     ConfirmDelete {
         session_id: String,
         force_abort: bool,
+    },
+    ConfirmAbort {
+        session_id: String,
+    },
+    ClearQueue {
+        session_id: String,
+        queue: TelegramQueueKind,
+    },
+    SetQueueMode {
+        session_id: String,
+        queue: TelegramQueueKind,
+        mode: QueueMode,
     },
 }
 

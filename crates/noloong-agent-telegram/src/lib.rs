@@ -11,6 +11,7 @@ pub mod input;
 pub mod media;
 pub mod network;
 pub mod polling;
+pub mod queue;
 pub mod render;
 pub mod session;
 pub mod telegram_api;

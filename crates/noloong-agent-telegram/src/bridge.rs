@@ -2,6 +2,7 @@ use crate::{
     access::{TelegramAccessPolicy, TelegramTextInput},
     config::{TelegramBridgeConfig, TelegramConfigError},
     input::{TelegramInboundContext, TelegramInboundMessage},
+    queue::{TelegramQueueKind, TelegramQueueSnapshot, TelegramQueuedMessage},
     session::{
         TELEGRAM_METADATA_CHANNEL, TELEGRAM_METADATA_CHANNEL_TELEGRAM, TELEGRAM_METADATA_CHAT_ID,
         TELEGRAM_METADATA_THREAD_ID, TelegramSessionKey, telegram_session_metadata,
@@ -15,7 +16,7 @@ use noloong_agent::interaction::{
 };
 use noloong_agent::{ManifestPatch, SystemPromptAddition};
 use noloong_agent_core::{
-    AgentMessage, ContentBlock, MediaBlock, MessageRole, ToolApprovalRequest,
+    AgentMessage, ContentBlock, MediaBlock, MessageRole, QueueMode, ToolApprovalRequest,
     ToolPermissionDecision,
 };
 use serde::Deserialize;
@@ -31,6 +32,8 @@ use tokio::sync::broadcast;
 
 const METHOD_INITIALIZE: &str = "initialize";
 const METHOD_AGENT_PROMPT: &str = "agent/prompt";
+const METHOD_AGENT_CONTINUE: &str = "agent/continue";
+const METHOD_AGENT_ABORT: &str = "agent/abort";
 const METHOD_AGENT_FOLLOW_UP: &str = "agent/follow_up";
 const METHOD_APPROVAL_LIST: &str = "approval/list";
 const METHOD_APPROVAL_RESOLVE: &str = "approval/resolve";
@@ -39,6 +42,9 @@ const METHOD_SESSION_CREATE: &str = "session/create";
 const METHOD_SESSION_DELETE: &str = "session/delete";
 const METHOD_SESSION_GET: &str = "session/get";
 const METHOD_SESSION_LIST: &str = "session/list";
+const METHOD_QUEUE_LIST: &str = "queue/list";
+const METHOD_QUEUE_CLEAR: &str = "queue/clear";
+const METHOD_QUEUE_SET_MODE: &str = "queue/set_mode";
 const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
 const TELEGRAM_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.telegram";
 
@@ -311,6 +317,84 @@ impl TelegramBridge {
             .await
     }
 
+    pub async fn continue_session(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let descriptor = self
+            .request_as(METHOD_AGENT_CONTINUE, json!({"sessionId": session_id}))
+            .await?;
+        self.record_descriptor_status(&descriptor);
+        Ok(descriptor)
+    }
+
+    pub async fn abort_session(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let descriptor = self
+            .request_as(METHOD_AGENT_ABORT, json!({"sessionId": session_id}))
+            .await?;
+        self.record_descriptor_status(&descriptor);
+        Ok(descriptor)
+    }
+
+    pub async fn submit_follow_up_text(
+        &self,
+        context: &TelegramInboundContext,
+        session_id: &str,
+        text: String,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let message = telegram_user_message(context, vec![ContentBlock::Text { text }]);
+        let descriptor = self
+            .request_as(
+                METHOD_AGENT_FOLLOW_UP,
+                json!({"sessionId": session_id, "message": message}),
+            )
+            .await?;
+        self.record_descriptor_status(&descriptor);
+        Ok(descriptor)
+    }
+
+    pub async fn list_queues(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<TelegramQueueSnapshot> {
+        let (steering, follow_up) = tokio::try_join!(
+            self.list_queue(session_id, TelegramQueueKind::Steering),
+            self.list_queue(session_id, TelegramQueueKind::FollowUp)
+        )?;
+        Ok(TelegramQueueSnapshot {
+            steering,
+            follow_up,
+        })
+    }
+
+    pub async fn clear_queue(
+        &self,
+        session_id: &str,
+        queue: TelegramQueueKind,
+    ) -> TelegramBridgeResult<Vec<TelegramQueuedMessage>> {
+        self.request_as(
+            METHOD_QUEUE_CLEAR,
+            json!({"sessionId": session_id, "queue": queue.as_str()}),
+        )
+        .await
+    }
+
+    pub async fn set_queue_mode(
+        &self,
+        session_id: &str,
+        queue: TelegramQueueKind,
+        mode: QueueMode,
+    ) -> TelegramBridgeResult<Vec<TelegramQueuedMessage>> {
+        self.request_as(
+            METHOD_QUEUE_SET_MODE,
+            json!({"sessionId": session_id, "queue": queue.as_str(), "mode": mode}),
+        )
+        .await
+    }
+
     pub async fn list_profiles(&self) -> TelegramBridgeResult<Vec<InteractionProfileDescriptor>> {
         self.request_as(METHOD_PROFILE_LIST, json!({})).await
     }
@@ -330,8 +414,11 @@ impl TelegramBridge {
         &self,
         session_id: &str,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
-        self.request_as(METHOD_SESSION_GET, json!({"sessionId": session_id}))
-            .await
+        let descriptor = self
+            .request_as(METHOD_SESSION_GET, json!({"sessionId": session_id}))
+            .await?;
+        self.record_descriptor_status(&descriptor);
+        Ok(descriptor)
     }
 
     pub async fn list_sessions_for_chat(
@@ -554,6 +641,18 @@ impl TelegramBridge {
         }
     }
 
+    fn record_descriptor_status(&self, descriptor: &InteractionSessionDescriptor) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("telegram bridge state lock poisoned");
+        for session in state.sessions.values_mut() {
+            if session.session_id == descriptor.session_id {
+                session.status = descriptor.status.clone();
+            }
+        }
+    }
+
     fn record_subscription(&self, key: TelegramSessionKey, subscription_id: String) -> bool {
         let mut state = self
             .state
@@ -578,6 +677,18 @@ impl TelegramBridge {
         {
             state.sessions.remove(&key);
         }
+    }
+
+    async fn list_queue(
+        &self,
+        session_id: &str,
+        queue: TelegramQueueKind,
+    ) -> TelegramBridgeResult<Vec<TelegramQueuedMessage>> {
+        self.request_as(
+            METHOD_QUEUE_LIST,
+            json!({"sessionId": session_id, "queue": queue.as_str()}),
+        )
+        .await
     }
 
     async fn request_as<T>(&self, method: &str, params: Value) -> TelegramBridgeResult<T>

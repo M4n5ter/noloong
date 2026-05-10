@@ -1,6 +1,12 @@
-use crate::commands::TelegramCockpitCommand;
+use crate::{
+    commands::TelegramCockpitCommand,
+    queue::{
+        TelegramQueueKind, TelegramQueueSnapshot, TelegramQueueSummaryLabels,
+        TelegramQueuedMessageIntent,
+    },
+};
 use noloong_agent::{Locale, interaction::InteractionSessionStatus};
-use noloong_agent_core::ToolPermissionOutcome;
+use noloong_agent_core::{QueueMode, ToolPermissionOutcome};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +311,103 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn run_continued(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Run continued\nSession: {session_id}"),
+            Locale::Zh => format!("已继续运行\n会话：{session_id}"),
+        }
+    }
+
+    pub fn run_abort_confirm(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Abort running session?\nSession: {session_id}"),
+            Locale::Zh => format!("中止运行中的会话？\n会话：{session_id}"),
+        }
+    }
+
+    pub fn run_aborted(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Run aborted\nSession: {session_id}"),
+            Locale::Zh => format!("运行已中止\n会话：{session_id}"),
+        }
+    }
+
+    pub fn confirm_abort_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Confirm abort",
+            Locale::Zh => "确认中止",
+        }
+    }
+
+    pub fn queue_follow_up_added(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Follow-up queued\nSession: {session_id}"),
+            Locale::Zh => format!("已加入后续输入队列\n会话：{session_id}"),
+        }
+    }
+
+    pub fn queue_card(self, snapshot: &TelegramQueueSnapshot) -> String {
+        let mut lines = vec![self.queue_title(snapshot)];
+        self.push_queue_section(&mut lines, TelegramQueueKind::Steering, &snapshot.steering);
+        self.push_queue_section(&mut lines, TelegramQueueKind::FollowUp, &snapshot.follow_up);
+        lines.join("\n")
+    }
+
+    pub fn queue_cleared(self, queue: TelegramQueueKind, remaining: usize) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "{} queue cleared\nRemaining: {remaining}",
+                self.queue_kind_label(queue)
+            ),
+            Locale::Zh => format!(
+                "{}队列已清空\n剩余：{remaining}",
+                self.queue_kind_label(queue)
+            ),
+        }
+    }
+
+    pub fn queue_mode_updated(
+        self,
+        queue: TelegramQueueKind,
+        mode: QueueMode,
+        messages: usize,
+    ) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "{} queue mode: {}\nMessages: {messages}",
+                self.queue_kind_label(queue),
+                self.queue_mode_label(mode)
+            ),
+            Locale::Zh => format!(
+                "{}队列模式：{}\n消息：{messages}",
+                self.queue_kind_label(queue),
+                self.queue_mode_label(mode)
+            ),
+        }
+    }
+
+    pub fn clear_queue_button(self, queue: TelegramQueueKind) -> String {
+        match self.locale {
+            Locale::En => format!("Clear {}", self.queue_kind_label(queue)),
+            Locale::Zh => format!("清空{}", self.queue_kind_label(queue)),
+        }
+    }
+
+    pub fn set_queue_mode_button(self, queue: TelegramQueueKind, mode: QueueMode) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "{}: {}",
+                self.queue_kind_label(queue),
+                self.queue_mode_label(mode)
+            ),
+            Locale::Zh => format!(
+                "{}：{}",
+                self.queue_kind_label(queue),
+                self.queue_mode_label(mode)
+            ),
+        }
+    }
+
     pub fn status_card(self, card: TelegramStatusCard<'_>) -> String {
         let status = self.session_status(card.status);
         match self.locale {
@@ -326,6 +429,24 @@ impl TelegramUiCatalog {
                 card.pending_approvals,
                 card.plugins
             ),
+        }
+    }
+
+    pub fn queue_kind_label(self, queue: TelegramQueueKind) -> &'static str {
+        match (self.locale, queue) {
+            (Locale::En, TelegramQueueKind::Steering) => "Steering",
+            (Locale::En, TelegramQueueKind::FollowUp) => "Follow-up",
+            (Locale::Zh, TelegramQueueKind::Steering) => "引导",
+            (Locale::Zh, TelegramQueueKind::FollowUp) => "后续输入",
+        }
+    }
+
+    pub fn queue_mode_label(self, mode: QueueMode) -> &'static str {
+        match (self.locale, mode) {
+            (Locale::En, QueueMode::All) => "all",
+            (Locale::En, QueueMode::OneAtATime) => "one at a time",
+            (Locale::Zh, QueueMode::All) => "全部",
+            (Locale::Zh, QueueMode::OneAtATime) => "逐条",
         }
     }
 
@@ -437,6 +558,77 @@ impl TelegramUiCatalog {
             (Locale::En, ToolPermissionOutcome::Deny) => "deny",
             (Locale::Zh, ToolPermissionOutcome::Allow) => "允许",
             (Locale::Zh, ToolPermissionOutcome::Deny) => "拒绝",
+        }
+    }
+
+    fn queue_title(self, snapshot: &TelegramQueueSnapshot) -> String {
+        let total = snapshot.steering.len() + snapshot.follow_up.len();
+        match self.locale {
+            Locale::En => format!("Queues: {total}"),
+            Locale::Zh => format!("队列：{total}"),
+        }
+    }
+
+    fn push_queue_section(
+        self,
+        lines: &mut Vec<String>,
+        queue: TelegramQueueKind,
+        messages: &[crate::queue::TelegramQueuedMessage],
+    ) {
+        lines.push(match self.locale {
+            Locale::En => format!("{}: {}", self.queue_kind_label(queue), messages.len()),
+            Locale::Zh => format!("{}：{}", self.queue_kind_label(queue), messages.len()),
+        });
+        if messages.is_empty() {
+            lines.push(match self.locale {
+                Locale::En => "  empty".into(),
+                Locale::Zh => "  空".into(),
+            });
+            return;
+        }
+        for (index, message) in messages.iter().take(5).enumerate() {
+            lines.push(self.queue_item(index + 1, message));
+        }
+        let remaining = messages.len().saturating_sub(5);
+        if remaining > 0 {
+            lines.push(match self.locale {
+                Locale::En => format!("  ... and {remaining} more"),
+                Locale::Zh => format!("  ... 另有 {remaining} 条"),
+            });
+        }
+    }
+
+    fn queue_item(self, index: usize, message: &crate::queue::TelegramQueuedMessage) -> String {
+        let intent = match (self.locale, message.intent) {
+            (Locale::En, TelegramQueuedMessageIntent::Observation) => "observation",
+            (Locale::En, TelegramQueuedMessageIntent::UserInput) => "user input",
+            (Locale::Zh, TelegramQueuedMessageIntent::Observation) => "观察",
+            (Locale::Zh, TelegramQueuedMessageIntent::UserInput) => "用户输入",
+        };
+        format!(
+            "  {index}. {intent}: {}",
+            crate::queue::summarize_queued_message(message, self.queue_summary_labels())
+        )
+    }
+
+    fn queue_summary_labels(self) -> TelegramQueueSummaryLabels<'static> {
+        match self.locale {
+            Locale::En => TelegramQueueSummaryLabels {
+                non_text_message: "[non-text message]",
+                json: "[json]",
+                file: "file",
+                image: "image",
+                audio: "audio",
+                video: "video",
+            },
+            Locale::Zh => TelegramQueueSummaryLabels {
+                non_text_message: "[非文本消息]",
+                json: "[JSON]",
+                file: "文件",
+                image: "图片",
+                audio: "音频",
+                video: "视频",
+            },
         }
     }
 

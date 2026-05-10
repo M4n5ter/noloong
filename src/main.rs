@@ -30,6 +30,7 @@ use noloong_agent::{
         serve_interaction_http,
     },
 };
+use noloong_agent_core::QueueMode;
 use noloong_agent_telegram::{
     access::TelegramAccessPolicy,
     approval::render_pending_approval_requests,
@@ -52,6 +53,7 @@ use noloong_agent_telegram::{
         FileTelegramOffsetStore, TelegramCallbackQuery, TelegramPollOutcome, TelegramPoller,
         TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
+    queue::TelegramQueueKind,
     session::{
         TelegramSessionAction, TelegramSessionActionStore, TelegramSessionKey, single_button_markup,
     },
@@ -477,6 +479,9 @@ impl BridgeUpdateHandler {
             Some(TelegramCockpitCommand::Switch) => self.switch_or_list_sessions(command).await,
             Some(TelegramCockpitCommand::Sessions) => self.send_sessions(command).await,
             Some(TelegramCockpitCommand::Profiles) => self.send_profiles(command).await,
+            Some(TelegramCockpitCommand::Continue) => self.continue_active_session(command).await,
+            Some(TelegramCockpitCommand::Abort) => self.abort_active_session(command).await,
+            Some(TelegramCockpitCommand::Queue) => self.send_or_update_queue(command).await,
             Some(TelegramCockpitCommand::Approvals) => self.send_pending_approvals(command).await,
             Some(command_id) => self.send_command_not_ready(command, command_id).await,
             None => self.send_unknown_command_help(command).await,
@@ -677,6 +682,148 @@ impl BridgeUpdateHandler {
             None => self.catalog.pending_approvals_empty().into(),
         };
         self.send_command_text(command, &text).await
+    }
+
+    async fn continue_active_session(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let descriptor = self
+            .bridge
+            .continue_session(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        self.send_command_text(command, &self.catalog.run_continued(&descriptor.session_id))
+            .await
+    }
+
+    async fn abort_active_session(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let descriptor = self
+            .bridge
+            .get_session(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        if matches!(
+            descriptor.status,
+            noloong_agent::interaction::InteractionSessionStatus::Running
+                | noloong_agent::interaction::InteractionSessionStatus::Paused
+        ) {
+            let button = self.session_actions.lock().await.button(
+                self.catalog.confirm_abort_button(),
+                TelegramSessionAction::ConfirmAbort {
+                    session_id: descriptor.session_id.clone(),
+                },
+            );
+            return self
+                .send_command_text_with_markup(
+                    command,
+                    &self.catalog.run_abort_confirm(&descriptor.session_id),
+                    Some(single_button_markup(button)),
+                )
+                .await;
+        }
+
+        let descriptor = self
+            .bridge
+            .abort_session(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        self.send_command_text(command, &self.catalog.run_aborted(&descriptor.session_id))
+            .await
+    }
+
+    async fn send_or_update_queue(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let args = command.args.trim();
+        if !args.is_empty() {
+            let descriptor = self
+                .bridge
+                .submit_follow_up_text(&command.context, &session_id, args.to_owned())
+                .await
+                .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            return self
+                .send_command_text(
+                    command,
+                    &self.catalog.queue_follow_up_added(&descriptor.session_id),
+                )
+                .await;
+        }
+
+        let snapshot = self
+            .bridge
+            .list_queues(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        let reply_markup = self.queue_markup(session_id).await;
+        self.send_command_text_with_markup(
+            command,
+            &self.catalog.queue_card(&snapshot),
+            Some(reply_markup),
+        )
+        .await
+    }
+
+    async fn queue_markup(&self, session_id: String) -> TelegramInlineKeyboardMarkup {
+        const QUEUE_KINDS: [TelegramQueueKind; 2] =
+            [TelegramQueueKind::Steering, TelegramQueueKind::FollowUp];
+        const QUEUE_MODES: [QueueMode; 2] = [QueueMode::All, QueueMode::OneAtATime];
+
+        let mut actions = self.session_actions.lock().await;
+        let mut inline_keyboard = Vec::new();
+        inline_keyboard.push(
+            QUEUE_KINDS
+                .iter()
+                .map(|queue| {
+                    actions.button(
+                        self.catalog.clear_queue_button(*queue),
+                        TelegramSessionAction::ClearQueue {
+                            session_id: session_id.clone(),
+                            queue: *queue,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        inline_keyboard.extend(QUEUE_KINDS.iter().map(|queue| {
+            QUEUE_MODES
+                .iter()
+                .map(|mode| {
+                    actions.button(
+                        self.catalog.set_queue_mode_button(*queue, *mode),
+                        TelegramSessionAction::SetQueueMode {
+                            session_id: session_id.clone(),
+                            queue: *queue,
+                            mode: *mode,
+                        },
+                    )
+                })
+                .collect()
+        }));
+        TelegramInlineKeyboardMarkup { inline_keyboard }
+    }
+
+    fn active_session_id(&self, command: &TelegramCommand) -> Option<String> {
+        self.bridge.session_id(&command_key(command))
     }
 
     async fn send_command_text(
@@ -888,6 +1035,58 @@ impl BridgeUpdateHandler {
                         target,
                         message_id,
                         &self.catalog.session_deleted(&session_id),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::ConfirmAbort { session_id } => {
+                let descriptor = self
+                    .bridge
+                    .abort_session(&session_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.run_aborted(&descriptor.session_id),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::ClearQueue { session_id, queue } => {
+                let messages = self
+                    .bridge
+                    .clear_queue(&session_id, queue)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.queue_cleared(queue, messages.len()),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::SetQueueMode {
+                session_id,
+                queue,
+                mode,
+            } => {
+                let messages = self
+                    .bridge
+                    .set_queue_mode(&session_id, queue, mode)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.queue_mode_updated(queue, mode, messages.len()),
                         Some(TelegramInlineKeyboardMarkup::empty()),
                     )
                     .await
@@ -1388,7 +1587,9 @@ mod tests {
             InteractionWsNotification,
         },
     };
-    use noloong_agent_core::{AgentState, ToolApprovalRequest, ToolApprovalRequestSpec, ToolCall};
+    use noloong_agent_core::{
+        AgentMessage, AgentState, QueueMode, ToolApprovalRequest, ToolApprovalRequestSpec, ToolCall,
+    };
     use noloong_agent_telegram::{
         access::{TelegramChatKind, TelegramTextInput},
         bridge::{TelegramInteractionClient, TelegramInteractionFuture},
@@ -1401,6 +1602,7 @@ mod tests {
         polling::{
             TelegramCallbackQuery, TelegramChat, TelegramMessage, TelegramUpdate, TelegramUser,
         },
+        queue::{TelegramQueueKind, TelegramQueuedMessage, TelegramQueuedMessageIntent},
         session::{TelegramSessionActionStore, telegram_session_metadata},
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
@@ -1825,12 +2027,15 @@ mod tests {
 
         fixture
             .handler
-            .handle_command(queue_command())
+            .handle_command(telegram_command(5, "processes"))
             .await
             .unwrap();
 
         assert!(fixture.interaction.methods().is_empty());
-        assert!(fixture.api.sent_texts().last().unwrap().contains("/queue"));
+        assert_eq!(
+            fixture.api.sent_texts().last().unwrap(),
+            "/processes is in the cockpit menu\\. Its control surface is not implemented yet\\."
+        );
     }
 
     #[tokio::test]
@@ -1946,6 +2151,132 @@ mod tests {
                 .last()
                 .unwrap()
                 .contains("Active session")
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_continue_command_calls_agent_continue() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+
+        fixture
+            .handler
+            .handle_command(telegram_command(11, "continue"))
+            .await
+            .unwrap();
+
+        assert!(fixture.interaction.calls().iter().any(|(method, params)| {
+            method == "agent/continue" && params["sessionId"] == "telegram:42"
+        }));
+        assert_eq!(
+            fixture.api.sent_texts().last().unwrap(),
+            "Run continued\nSession: telegram:42"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_abort_command_confirms_running_session() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture
+            .interaction
+            .set_session_status("telegram:42", InteractionSessionStatus::Running);
+
+        fixture
+            .handler
+            .handle_command(telegram_command(12, "abort"))
+            .await
+            .unwrap();
+        let callback_data = fixture.api.last_sent_callback_data(0, 0);
+        assert!(
+            !fixture
+                .interaction
+                .methods()
+                .iter()
+                .any(|method| method == "agent/abort")
+        );
+
+        fixture
+            .handle_callback_with_data("abort-cb", 621, &callback_data)
+            .await
+            .unwrap();
+
+        assert!(fixture.interaction.calls().iter().any(|(method, params)| {
+            method == "agent/abort" && params["sessionId"] == "telegram:42"
+        }));
+        assert_eq!(
+            fixture.api.edited_texts().last().unwrap(),
+            "Run aborted\nSession: telegram:42"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_queue_command_lists_and_controls_queues() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture.interaction.set_queue(
+            "telegram:42",
+            TelegramQueueKind::Steering,
+            vec![queued_user_message("queued-steer", "queued steering")],
+        );
+
+        fixture
+            .handler
+            .handle_command(telegram_command(13, "queue"))
+            .await
+            .unwrap();
+        let clear_data = fixture.api.last_sent_callback_data(0, 0);
+        let set_mode_data = fixture.api.last_sent_callback_data(1, 0);
+
+        assert_eq!(
+            fixture.api.sent_texts().last().unwrap(),
+            "Queues: 1\nSteering: 1\n  1\\. user input: queued steering\nFollow\\-up: 0\n  empty"
+        );
+
+        fixture
+            .handle_callback_with_data("queue-clear-cb", 621, &clear_data)
+            .await
+            .unwrap();
+        fixture
+            .handle_callback_with_data("queue-mode-cb", 621, &set_mode_data)
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(
+            calls.iter().any(|(method, params)| {
+                method == "queue/list" && params["queue"] == "steering"
+            })
+        );
+        assert!(
+            calls.iter().any(|(method, params)| {
+                method == "queue/clear" && params["queue"] == "steering"
+            })
+        );
+        assert!(calls.iter().any(|(method, params)| {
+            method == "queue/set_mode" && params["queue"] == "steering" && params["mode"] == "all"
+        }));
+    }
+
+    #[tokio::test]
+    async fn telegram_queue_command_with_args_adds_follow_up() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+
+        fixture
+            .handler
+            .handle_command(telegram_command_with_args(14, "queue", "use this next"))
+            .await
+            .unwrap();
+
+        assert!(fixture.interaction.calls().iter().any(|(method, params)| {
+            method == "agent/follow_up"
+                && params["sessionId"] == "telegram:42"
+                && params["message"]["content"][0]["text"] == "use this next"
+        }));
+        assert_eq!(
+            fixture.api.sent_texts().last().unwrap(),
+            "Follow\\-up queued\nSession: telegram:42"
         );
     }
 
@@ -2089,10 +2420,6 @@ mod tests {
         telegram_command(4, "unknown")
     }
 
-    fn queue_command() -> TelegramCommand {
-        telegram_command(5, "queue")
-    }
-
     fn telegram_command(message_id: i64, name: &str) -> TelegramCommand {
         TelegramCommand {
             context: telegram_inbound_context(message_id),
@@ -2100,6 +2427,23 @@ mod tests {
             bot_username: None,
             args: String::new(),
             raw_text: format!("/{name}"),
+        }
+    }
+
+    fn telegram_command_with_args(message_id: i64, name: &str, args: &str) -> TelegramCommand {
+        TelegramCommand {
+            context: telegram_inbound_context(message_id),
+            name: name.into(),
+            bot_username: None,
+            args: args.into(),
+            raw_text: format!("/{name} {args}"),
+        }
+    }
+
+    fn queued_user_message(id: &str, text: &str) -> TelegramQueuedMessage {
+        TelegramQueuedMessage {
+            message: AgentMessage::user(id, text),
+            intent: TelegramQueuedMessageIntent::UserInput,
         }
     }
 
@@ -2162,6 +2506,8 @@ mod tests {
         approval_list: StdMutex<BTreeMap<String, ToolApprovalRequest>>,
         profiles: StdMutex<Vec<InteractionProfileDescriptor>>,
         sessions: StdMutex<Vec<InteractionSessionDescriptor>>,
+        queues: StdMutex<BTreeMap<(String, TelegramQueueKind), Vec<TelegramQueuedMessage>>>,
+        queue_modes: StdMutex<BTreeMap<(String, TelegramQueueKind), QueueMode>>,
     }
 
     impl FakeInteraction {
@@ -2188,6 +2534,29 @@ mod tests {
 
         fn set_sessions(&self, sessions: Vec<InteractionSessionDescriptor>) {
             *self.sessions.lock().unwrap() = sessions;
+        }
+
+        fn set_session_status(&self, session_id: &str, status: InteractionSessionStatus) {
+            let mut sessions = self.sessions.lock().unwrap();
+            let Some(session) = sessions
+                .iter_mut()
+                .find(|session| session.session_id == session_id)
+            else {
+                return;
+            };
+            session.status = status;
+        }
+
+        fn set_queue(
+            &self,
+            session_id: &str,
+            queue: TelegramQueueKind,
+            messages: Vec<TelegramQueuedMessage>,
+        ) {
+            self.queues
+                .lock()
+                .unwrap()
+                .insert((session_id.into(), queue), messages);
         }
     }
 
@@ -2268,6 +2637,56 @@ mod tests {
                         };
                         Ok(serde_json::to_value(deleted).unwrap())
                     }
+                    "agent/continue" => {
+                        let request = parse_fake_request::<FakeSessionRequest>(params);
+                        Ok(serde_json::to_value(self.session_by_id(&request.session_id)).unwrap())
+                    }
+                    "agent/abort" => {
+                        let request = parse_fake_request::<FakeSessionRequest>(params);
+                        let mut descriptor = self.session_by_id(&request.session_id);
+                        descriptor.status = InteractionSessionStatus::Aborted;
+                        Ok(serde_json::to_value(descriptor).unwrap())
+                    }
+                    "agent/follow_up" => {
+                        let request = parse_fake_request::<FakeFollowUpRequest>(params);
+                        self.queues
+                            .lock()
+                            .unwrap()
+                            .entry((request.session_id.clone(), TelegramQueueKind::FollowUp))
+                            .or_default()
+                            .push(TelegramQueuedMessage {
+                                message: request.message,
+                                intent: TelegramQueuedMessageIntent::UserInput,
+                            });
+                        Ok(serde_json::to_value(self.session_by_id(&request.session_id)).unwrap())
+                    }
+                    "queue/list" => {
+                        let request = parse_fake_request::<FakeQueueRequest>(params);
+                        let messages = self.queue_messages(&request.session_id, request.queue);
+                        Ok(serde_json::to_value(messages).unwrap())
+                    }
+                    "queue/clear" => {
+                        let request = parse_fake_request::<FakeQueueRequest>(params);
+                        self.queues
+                            .lock()
+                            .unwrap()
+                            .insert((request.session_id, request.queue), Vec::new());
+                        Ok(serde_json::to_value(Vec::<TelegramQueuedMessage>::new()).unwrap())
+                    }
+                    "queue/set_mode" => {
+                        let request = parse_fake_request::<FakeQueueSetModeRequest>(params);
+                        let FakeQueueSetModeRequest {
+                            session_id,
+                            queue,
+                            mode,
+                        } = request;
+                        self.queue_modes
+                            .lock()
+                            .unwrap()
+                            .insert((session_id.clone(), queue), mode);
+                        let messages = self.queue_messages(&session_id, queue);
+                        Ok(serde_json::to_value(messages).unwrap())
+                    }
                     "display/subscribe" => Ok(json!({"subscriptionId": "subscription-1"})),
                     _ => Ok(serde_json::to_value(session_descriptor()).unwrap()),
                 }
@@ -2278,6 +2697,73 @@ mod tests {
             let (_sender, receiver) = broadcast::channel(1);
             receiver
         }
+    }
+
+    impl FakeInteraction {
+        fn session_by_id(&self, session_id: &str) -> InteractionSessionDescriptor {
+            self.sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|session| session.session_id == session_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    session_descriptor_with(
+                        session_id,
+                        "profile-1",
+                        InteractionSessionStatus::Idle,
+                        Default::default(),
+                    )
+                })
+        }
+
+        fn queue_messages(
+            &self,
+            session_id: &str,
+            queue: TelegramQueueKind,
+        ) -> Vec<TelegramQueuedMessage> {
+            self.queues
+                .lock()
+                .unwrap()
+                .get(&(session_id.into(), queue))
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeSessionRequest {
+        session_id: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeFollowUpRequest {
+        session_id: String,
+        message: AgentMessage,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeQueueRequest {
+        session_id: String,
+        queue: TelegramQueueKind,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeQueueSetModeRequest {
+        session_id: String,
+        queue: TelegramQueueKind,
+        mode: QueueMode,
+    }
+
+    fn parse_fake_request<T>(params: Value) -> T
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_value(params).unwrap()
     }
 
     fn profile_descriptor(profile_id: &str) -> InteractionProfileDescriptor {

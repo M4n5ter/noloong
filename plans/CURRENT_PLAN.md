@@ -303,14 +303,15 @@
 **Description:** 暴露 run control 与 queue control。用户可 `/continue`、`/abort`、查看 follow-up/steering queue、清空或编辑队列中的用户输入。
 
 **Acceptance criteria:**
-- [ ] `/continue` 调用 `agent/continue`。
-- [ ] `/abort` 调用 `agent/abort`，running 时需要确认。
-- [ ] `/queue` 显示 steering/follow-up 队列摘要。
-- [ ] queue card 支持 clear、set mode、将当前用户消息作为 follow-up。
+- [x] `/continue` 调用 `agent/continue`。
+- [x] `/abort` 调用 `agent/abort`，running 时需要确认。
+- [x] `/queue` 显示 steering/follow-up 队列摘要。
+- [x] queue card 支持 clear、set mode、将当前用户消息作为 follow-up。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram queue`
-- [ ] fake interaction 覆盖 `queue/list`、`queue/clear`、`queue/set_mode`、`agent/continue`、`agent/abort`。
+- [x] `cargo test -p noloong-agent-telegram queue`
+- [x] `cargo test -p noloong telegram_`
+- [x] fake interaction 覆盖 `queue/list`、`queue/clear`、`queue/set_mode`、`agent/continue`、`agent/abort`。
 
 **Dependencies:** Task 11
 
