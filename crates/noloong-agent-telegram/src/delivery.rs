@@ -1,11 +1,12 @@
 use crate::{
     render::{render_agent_message_text, render_content_block_text, render_markdown_v2},
     telegram_api::{
-        TelegramApi, TelegramApiError, TelegramChatAction, TelegramEditMessageTextRequest,
-        TelegramInlineKeyboardMarkup, TelegramInputFile, TelegramMediaMessageOptions,
-        TelegramMessageHandle, TelegramParseMode, TelegramSendAudioRequest,
-        TelegramSendChatActionRequest, TelegramSendDocumentRequest, TelegramSendMessageRequest,
-        TelegramSendPhotoRequest, TelegramSendVideoRequest, TelegramSendVoiceRequest,
+        TelegramApi, TelegramApiError, TelegramChatAction, TelegramDeleteMessageRequest,
+        TelegramEditMessageTextRequest, TelegramInlineKeyboardMarkup, TelegramInputFile,
+        TelegramMediaMessageOptions, TelegramMessageHandle, TelegramParseMode,
+        TelegramSendAudioRequest, TelegramSendChatActionRequest, TelegramSendDocumentRequest,
+        TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramSendVideoRequest,
+        TelegramSendVoiceRequest,
     },
     text::{split_telegram_text_with_continuation, telegram_utf16_units},
 };
@@ -108,6 +109,11 @@ impl TelegramDelivery {
 
         if !agent_message_has_media(message) {
             let text = render_agent_message_text(message);
+            if text.trim().is_empty() {
+                self.delete_message_best_effort(target, preview.message_id)
+                    .await;
+                return Ok(());
+            }
             if self
                 .edit_text(target, preview.message_id, &text, None)
                 .await
@@ -139,9 +145,15 @@ impl TelegramDelivery {
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         let chunks = split_telegram_text_with_continuation(text, self.max_message_units);
         let mut sent = Vec::with_capacity(chunks.len());
         for chunk in chunks {
+            if chunk.trim().is_empty() {
+                continue;
+            }
             sent.push(
                 self.send_one_text(target, &chunk, reply_markup.clone())
                     .await?,
@@ -210,6 +222,24 @@ impl TelegramDelivery {
                 .map_err(TelegramDeliveryError::Api),
             Err(error) => Err(TelegramDeliveryError::Api(error)),
         }
+    }
+
+    pub async fn delete_message(
+        &self,
+        target: TelegramMessageTarget,
+        message_id: i64,
+    ) -> TelegramDeliveryResult<()> {
+        self.api
+            .delete_message(TelegramDeleteMessageRequest {
+                chat_id: target.chat_id,
+                message_id,
+            })
+            .await
+            .map_err(TelegramDeliveryError::Api)
+    }
+
+    pub async fn delete_message_best_effort(&self, target: TelegramMessageTarget, message_id: i64) {
+        let _ = self.delete_message(target, message_id).await;
     }
 
     async fn send_one_text(
@@ -567,14 +597,15 @@ fn media_fallback_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramDelivery, TelegramMessageTarget};
+    use super::{TelegramDelivery, TelegramMessageTarget, TelegramPreviewMessage};
     use crate::{
         telegram_api::{
-            TelegramApi, TelegramApiError, TelegramChatAction, TelegramEditMessageTextRequest,
-            TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramMessageHandle,
-            TelegramSendAudioRequest, TelegramSendChatActionRequest, TelegramSendDocumentRequest,
-            TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramSendVideoRequest,
-            TelegramSendVoiceRequest, TelegramUpdate,
+            TelegramApi, TelegramApiError, TelegramChatAction, TelegramDeleteMessageRequest,
+            TelegramEditMessageTextRequest, TelegramInlineKeyboardButton,
+            TelegramInlineKeyboardMarkup, TelegramMessageHandle, TelegramSendAudioRequest,
+            TelegramSendChatActionRequest, TelegramSendDocumentRequest, TelegramSendMessageRequest,
+            TelegramSendPhotoRequest, TelegramSendVideoRequest, TelegramSendVoiceRequest,
+            TelegramUpdate,
         },
         text::split_telegram_text,
     };
@@ -657,6 +688,53 @@ mod tests {
             calls.last().and_then(|call| call.message_thread_id),
             Some(9)
         );
+    }
+
+    #[tokio::test]
+    async fn send_text_skips_empty_chunks() {
+        let api = Arc::new(FakeTelegramApi::normal());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+
+        let sent = delivery
+            .send_text(TelegramMessageTarget::chat(42), "\n \t", None)
+            .await
+            .unwrap();
+
+        assert!(sent.is_empty());
+        assert!(
+            api.sent_calls
+                .lock()
+                .expect("fake sent calls lock poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn send_agent_final_deletes_preview_when_text_becomes_empty() {
+        let api = Arc::new(FakeTelegramApi::normal());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+
+        delivery
+            .send_agent_final_message(
+                TelegramMessageTarget::chat(42),
+                Some(TelegramPreviewMessage {
+                    message_id: 9,
+                    text: "draft".into(),
+                }),
+                &assistant_message(vec![ContentBlock::ToolCall {
+                    tool_call: noloong_agent_core::ToolCall {
+                        id: "tool-1".into(),
+                        name: "host.exec.start".into(),
+                        arguments: serde_json::json!({"command": "sleep 90"}),
+                    },
+                }]),
+            )
+            .await
+            .unwrap();
+
+        assert!(api.sent_calls.lock().unwrap().is_empty());
+        assert!(api.edited_calls.lock().unwrap().is_empty());
+        assert_eq!(api.deleted_calls.lock().unwrap()[0].message_id, 9);
     }
 
     #[tokio::test]
@@ -856,6 +934,7 @@ mod tests {
     struct FakeTelegramApi {
         sent_calls: Mutex<Vec<TelegramSendMessageRequest>>,
         edited_calls: Mutex<Vec<TelegramEditMessageTextRequest>>,
+        deleted_calls: Mutex<Vec<TelegramDeleteMessageRequest>>,
         photo_calls: Mutex<Vec<TelegramSendPhotoRequest>>,
         document_calls: Mutex<Vec<TelegramSendDocumentRequest>>,
         audio_calls: Mutex<Vec<TelegramSendAudioRequest>>,
@@ -886,6 +965,7 @@ mod tests {
             Self {
                 sent_calls: Mutex::new(Vec::new()),
                 edited_calls: Mutex::new(Vec::new()),
+                deleted_calls: Mutex::new(Vec::new()),
                 photo_calls: Mutex::new(Vec::new()),
                 document_calls: Mutex::new(Vec::new()),
                 audio_calls: Mutex::new(Vec::new()),
@@ -963,6 +1043,19 @@ mod tests {
                     chat_id: request.chat_id,
                     message_id: request.message_id,
                 })
+            })
+        }
+
+        fn delete_message<'a>(
+            &'a self,
+            request: TelegramDeleteMessageRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.deleted_calls
+                    .lock()
+                    .expect("fake deleted calls lock poisoned")
+                    .push(request);
+                Ok(())
             })
         }
 

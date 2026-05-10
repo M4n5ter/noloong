@@ -59,6 +59,27 @@ impl<T> ShortCallbackStore<T> {
         self.entries.remove(key).map(|entry| entry.value)
     }
 
+    pub fn get(&mut self, key: &str) -> Option<&T> {
+        self.sweep_expired();
+        self.entries.get(key).map(|entry| &entry.value)
+    }
+
+    pub fn find(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Option<&T> {
+        self.sweep_expired();
+        self.entries
+            .values()
+            .find_map(|entry| predicate(&entry.value).then_some(&entry.value))
+    }
+
+    pub fn remove_where(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Option<T> {
+        self.sweep_expired();
+        let key = self
+            .entries
+            .iter()
+            .find_map(|(key, entry)| predicate(&entry.value).then(|| key.clone()))?;
+        self.entries.remove(&key).map(|entry| entry.value)
+    }
+
     fn sweep_expired(&mut self) {
         let ttl = self.ttl;
         self.entries
@@ -130,5 +151,20 @@ mod tests {
 
         assert_eq!(store.remove(&first), None);
         assert_eq!(store.remove(&second), Some("second"));
+    }
+
+    #[test]
+    fn short_callback_store_removes_first_matching_entry() {
+        let mut store = ShortCallbackStore::default();
+        let first = store.insert(("first", 1));
+        let second = store.insert(("second", 2));
+
+        assert_eq!(store.find(|(_, value)| *value == 2), Some(&("second", 2)));
+        assert_eq!(
+            store.remove_where(|(_, value)| *value == 2),
+            Some(("second", 2))
+        );
+        assert_eq!(store.remove(&first), Some(("first", 1)));
+        assert_eq!(store.remove(&second), None);
     }
 }

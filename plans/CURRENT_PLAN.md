@@ -194,13 +194,14 @@
 
 #### Task 8: Improve streaming UX with run cards and chat actions
 
-**Description:** 将 display delivery 从“不断编辑一条文本”升级为状态清晰的 run card：typing/upload actions、流式预览、最终消息、失败/暂停状态均有稳定 UI。
+**Description:** 将 display delivery 从“不断编辑一条文本”升级为移动端友好的临时状态层：typing/upload actions、流式预览、最终消息、失败/暂停状态均有稳定 UI；run 成功完成后清理中间状态，只保留最终 assistant 回复。
 
 **Acceptance criteria:**
-- [x] run started 发送或更新轻量状态卡。
+- [x] run started 发送 chat action；run paused/failed 才显示状态卡。
 - [x] 文本流按节流编辑预览，最终回复替换或补发。
 - [x] 长回复 split 后保留首尾和 continuation 标识。
 - [x] `send_chat_action` 在长模型运行和文件上传时使用。
+- [x] run completed 后删除 paused/status card，不额外留下“运行已完成”消息。
 
 **Verification:**
 - [x] `cargo test -p noloong-agent-telegram display`
@@ -217,13 +218,14 @@
 
 #### Task 9: Make tool and approval cards production-grade
 
-**Description:** 将现有 tool status 和 approval button 打磨为可审计卡片：工具参数摘要、权限、reason、过期时间、审批后编辑原卡片，并支持 pending approval 列表。
+**Description:** 将现有 tool status 和 approval button 打磨为可审计但不污染最终对话的临时卡片：工具参数摘要、权限、reason、过期时间、审批后清理原卡片，并支持 pending approval 列表。
 
 **Acceptance criteria:**
 - [x] approval card 显示 tool、参数摘要、permissions、reason、expires_at。
-- [x] allow/deny 后编辑原消息并移除按钮。
+- [x] allow/deny 后优先删除原审批卡；删除失败时 fallback 为编辑原消息并移除按钮。
 - [x] callback 非授权用户只收到 callback toast，不改变审批状态。
 - [x] `/approvals` 可列出并重新渲染当前 pending approvals。
+- [x] tool started 状态在 tool completed 后删除，不在成功完成后残留中间消息。
 
 **Verification:**
 - [x] `cargo test -p noloong-agent-telegram approval`
@@ -430,16 +432,16 @@
 **Description:** 运行完整本地验证，并用测试 bot 做真实 Telegram smoke。真实 smoke 覆盖文字、多媒体、文件、审批、后台 process、commands 和最终输出。
 
 **Acceptance criteria:**
-- [ ] format check 通过。
-- [ ] clippy 无 warning。
-- [ ] workspace tests 通过。
+- [x] format check 通过。
+- [x] clippy 无 warning。
+- [x] workspace tests 通过。
 - [ ] Telegram live smoke 通过：文本、图片、文档、语音、视频、审批按钮、process card、文件回传。
-- [ ] ChatGPT subscription profile 与 OpenRouter free profile 都至少完成一次私聊 prompt。
+- [x] ChatGPT subscription profile 与 OpenRouter free profile 都至少完成一次私聊 prompt。
 
 **Verification:**
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets --all-features`
-- [ ] `cargo test --workspace`
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets --all-features`
+- [x] `cargo test --workspace`
 - [ ] Manual Telegram live smoke with test bot credentials.
 
 **Dependencies:** Task 16

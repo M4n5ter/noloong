@@ -314,15 +314,18 @@ impl TelegramBridge {
         approval_id: &str,
         decision: ToolPermissionDecision,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
-        self.request_as(
-            METHOD_APPROVAL_RESOLVE,
-            json!({
-                "sessionId": session_id,
-                "approvalId": approval_id,
-                "decision": decision,
-            }),
-        )
-        .await
+        let descriptor = self
+            .request_as(
+                METHOD_APPROVAL_RESOLVE,
+                json!({
+                    "sessionId": session_id,
+                    "approvalId": approval_id,
+                    "decision": decision,
+                }),
+            )
+            .await?;
+        self.record_descriptor_status(&descriptor);
+        Ok(descriptor)
     }
 
     pub async fn list_approvals(

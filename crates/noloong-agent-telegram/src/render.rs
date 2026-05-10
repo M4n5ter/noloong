@@ -90,7 +90,7 @@ pub(crate) fn render_content_block_text(block: &ContentBlock) -> Option<String> 
         ContentBlock::Json { value } => Some(value.to_string()),
         ContentBlock::Thinking { .. } => None,
         ContentBlock::Media { .. } => Some("[media]".into()),
-        ContentBlock::ToolCall { tool_call } => Some(format!("Tool call: {}", tool_call.name)),
+        ContentBlock::ToolCall { .. } => None,
         ContentBlock::ToolResult {
             tool_name,
             content,
@@ -136,7 +136,10 @@ fn split_pipe_row(line: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_markdown_v2, render_markdown_v2, rewrite_pipe_tables};
+    use super::{
+        escape_markdown_v2, render_agent_message_text, render_markdown_v2, rewrite_pipe_tables,
+    };
+    use noloong_agent_core::{AgentMessage, ContentBlock, ToolCall};
 
     #[test]
     fn markdown_rendering_escapes_markdown_v2_control_chars() {
@@ -154,5 +157,26 @@ mod tests {
     fn markdown_rendering_rewrites_pipe_tables() {
         let rewritten = rewrite_pipe_tables("| A | B |\n|---|---|\n| x | y |");
         assert_eq!(rewritten, "- A: x, B: y");
+    }
+
+    #[test]
+    fn agent_message_text_skips_tool_call_blocks() {
+        let message = AgentMessage::assistant(
+            "assistant-1",
+            vec![
+                ContentBlock::ToolCall {
+                    tool_call: ToolCall {
+                        id: "tool-1".into(),
+                        name: "host.exec.start".into(),
+                        arguments: serde_json::json!({"command": "sleep 120"}),
+                    },
+                },
+                ContentBlock::Text {
+                    text: "done".into(),
+                },
+            ],
+        );
+
+        assert_eq!(render_agent_message_text(&message), "done");
     }
 }

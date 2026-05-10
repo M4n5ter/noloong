@@ -3,7 +3,7 @@ use crate::{
     telegram_api::{TelegramBotCommand, TelegramSetMyCommandsRequest},
 };
 
-pub const TELEGRAM_COCKPIT_COMMANDS: [TelegramCommandSpec; 16] = [
+pub const TELEGRAM_COCKPIT_COMMANDS: [TelegramCommandSpec; 18] = [
     TelegramCommandSpec::new(TelegramCockpitCommand::Start, "start"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Help, "help"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Status, "status"),
@@ -15,6 +15,8 @@ pub const TELEGRAM_COCKPIT_COMMANDS: [TelegramCommandSpec; 16] = [
     TelegramCommandSpec::new(TelegramCockpitCommand::Abort, "abort"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Queue, "queue"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Approvals, "approvals"),
+    TelegramCommandSpec::new(TelegramCockpitCommand::Approve, "approve"),
+    TelegramCommandSpec::new(TelegramCockpitCommand::Deny, "deny"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Processes, "processes"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Process, "process"),
     TelegramCommandSpec::new(TelegramCockpitCommand::Manifest, "manifest"),
@@ -35,6 +37,8 @@ pub enum TelegramCockpitCommand {
     Abort,
     Queue,
     Approvals,
+    Approve,
+    Deny,
     Processes,
     Process,
     Manifest,
@@ -132,6 +136,8 @@ mod tests {
                 "abort",
                 "queue",
                 "approvals",
+                "approve",
+                "deny",
                 "processes",
                 "process",
                 "manifest",

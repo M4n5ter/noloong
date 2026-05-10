@@ -58,6 +58,13 @@ pub trait TelegramApi: Send + Sync {
         request: TelegramEditMessageTextRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle>;
 
+    fn delete_message<'a>(
+        &'a self,
+        _request: TelegramDeleteMessageRequest,
+    ) -> TelegramApiFuture<'a, ()> {
+        unsupported_api_future("deleteMessage")
+    }
+
     fn send_photo<'a>(
         &'a self,
         _request: TelegramSendPhotoRequest,
@@ -419,6 +426,16 @@ impl TelegramApi for ReqwestTelegramApi {
         })
     }
 
+    fn delete_message<'a>(
+        &'a self,
+        request: TelegramDeleteMessageRequest,
+    ) -> TelegramApiFuture<'a, ()> {
+        Box::pin(async move {
+            let response = self.send_json("deleteMessage", &request).await?;
+            parse_telegram_response::<bool>(response).await.map(|_| ())
+        })
+    }
+
     fn send_photo<'a>(
         &'a self,
         request: TelegramSendPhotoRequest,
@@ -532,6 +549,13 @@ pub struct TelegramEditMessageTextRequest {
     pub parse_mode: Option<TelegramParseMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<TelegramInlineKeyboardMarkup>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramDeleteMessageRequest {
+    pub chat_id: i64,
+    pub message_id: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

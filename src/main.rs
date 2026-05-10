@@ -24,13 +24,14 @@ use crate::{
 use clap::{Args, Parser, Subcommand};
 use noloong_agent::{
     Locale,
+    approval::{allow_decision, deny_decision},
     interaction::{
         InteractionCapabilityPolicy, InteractionControlHandler, InteractionHttpTransportConfig,
         InteractionTransportAuth, InteractionWsClient, InteractionWsClientConfig,
         serve_interaction_http,
     },
 };
-use noloong_agent_core::QueueMode;
+use noloong_agent_core::{QueueMode, ToolApprovalRequest, ToolPermissionOutcome};
 use noloong_agent_telegram::{
     access::TelegramAccessPolicy,
     approval::render_pending_approval_requests,
@@ -41,7 +42,7 @@ use noloong_agent_telegram::{
     },
     config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
     delivery::{TelegramDelivery, TelegramMessageTarget},
-    display::{TelegramDisplayState, deliver_display_event},
+    display::{TelegramDisplayState, cleanup_display_messages, deliver_display_event},
     i18n::{
         MANIFEST_PROPOSAL_DISPLAY_LIMIT, TelegramManifestCard, TelegramStatusCard,
         TelegramUiCatalog,
@@ -67,7 +68,8 @@ use noloong_agent_telegram::{
     },
     telegram_api::{
         ReqwestTelegramApi, TelegramApi, TelegramApiError, TelegramInlineKeyboardMarkup,
-        TelegramInputFile, TelegramMediaMessageOptions, TelegramSendDocumentRequest,
+        TelegramInputFile, TelegramMediaMessageOptions, TelegramMessageHandle,
+        TelegramSendDocumentRequest,
     },
 };
 use std::{
@@ -394,18 +396,21 @@ async fn run_display_delivery(
         let Some(key) = bridge.session_key_for_display(&display.session_id) else {
             continue;
         };
-        let state = display_state_for(&display_states, key).await;
-        let mut state = state.lock().await;
-        deliver_display_event(
-            &mut state,
-            &delivery,
-            TelegramMessageTarget::new(key.chat_id, key.thread_id),
-            display,
-            show_tool_status,
-            edit_throttle,
-            catalog,
-        )
-        .await?;
+        let cleanup = {
+            let state = display_state_for(&display_states, key).await;
+            let mut state = state.lock().await;
+            deliver_display_event(
+                &mut state,
+                &delivery,
+                TelegramMessageTarget::new(key.chat_id, key.thread_id),
+                display,
+                show_tool_status,
+                edit_throttle,
+                catalog,
+            )
+            .await?
+        };
+        cleanup_display_messages(&delivery, cleanup).await;
     }
 }
 
@@ -492,6 +497,14 @@ impl BridgeUpdateHandler {
             Some(TelegramCockpitCommand::Abort) => self.abort_active_session(command).await,
             Some(TelegramCockpitCommand::Queue) => self.send_or_update_queue(command).await,
             Some(TelegramCockpitCommand::Approvals) => self.send_pending_approvals(command).await,
+            Some(TelegramCockpitCommand::Approve) => {
+                self.resolve_approval_command(command, ToolPermissionOutcome::Allow)
+                    .await
+            }
+            Some(TelegramCockpitCommand::Deny) => {
+                self.resolve_approval_command(command, ToolPermissionOutcome::Deny)
+                    .await
+            }
             Some(TelegramCockpitCommand::Processes) => self.send_processes(command).await,
             Some(TelegramCockpitCommand::Process) => self.send_process(command).await,
             Some(TelegramCockpitCommand::Manifest) => self.send_manifest(command).await,
@@ -695,6 +708,105 @@ impl BridgeUpdateHandler {
             None => self.catalog.pending_approvals_empty().into(),
         };
         self.send_command_text(command, &text).await
+    }
+
+    async fn resolve_approval_command(
+        &self,
+        command: TelegramCommand,
+        outcome: ToolPermissionOutcome,
+    ) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let approvals = self
+            .bridge
+            .list_approvals(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        let Some(approval_id) = select_approval_id(&approvals, &command.args) else {
+            return self
+                .send_command_text(
+                    command,
+                    &render_pending_approval_requests(&approvals, self.catalog),
+                )
+                .await;
+        };
+        let key = command_key(&command);
+        let decision = telegram_approval_decision(
+            outcome.clone(),
+            self.catalog.approval_resolution_reason(),
+            telegram_approver(&command.context),
+        );
+        self.bridge
+            .resolve_approval(&session_id, &approval_id, decision)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        if self
+            .resolve_visible_approval_card(key, &approval_id, outcome.clone())
+            .await?
+        {
+            return Ok(());
+        }
+        self.send_command_text(command, &self.catalog.approval_resolved(&outcome))
+            .await
+    }
+
+    async fn resolve_visible_approval_card(
+        &self,
+        key: TelegramSessionKey,
+        approval_id: &str,
+        outcome: ToolPermissionOutcome,
+    ) -> Result<bool, TelegramPollingError> {
+        let selection = {
+            let state = self.display_states.lock().await.get(&key).cloned();
+            match state {
+                Some(state) => state
+                    .lock()
+                    .await
+                    .lookup_approval_id(approval_id, outcome.clone()),
+                None => None,
+            }
+        };
+        let Some(selection) = selection else {
+            return Ok(false);
+        };
+        self.clear_approval_card(selection.target.message, &outcome)
+            .await?;
+        if let Some(state) = self.display_states.lock().await.get(&key).cloned() {
+            let _ = state
+                .lock()
+                .await
+                .resolve_approval_id(approval_id, outcome.clone());
+        }
+        Ok(true)
+    }
+
+    async fn clear_approval_card(
+        &self,
+        message: TelegramMessageHandle,
+        outcome: &ToolPermissionOutcome,
+    ) -> Result<(), TelegramPollingError> {
+        let target = TelegramMessageTarget::chat(message.chat_id);
+        if self
+            .delivery
+            .delete_message(target, message.message_id)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        self.delivery
+            .edit_text(
+                target,
+                message.message_id,
+                &self.catalog.approval_resolved(outcome),
+                Some(TelegramInlineKeyboardMarkup::empty()),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))
     }
 
     async fn continue_active_session(
@@ -1213,7 +1325,7 @@ impl BridgeUpdateHandler {
         let selection = {
             let state = self.display_states.lock().await.get(&key).cloned();
             match state {
-                Some(state) => state.lock().await.resolve_approval_callback(&data),
+                Some(state) => state.lock().await.lookup_approval_callback(&data),
                 None => None,
             }
         };
@@ -1230,15 +1342,10 @@ impl BridgeUpdateHandler {
             .apply(&self.bridge, callback.from.id, self.catalog)
             .await
             .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
-        self.delivery
-            .edit_text(
-                TelegramMessageTarget::chat(target.message.chat_id),
-                target.message.message_id,
-                &self.catalog.approval_resolved(&outcome),
-                Some(TelegramInlineKeyboardMarkup::empty()),
-            )
-            .await
-            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        self.clear_approval_card(target.message, &outcome).await?;
+        if let Some(state) = self.display_states.lock().await.get(&key).cloned() {
+            let _ = state.lock().await.resolve_approval_callback(&data);
+        }
         self.api
             .answer_callback_query(&callback.id, Some(self.catalog.callback_recorded()))
             .await
@@ -1567,6 +1674,47 @@ impl BridgeUpdateHandler {
 
 fn command_key(command: &TelegramCommand) -> TelegramSessionKey {
     TelegramSessionKey::new(command.context.chat_id, command.context.thread_id)
+}
+
+fn telegram_approver(context: &noloong_agent_telegram::input::TelegramInboundContext) -> String {
+    context
+        .user_id
+        .map(|user_id| format!("telegram:{user_id}"))
+        .unwrap_or_else(|| format!("telegram:chat:{}", context.chat_id))
+}
+
+fn telegram_approval_decision(
+    outcome: ToolPermissionOutcome,
+    reason: &str,
+    approver: String,
+) -> noloong_agent_core::ToolPermissionDecision {
+    let metadata = serde_json::Value::Object(Default::default());
+    match outcome {
+        ToolPermissionOutcome::Allow => allow_decision(reason, approver, metadata),
+        ToolPermissionOutcome::Deny => deny_decision(reason, approver, metadata),
+    }
+}
+
+fn select_approval_id(
+    approvals: &BTreeMap<String, ToolApprovalRequest>,
+    selector: &str,
+) -> Option<String> {
+    if approvals.is_empty() {
+        return None;
+    }
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return (approvals.len() == 1).then(|| approvals.keys().next().cloned())?;
+    }
+    if let Ok(index) = selector.parse::<usize>() {
+        return index
+            .checked_sub(1)
+            .and_then(|index| approvals.keys().nth(index))
+            .cloned();
+    }
+    approvals
+        .contains_key(selector)
+        .then(|| selector.to_owned())
 }
 
 enum ProcessCommandOperation {
@@ -2114,8 +2262,9 @@ mod tests {
         queue::{TelegramQueueKind, TelegramQueuedMessage, TelegramQueuedMessageIntent},
         session::{TelegramSessionActionStore, telegram_session_metadata},
         telegram_api::{
-            TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
-            TelegramSendDocumentRequest, TelegramSendMessageRequest, TelegramSetMyCommandsRequest,
+            TelegramApi, TelegramApiError, TelegramDeleteMessageRequest,
+            TelegramEditMessageTextRequest, TelegramMessageHandle, TelegramSendDocumentRequest,
+            TelegramSendMessageRequest, TelegramSetMyCommandsRequest,
         },
     };
     use serde_json::{Value, json};
@@ -2435,7 +2584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telegram_callback_resolves_approval_and_removes_buttons() {
+    async fn telegram_callback_resolves_approval_and_deletes_card() {
         let fixture = TelegramCallbackFixture::new().await;
 
         fixture.handle_callback("cb-1", 621).await.unwrap();
@@ -2446,12 +2595,8 @@ mod tests {
             fixture.api.answered_texts(),
             vec![Some("Recorded".into()), Some("Approval expired".into())]
         );
-        assert_eq!(
-            fixture.api.edited_reply_markup(),
-            vec![Some(
-                noloong_agent_telegram::telegram_api::TelegramInlineKeyboardMarkup::empty()
-            )]
-        );
+        assert_eq!(fixture.api.deleted_message_ids(), vec![10]);
+        assert!(fixture.api.edited_reply_markup().is_empty());
     }
 
     #[tokio::test]
@@ -2497,6 +2642,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telegram_approve_command_resolves_only_pending_approval() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture.interaction.set_approval_list(BTreeMap::from([(
+            "approval-1".into(),
+            approval_request("approval-1"),
+        )]));
+
+        fixture
+            .handler
+            .handle_command(telegram_command(22, "approve"))
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        let (_, params) = calls
+            .iter()
+            .find(|(method, _)| method == "approval/resolve")
+            .unwrap();
+        assert_eq!(params["approvalId"], "approval-1");
+        assert_eq!(params["decision"]["outcome"], "allow");
+        assert_eq!(fixture.api.deleted_message_ids(), vec![10]);
+        assert!(fixture.api.edited_texts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn telegram_deny_command_resolves_selected_pending_approval() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture.interaction.set_approval_list(BTreeMap::from([
+            ("approval-1".into(), approval_request("approval-1")),
+            ("approval-2".into(), approval_request("approval-2")),
+        ]));
+
+        fixture
+            .handler
+            .handle_command(telegram_command_with_args(23, "deny", "2"))
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        let (_, params) = calls
+            .iter()
+            .find(|(method, _)| method == "approval/resolve")
+            .unwrap();
+        assert_eq!(params["approvalId"], "approval-2");
+        assert_eq!(params["decision"]["outcome"], "deny");
+        assert_eq!(
+            fixture.api.sent_texts().last().unwrap(),
+            "Approval resolved: deny"
+        );
+    }
+
+    #[tokio::test]
     async fn telegram_registers_command_menu_payload() {
         let api = Arc::new(FakeTelegramApi::default());
 
@@ -2510,7 +2709,7 @@ mod tests {
         assert!(requests[0].commands.iter().any(|command| {
             command.command == "approvals" && command.description == "列出待处理审批"
         }));
-        assert_eq!(requests[0].commands.len(), 16);
+        assert_eq!(requests[0].commands.len(), 18);
     }
 
     #[tokio::test]
@@ -3842,6 +4041,7 @@ mod tests {
     struct FakeTelegramApi {
         sent: StdMutex<Vec<TelegramSendMessageRequest>>,
         edited: StdMutex<Vec<TelegramEditMessageTextRequest>>,
+        deleted: StdMutex<Vec<TelegramDeleteMessageRequest>>,
         documents: StdMutex<Vec<TelegramSendDocumentRequest>>,
         answered: StdMutex<Vec<(String, Option<String>)>>,
         command_requests: StdMutex<Vec<TelegramSetMyCommandsRequest>>,
@@ -3921,6 +4121,15 @@ mod tests {
                 .clone()
         }
 
+        fn deleted_message_ids(&self) -> Vec<i64> {
+            self.deleted
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.message_id)
+                .collect()
+        }
+
         fn command_requests(&self) -> Vec<TelegramSetMyCommandsRequest> {
             self.command_requests.lock().unwrap().clone()
         }
@@ -3967,6 +4176,16 @@ mod tests {
                     chat_id: request.chat_id,
                     message_id: request.message_id,
                 })
+            })
+        }
+
+        fn delete_message<'a>(
+            &'a self,
+            request: TelegramDeleteMessageRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.deleted.lock().unwrap().push(request);
+                Ok(())
             })
         }
 
