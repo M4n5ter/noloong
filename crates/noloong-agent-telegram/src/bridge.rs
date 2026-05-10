@@ -12,7 +12,8 @@ use noloong_agent::interaction::{
 };
 use noloong_agent::{ManifestPatch, SystemPromptAddition};
 use noloong_agent_core::{
-    AgentMessage, ContentBlock, MediaBlock, MessageRole, ToolPermissionDecision,
+    AgentMessage, ContentBlock, MediaBlock, MessageRole, ToolApprovalRequest,
+    ToolPermissionDecision,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +29,7 @@ use tokio::sync::broadcast;
 const METHOD_INITIALIZE: &str = "initialize";
 const METHOD_AGENT_PROMPT: &str = "agent/prompt";
 const METHOD_AGENT_FOLLOW_UP: &str = "agent/follow_up";
+const METHOD_APPROVAL_LIST: &str = "approval/list";
 const METHOD_APPROVAL_RESOLVE: &str = "approval/resolve";
 const METHOD_SESSION_CREATE: &str = "session/create";
 const METHOD_SESSION_GET: &str = "session/get";
@@ -290,6 +292,14 @@ impl TelegramBridge {
         .await
     }
 
+    pub async fn list_approvals(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<BTreeMap<String, ToolApprovalRequest>> {
+        self.request_as(METHOD_APPROVAL_LIST, json!({ "sessionId": session_id }))
+            .await
+    }
+
     pub fn subscribe_interaction_notifications(
         &self,
     ) -> broadcast::Receiver<InteractionWsNotification> {
@@ -376,7 +386,7 @@ impl TelegramBridge {
             .ok_or(TelegramBridgeError::NoProfiles)
     }
 
-    fn session_id(&self, key: &TelegramSessionKey) -> Option<String> {
+    pub fn session_id(&self, key: &TelegramSessionKey) -> Option<String> {
         self.state
             .lock()
             .expect("telegram bridge state lock poisoned")

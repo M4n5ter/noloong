@@ -220,14 +220,15 @@
 **Description:** 将现有 tool status 和 approval button 打磨为可审计卡片：工具参数摘要、权限、reason、过期时间、审批后编辑原卡片，并支持 pending approval 列表。
 
 **Acceptance criteria:**
-- [ ] approval card 显示 tool、参数摘要、permissions、reason、expires_at。
-- [ ] allow/deny 后编辑原消息并移除按钮。
-- [ ] callback 非授权用户只收到 callback toast，不改变审批状态。
-- [ ] `/approvals` 可列出并重新渲染当前 pending approvals。
+- [x] approval card 显示 tool、参数摘要、permissions、reason、expires_at。
+- [x] allow/deny 后编辑原消息并移除按钮。
+- [x] callback 非授权用户只收到 callback toast，不改变审批状态。
+- [x] `/approvals` 可列出并重新渲染当前 pending approvals。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram approval display`
-- [ ] fake callback 覆盖 allow、deny、expired、unauthorized。
+- [x] `cargo test -p noloong-agent-telegram approval`
+- [x] `cargo test -p noloong-agent-telegram display`
+- [x] fake callback 覆盖 allow、deny、expired、unauthorized。
 
 **Dependencies:** Task 8
 

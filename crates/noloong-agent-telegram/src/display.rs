@@ -130,12 +130,9 @@ pub async fn deliver_display_event(
             else {
                 return Ok(());
             };
-            state.approvals.insert_target(
-                &buttons,
-                notification.session_id,
-                approval.approval_id,
-                sent,
-            );
+            state
+                .approvals
+                .insert_target(&buttons, notification.session_id, &approval, sent);
         }
         DisplayEvent::ToolStarted { tool_name, .. } if show_tool_status => {
             delivery

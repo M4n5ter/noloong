@@ -32,12 +32,13 @@ use noloong_agent::{
 };
 use noloong_agent_telegram::{
     access::TelegramAccessPolicy,
+    approval::render_pending_approval_requests,
     bridge::TelegramBridge,
     config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
     i18n::TelegramUiCatalog,
-    input::{TelegramInboundMessage, TelegramInboundUpdate},
+    input::{TelegramCommand, TelegramInboundMessage, TelegramInboundUpdate},
     media::TelegramAttachmentResolver,
     network::{
         TelegramNetworkConfig, TelegramNetworkResolutionMode, build_telegram_http_client,
@@ -48,7 +49,7 @@ use noloong_agent_telegram::{
         TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
     session::TelegramSessionKey,
-    telegram_api::{ReqwestTelegramApi, TelegramApi},
+    telegram_api::{ReqwestTelegramApi, TelegramApi, TelegramInlineKeyboardMarkup},
 };
 use std::{
     collections::BTreeMap,
@@ -422,7 +423,7 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
                         }
                     }
                     TelegramInboundUpdate::Command(command) => {
-                        log::debug!("telegram command received: /{}", command.name);
+                        self.handle_command(command).await?;
                     }
                 }
             }
@@ -435,6 +436,52 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
 }
 
 impl BridgeUpdateHandler {
+    async fn handle_command(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        if !self
+            .bridge
+            .access()
+            .allows(command.context.chat_id, command.context.user_id)
+        {
+            return Err(TelegramPollingError::Handler(
+                noloong_agent_telegram::bridge::TelegramBridgeError::Unauthorized.to_string(),
+            ));
+        }
+        match command.name.as_str() {
+            "approvals" => self.send_pending_approvals(command).await,
+            _ => {
+                log::debug!("telegram command received: /{}", command.name);
+                Ok(())
+            }
+        }
+    }
+
+    async fn send_pending_approvals(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        let key = TelegramSessionKey::new(command.context.chat_id, command.context.thread_id);
+        let text = match self.bridge.session_id(&key) {
+            Some(session_id) => {
+                let approvals = self
+                    .bridge
+                    .list_approvals(&session_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                render_pending_approval_requests(&approvals, self.catalog)
+            }
+            None => self.catalog.pending_approvals_empty().into(),
+        };
+        self.delivery
+            .send_text(
+                TelegramMessageTarget::new(command.context.chat_id, command.context.thread_id),
+                &text,
+                None,
+            )
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        Ok(())
+    }
+
     async fn handle_media_message(
         &self,
         message: TelegramInboundMessage,
@@ -508,7 +555,7 @@ impl BridgeUpdateHandler {
                 TelegramMessageTarget::chat(target.message.chat_id),
                 target.message.message_id,
                 &self.catalog.approval_resolved(&outcome),
-                None,
+                Some(TelegramInlineKeyboardMarkup::empty()),
             )
             .await
             .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
@@ -985,19 +1032,47 @@ enum CliError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand, CliError,
-        ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
+        BridgeUpdateHandler, BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand,
+        CliError, ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
         run_profile_config_schema, telegram_config_from_values, validate_interaction_bind,
     };
     use crate::schema::profile_config_schema_json;
     use crate::test_support::{remove_temp_file, write_temp_file};
     use clap::Parser;
-    use noloong_agent::Locale;
-    use noloong_agent_telegram::{
-        input::TelegramInboundUpdate,
-        polling::{TelegramChat, TelegramMessage, TelegramUser},
+    use noloong_agent::{
+        AgentManifest, Locale,
+        interaction::{
+            InteractionSessionDescriptor, InteractionSessionStatus, InteractionWsNotification,
+        },
     };
-    use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
+    use noloong_agent_core::{AgentState, ToolApprovalRequest, ToolApprovalRequestSpec, ToolCall};
+    use noloong_agent_telegram::{
+        access::{TelegramChatKind, TelegramTextInput},
+        bridge::{TelegramInteractionClient, TelegramInteractionFuture},
+        config::TelegramFilePolicy,
+        delivery::{TelegramDelivery, TelegramMessageTarget},
+        display::{TelegramDisplayState, deliver_display_event},
+        i18n::TelegramUiCatalog,
+        input::{TelegramCommand, TelegramInboundContext, TelegramInboundUpdate},
+        media::TelegramAttachmentResolver,
+        polling::{
+            TelegramCallbackQuery, TelegramChat, TelegramMessage, TelegramUpdate, TelegramUser,
+        },
+        telegram_api::{
+            TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
+            TelegramSendMessageRequest,
+        },
+    };
+    use serde_json::{Value, json};
+    use std::{
+        collections::BTreeMap,
+        future::Future,
+        net::SocketAddr,
+        path::PathBuf,
+        pin::Pin,
+        sync::{Arc, Mutex as StdMutex},
+    };
+    use tokio::sync::{Mutex, broadcast};
 
     #[test]
     fn cli_serve_rejects_public_bind_without_token() {
@@ -1302,5 +1377,409 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.network.proxy_url, None);
+    }
+
+    #[tokio::test]
+    async fn telegram_callback_resolves_approval_and_removes_buttons() {
+        let fixture = TelegramCallbackFixture::new().await;
+
+        fixture.handle_callback("cb-1", 621).await.unwrap();
+        fixture.handle_callback("cb-2", 621).await.unwrap();
+
+        assert_eq!(fixture.interaction.methods(), vec!["approval/resolve"]);
+        assert_eq!(
+            fixture.api.answered_texts(),
+            vec![Some("Recorded".into()), Some("Approval expired".into())]
+        );
+        assert_eq!(
+            fixture.api.edited_reply_markup(),
+            vec![Some(
+                noloong_agent_telegram::telegram_api::TelegramInlineKeyboardMarkup::empty()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_callback_rejects_unauthorized_without_consuming_approval() {
+        let fixture = TelegramCallbackFixture::new().await;
+
+        fixture.handle_callback("cb-1", 999).await.unwrap();
+        fixture.handle_callback("cb-2", 621).await.unwrap();
+
+        assert_eq!(fixture.interaction.methods(), vec!["approval/resolve"]);
+        assert_eq!(
+            fixture.api.answered_texts(),
+            vec![Some("Not allowed".into()), Some("Recorded".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_approvals_command_lists_runtime_approvals() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture.interaction.set_approval_list(BTreeMap::from([(
+            "approval-1".into(),
+            approval_request("approval-1"),
+        )]));
+
+        fixture
+            .handler
+            .handle_command(approvals_command())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture.api.sent_texts().last().unwrap(),
+            "Pending approvals: 1\n1\\. \\`host\\_exec\\` \\(approval\\-1\\)"
+        );
+        assert!(
+            fixture
+                .interaction
+                .methods()
+                .into_iter()
+                .any(|method| method == "approval/list")
+        );
+    }
+
+    struct TelegramCallbackFixture {
+        handler: BridgeUpdateHandler,
+        api: Arc<FakeTelegramApi>,
+        interaction: Arc<FakeInteraction>,
+        callback_data: String,
+    }
+
+    impl TelegramCallbackFixture {
+        async fn new() -> Self {
+            let api = Arc::new(FakeTelegramApi::default());
+            let interaction = Arc::new(FakeInteraction::default());
+            let bridge = Arc::new(
+                noloong_agent_telegram::bridge::TelegramBridge::new(
+                    telegram_test_config(),
+                    interaction.clone(),
+                )
+                .unwrap(),
+            );
+            let delivery = TelegramDelivery::new(api.clone(), 3900);
+            let display_states = Arc::new(Mutex::new(BTreeMap::new()));
+            let key = noloong_agent_telegram::session::TelegramSessionKey::new(42, None);
+            let state = Arc::new(Mutex::new(TelegramDisplayState::default()));
+            display_states.lock().await.insert(key, state.clone());
+            {
+                let mut state = state.lock().await;
+                deliver_display_event(
+                    &mut state,
+                    &delivery,
+                    TelegramMessageTarget::chat(42),
+                    approval_notification(),
+                    true,
+                    std::time::Duration::ZERO,
+                    TelegramUiCatalog::new(Locale::En),
+                )
+                .await
+                .unwrap();
+            }
+            let callback_data = api.sent_callback_data(0, 0);
+            let handler = BridgeUpdateHandler {
+                bridge,
+                api: api.clone(),
+                delivery,
+                media_resolver: TelegramAttachmentResolver::new(
+                    api.clone(),
+                    TelegramFilePolicy::default(),
+                ),
+                display_states,
+                catalog: TelegramUiCatalog::new(Locale::En),
+                bot_username: None,
+            };
+
+            Self {
+                handler,
+                api,
+                interaction,
+                callback_data,
+            }
+        }
+
+        async fn handle_callback(
+            &self,
+            id: &str,
+            user_id: u64,
+        ) -> Result<(), noloong_agent_telegram::polling::TelegramPollingError> {
+            self.handler
+                .handle_callback(callback_query(id, user_id, &self.callback_data))
+                .await
+        }
+
+        async fn establish_session(&self) {
+            self.handler
+                .bridge
+                .handle_text_message(telegram_text_input("hello"), None)
+                .await
+                .unwrap();
+        }
+    }
+
+    fn telegram_test_config() -> noloong_agent_telegram::config::TelegramBridgeConfig {
+        telegram_config_from_values(
+            &TelegramBridgeOptions {
+                interaction_url: Some("ws://127.0.0.1:8787/jsonrpc/ws".into()),
+                bot_token: Some("token".into()),
+                allowed_users: Some("621".into()),
+                profile_id: Some("profile-1".into()),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap()
+    }
+
+    fn approval_notification() -> noloong_agent_telegram::bridge::InteractionDisplayNotification {
+        noloong_agent_telegram::bridge::InteractionDisplayNotification {
+            session_id: "session-1".into(),
+            subscription_id: "subscription-1".into(),
+            event: noloong_agent::interaction::DisplayEvent::ApprovalRequested {
+                approval: approval_request("approval-1"),
+            },
+        }
+    }
+
+    fn approval_request(approval_id: &str) -> ToolApprovalRequest {
+        ToolApprovalRequest {
+            approval_id: approval_id.into(),
+            tool_call: ToolCall {
+                id: "tool-1".into(),
+                name: "host_exec".into(),
+                arguments: json!({"cmd": "ls"}),
+            },
+            permissions: Vec::new(),
+            hook_id: None,
+            request: ToolApprovalRequestSpec {
+                prompt: Some("Run command?".into()),
+                reason: None,
+                expires_at_ms: None,
+                metadata: Value::Object(Default::default()),
+            },
+        }
+    }
+
+    fn approvals_command() -> TelegramCommand {
+        TelegramCommand {
+            context: telegram_inbound_context(3),
+            name: "approvals".into(),
+            bot_username: None,
+            args: String::new(),
+            raw_text: "/approvals".into(),
+        }
+    }
+
+    fn telegram_text_input(text: &str) -> TelegramTextInput {
+        TelegramTextInput {
+            chat_id: 42,
+            thread_id: None,
+            chat_kind: TelegramChatKind::Private,
+            user_id: Some(621),
+            message_id: 2,
+            text: text.into(),
+            is_reply_to_bot: false,
+        }
+    }
+
+    fn telegram_inbound_context(message_id: i64) -> TelegramInboundContext {
+        TelegramInboundContext {
+            chat_id: 42,
+            thread_id: None,
+            chat_kind: TelegramChatKind::Private,
+            user_id: Some(621),
+            message_id,
+            is_reply_to_bot: false,
+        }
+    }
+
+    fn callback_query(id: &str, user_id: u64, data: &str) -> TelegramCallbackQuery {
+        TelegramCallbackQuery {
+            id: id.into(),
+            from: TelegramUser {
+                id: user_id,
+                username: Some("alice".into()),
+            },
+            message: Some(TelegramMessage {
+                message_id: 10,
+                message_thread_id: None,
+                chat: TelegramChat {
+                    id: 42,
+                    kind: "private".into(),
+                },
+                from: None,
+                text: None,
+                caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
+                photo: Vec::new(),
+                document: None,
+                audio: None,
+                voice: None,
+                video: None,
+                reply_to_message: None,
+            }),
+            data: Some(data.into()),
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeInteraction {
+        methods: StdMutex<Vec<String>>,
+        approval_list: StdMutex<BTreeMap<String, ToolApprovalRequest>>,
+    }
+
+    impl FakeInteraction {
+        fn methods(&self) -> Vec<String> {
+            self.methods.lock().unwrap().clone()
+        }
+
+        fn set_approval_list(&self, approvals: BTreeMap<String, ToolApprovalRequest>) {
+            *self.approval_list.lock().unwrap() = approvals;
+        }
+    }
+
+    impl TelegramInteractionClient for FakeInteraction {
+        fn request_value<'a>(
+            &'a self,
+            method: &'a str,
+            _params: Value,
+        ) -> TelegramInteractionFuture<'a, Value> {
+            Box::pin(async move {
+                self.methods.lock().unwrap().push(method.into());
+                match method {
+                    "approval/list" => {
+                        let approvals = self.approval_list.lock().unwrap().clone();
+                        Ok(serde_json::to_value(approvals).unwrap())
+                    }
+                    "display/subscribe" => Ok(json!({"subscriptionId": "subscription-1"})),
+                    _ => Ok(serde_json::to_value(session_descriptor()).unwrap()),
+                }
+            })
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<InteractionWsNotification> {
+            let (_sender, receiver) = broadcast::channel(1);
+            receiver
+        }
+    }
+
+    fn session_descriptor() -> InteractionSessionDescriptor {
+        InteractionSessionDescriptor {
+            session_id: "session-1".into(),
+            profile_id: "profile-1".into(),
+            parent_session_id: None,
+            role: None,
+            status: InteractionSessionStatus::Idle,
+            manifest: AgentManifest::default(),
+            state: AgentState::default(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeTelegramApi {
+        sent: StdMutex<Vec<TelegramSendMessageRequest>>,
+        edited: StdMutex<Vec<TelegramEditMessageTextRequest>>,
+        answered: StdMutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl FakeTelegramApi {
+        fn sent_callback_data(&self, row: usize, column: usize) -> String {
+            self.sent.lock().unwrap()[0]
+                .reply_markup
+                .as_ref()
+                .unwrap()
+                .inline_keyboard[row][column]
+                .callback_data
+                .clone()
+        }
+
+        fn sent_texts(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.text.clone())
+                .collect()
+        }
+
+        fn answered_texts(&self) -> Vec<Option<String>> {
+            self.answered
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect()
+        }
+
+        fn edited_reply_markup(
+            &self,
+        ) -> Vec<Option<noloong_agent_telegram::telegram_api::TelegramInlineKeyboardMarkup>>
+        {
+            self.edited
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.reply_markup.clone())
+                .collect()
+        }
+    }
+
+    impl TelegramApi for FakeTelegramApi {
+        fn get_updates<'a>(
+            &'a self,
+            _offset: Option<i64>,
+            _timeout_seconds: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<TelegramUpdate>, TelegramApiError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn send_message<'a>(
+            &'a self,
+            request: TelegramSendMessageRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TelegramMessageHandle, TelegramApiError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                self.sent.lock().unwrap().push(request.clone());
+                Ok(TelegramMessageHandle {
+                    chat_id: request.chat_id,
+                    message_id: 10,
+                })
+            })
+        }
+
+        fn edit_message_text<'a>(
+            &'a self,
+            request: TelegramEditMessageTextRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TelegramMessageHandle, TelegramApiError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                self.edited.lock().unwrap().push(request.clone());
+                Ok(TelegramMessageHandle {
+                    chat_id: request.chat_id,
+                    message_id: request.message_id,
+                })
+            })
+        }
+
+        fn answer_callback_query<'a>(
+            &'a self,
+            callback_query_id: &'a str,
+            text: Option<&'a str>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.answered
+                    .lock()
+                    .unwrap()
+                    .push((callback_query_id.into(), text.map(str::to_owned)));
+                Ok(())
+            })
+        }
     }
 }

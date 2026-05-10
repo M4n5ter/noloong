@@ -688,6 +688,14 @@ pub struct TelegramInlineKeyboardMarkup {
     pub inline_keyboard: Vec<Vec<TelegramInlineKeyboardButton>>,
 }
 
+impl TelegramInlineKeyboardMarkup {
+    pub fn empty() -> Self {
+        Self {
+            inline_keyboard: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TelegramInlineKeyboardButton {

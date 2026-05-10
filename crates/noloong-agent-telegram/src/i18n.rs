@@ -51,10 +51,52 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn approval_arguments(self, arguments: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Arguments: {arguments}"),
+            Locale::Zh => format!("参数：{arguments}"),
+        }
+    }
+
     pub fn approval_permissions(self, permissions: &str) -> String {
         match self.locale {
             Locale::En => format!("Permissions: {permissions}"),
             Locale::Zh => format!("权限：{permissions}"),
+        }
+    }
+
+    pub fn approval_expires_at(self, expires_at_ms: u64) -> String {
+        match self.locale {
+            Locale::En => format!("Expires at: {expires_at_ms} ms"),
+            Locale::Zh => format!("过期时间：{expires_at_ms} 毫秒"),
+        }
+    }
+
+    pub fn pending_approvals_title(self, count: usize) -> String {
+        match self.locale {
+            Locale::En => format!("Pending approvals: {count}"),
+            Locale::Zh => format!("待处理审批：{count}"),
+        }
+    }
+
+    pub fn pending_approvals_empty(self) -> &'static str {
+        match self.locale {
+            Locale::En => "No pending approvals",
+            Locale::Zh => "没有待处理审批",
+        }
+    }
+
+    pub fn pending_approval_item(self, index: usize, tool_name: &str, approval_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("{index}. `{tool_name}` ({approval_id})"),
+            Locale::Zh => format!("{index}. `{tool_name}`（{approval_id}）"),
+        }
+    }
+
+    pub fn pending_approvals_more(self, remaining: usize) -> String {
+        match self.locale {
+            Locale::En => format!("... and {remaining} more"),
+            Locale::Zh => format!("... 另有 {remaining} 个"),
         }
     }
 
