@@ -637,7 +637,7 @@ pub struct TelegramSendChatActionRequest {
     pub action: TelegramChatAction,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum TelegramChatAction {
     Typing,

@@ -1,5 +1,6 @@
 use noloong_agent::Locale;
 use noloong_agent_core::ToolPermissionOutcome;
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TelegramUiCatalog {
@@ -99,10 +100,32 @@ impl TelegramUiCatalog {
         }
     }
 
-    pub fn run_failed(self, error: &str) -> String {
+    pub fn run_failed(self, run_id: &str, error: &str) -> String {
         match self.locale {
-            Locale::En => format!("Run failed: {error}"),
-            Locale::Zh => format!("运行失败：{error}"),
+            Locale::En => format!("Run failed\nRun: {run_id}\nError: {error}"),
+            Locale::Zh => format!("运行失败\n运行：{run_id}\n错误：{error}"),
+        }
+    }
+
+    pub fn run_started(self, run_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Run started\nRun: {run_id}"),
+            Locale::Zh => format!("运行已开始\n运行：{run_id}"),
+        }
+    }
+
+    pub fn run_completed(self, run_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Run completed\nRun: {run_id}"),
+            Locale::Zh => format!("运行已完成\n运行：{run_id}"),
+        }
+    }
+
+    pub fn run_paused(self, run_id: &str, reason: &Value) -> String {
+        let reason = self.run_pause_reason(reason);
+        match self.locale {
+            Locale::En => format!("Run paused\nRun: {run_id}\nReason: {reason}"),
+            Locale::Zh => format!("运行已暂停\n运行：{run_id}\n原因：{reason}"),
         }
     }
 
@@ -119,6 +142,31 @@ impl TelegramUiCatalog {
             (Locale::En, ToolPermissionOutcome::Deny) => "deny",
             (Locale::Zh, ToolPermissionOutcome::Allow) => "允许",
             (Locale::Zh, ToolPermissionOutcome::Deny) => "拒绝",
+        }
+    }
+
+    fn run_pause_reason(self, reason: &Value) -> String {
+        if let Some(reason) = reason.as_str() {
+            return reason.into();
+        }
+        match reason.get("type").and_then(Value::as_str) {
+            Some("tool_approval") => match self.locale {
+                Locale::En => "tool approval required".into(),
+                Locale::Zh => "需要工具审批".into(),
+            },
+            Some(kind) => match self.locale {
+                Locale::En => format!("paused by {kind}"),
+                Locale::Zh => format!("由 {kind} 暂停"),
+            },
+            None if reason.is_null() => match self.locale {
+                Locale::En => "unknown",
+                Locale::Zh => "未知",
+            }
+            .into(),
+            None => match self.locale {
+                Locale::En => "runtime requested a pause".into(),
+                Locale::Zh => "运行时请求暂停".into(),
+            },
         }
     }
 }

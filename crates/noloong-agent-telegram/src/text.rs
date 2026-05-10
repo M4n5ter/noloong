@@ -34,6 +34,34 @@ pub fn split_telegram_text(text: &str, max_units: usize) -> Vec<String> {
     messages
 }
 
+pub fn split_telegram_text_with_continuation(text: &str, max_units: usize) -> Vec<String> {
+    let max_units = max_units.max(1);
+    let mut body_limit = max_units;
+    let mut chunks = split_telegram_text(text, body_limit);
+    if chunks.len() <= 1 {
+        return chunks;
+    }
+
+    for _ in 0..8 {
+        let marker = continuation_marker(chunks.len());
+        let next_body_limit = max_units
+            .saturating_sub(telegram_utf16_units(&marker))
+            .max(1);
+        if next_body_limit == body_limit {
+            break;
+        }
+        body_limit = next_body_limit;
+        chunks = split_telegram_text(text, body_limit);
+    }
+
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| format!("[{}/{}]\n{chunk}", index + 1, total))
+        .collect()
+}
+
 fn push_line_with_limit(
     line: &str,
     line_units: usize,
@@ -59,9 +87,13 @@ fn push_line_with_limit(
     }
 }
 
+fn continuation_marker(total: usize) -> String {
+    format!("[{total}/{total}]\n")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::split_telegram_text;
+    use super::{split_telegram_text, split_telegram_text_with_continuation, telegram_utf16_units};
 
     #[test]
     fn split_keeps_head_and_tail_chunks() {
@@ -79,5 +111,29 @@ mod tests {
     fn split_uses_utf16_limit() {
         let chunks = split_telegram_text("a😀b", 3);
         assert_eq!(chunks, vec!["a😀", "b"]);
+    }
+
+    #[test]
+    fn split_with_continuation_marks_all_chunks() {
+        let chunks = split_telegram_text_with_continuation("abcdefghij", 8);
+
+        assert_eq!(
+            chunks,
+            vec![
+                "[1/5]\nab",
+                "[2/5]\ncd",
+                "[3/5]\nef",
+                "[4/5]\ngh",
+                "[5/5]\nij"
+            ]
+        );
+        assert!(chunks.iter().all(|chunk| telegram_utf16_units(chunk) <= 8));
+    }
+
+    #[test]
+    fn split_with_continuation_keeps_single_chunk_unmarked() {
+        let chunks = split_telegram_text_with_continuation("abc", 9);
+
+        assert_eq!(chunks, vec!["abc"]);
     }
 }

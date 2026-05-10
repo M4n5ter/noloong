@@ -1,13 +1,13 @@
 use crate::{
     render::{render_agent_message_text, render_content_block_text, render_markdown_v2},
     telegram_api::{
-        TelegramApi, TelegramApiError, TelegramEditMessageTextRequest,
+        TelegramApi, TelegramApiError, TelegramChatAction, TelegramEditMessageTextRequest,
         TelegramInlineKeyboardMarkup, TelegramInputFile, TelegramMediaMessageOptions,
         TelegramMessageHandle, TelegramParseMode, TelegramSendAudioRequest,
-        TelegramSendDocumentRequest, TelegramSendMessageRequest, TelegramSendPhotoRequest,
-        TelegramSendVideoRequest, TelegramSendVoiceRequest,
+        TelegramSendChatActionRequest, TelegramSendDocumentRequest, TelegramSendMessageRequest,
+        TelegramSendPhotoRequest, TelegramSendVideoRequest, TelegramSendVoiceRequest,
     },
-    text::{split_telegram_text, telegram_utf16_units},
+    text::{split_telegram_text_with_continuation, telegram_utf16_units},
 };
 use base64::{Engine as _, engine::general_purpose};
 use noloong_agent_core::{
@@ -69,6 +69,8 @@ impl TelegramDelivery {
                 .await;
         }
 
+        self.send_media_upload_action_for_message(target, message)
+            .await;
         let mut sent = Vec::new();
         let mut pending_text = String::new();
         for block in &message.content {
@@ -137,7 +139,7 @@ impl TelegramDelivery {
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
-        let chunks = split_telegram_text(text, self.max_message_units);
+        let chunks = split_telegram_text_with_continuation(text, self.max_message_units);
         let mut sent = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             sent.push(
@@ -146,6 +148,29 @@ impl TelegramDelivery {
             );
         }
         Ok(sent)
+    }
+
+    pub async fn send_chat_action(
+        &self,
+        target: TelegramMessageTarget,
+        action: TelegramChatAction,
+    ) -> TelegramDeliveryResult<()> {
+        self.api
+            .send_chat_action(TelegramSendChatActionRequest {
+                chat_id: target.chat_id,
+                message_thread_id: target.message_thread_id,
+                action,
+            })
+            .await
+            .map_err(TelegramDeliveryError::Api)
+    }
+
+    pub async fn send_chat_action_best_effort(
+        &self,
+        target: TelegramMessageTarget,
+        action: TelegramChatAction,
+    ) {
+        let _ = self.send_chat_action(target, action).await;
     }
 
     pub async fn edit_text(
@@ -241,6 +266,8 @@ impl TelegramDelivery {
         target: TelegramMessageTarget,
         message: &AgentMessage,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
+        self.send_media_upload_action_for_message(target, message)
+            .await;
         let mut sent = Vec::new();
         for block in &message.content {
             let ContentBlock::Media { media } = block else {
@@ -249,6 +276,24 @@ impl TelegramDelivery {
             sent.push(self.send_media_or_fallback(target, media, None).await?);
         }
         Ok(sent)
+    }
+
+    async fn send_media_upload_action_for_message(
+        &self,
+        target: TelegramMessageTarget,
+        message: &AgentMessage,
+    ) {
+        let Some(action) = message.content.iter().find_map(|block| match block {
+            ContentBlock::Media { media }
+                if !matches!(media.source, MediaSource::Provider { .. }) =>
+            {
+                Some(TelegramNativeMediaKind::for_media_kind(&media.kind).action())
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.send_chat_action_best_effort(target, action).await;
     }
 
     async fn send_media_native(
@@ -264,8 +309,8 @@ impl TelegramDelivery {
             parse_mode: None,
             reply_markup: None,
         };
-        match media.kind {
-            MediaKind::Image => {
+        match TelegramNativeMediaKind::for_media_kind(&media.kind) {
+            TelegramNativeMediaKind::Photo => {
                 self.api
                     .send_photo(TelegramSendPhotoRequest {
                         chat_id: target.chat_id,
@@ -274,7 +319,7 @@ impl TelegramDelivery {
                     })
                     .await
             }
-            MediaKind::Audio => {
+            TelegramNativeMediaKind::Audio => {
                 self.api
                     .send_audio(TelegramSendAudioRequest {
                         chat_id: target.chat_id,
@@ -283,7 +328,7 @@ impl TelegramDelivery {
                     })
                     .await
             }
-            MediaKind::Video => {
+            TelegramNativeMediaKind::Video => {
                 self.api
                     .send_video(TelegramSendVideoRequest {
                         chat_id: target.chat_id,
@@ -292,7 +337,7 @@ impl TelegramDelivery {
                     })
                     .await
             }
-            MediaKind::Custom(ref kind) if kind == "voice" => {
+            TelegramNativeMediaKind::Voice => {
                 self.api
                     .send_voice(TelegramSendVoiceRequest {
                         chat_id: target.chat_id,
@@ -301,7 +346,7 @@ impl TelegramDelivery {
                     })
                     .await
             }
-            MediaKind::File | MediaKind::Custom(_) => {
+            TelegramNativeMediaKind::Document => {
                 self.api
                     .send_document(TelegramSendDocumentRequest {
                         chat_id: target.chat_id,
@@ -349,6 +394,36 @@ pub enum TelegramFileUriError {
     },
     #[error("{0}")]
     NotFilePath(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TelegramNativeMediaKind {
+    Photo,
+    Audio,
+    Video,
+    Voice,
+    Document,
+}
+
+impl TelegramNativeMediaKind {
+    fn for_media_kind(kind: &MediaKind) -> Self {
+        match kind {
+            MediaKind::Image => Self::Photo,
+            MediaKind::Audio => Self::Audio,
+            MediaKind::Video => Self::Video,
+            MediaKind::Custom(kind) if kind == "voice" => Self::Voice,
+            MediaKind::File | MediaKind::Custom(_) => Self::Document,
+        }
+    }
+
+    fn action(self) -> TelegramChatAction {
+        match self {
+            Self::Photo => TelegramChatAction::UploadPhoto,
+            Self::Audio | Self::Document => TelegramChatAction::UploadDocument,
+            Self::Video => TelegramChatAction::UploadVideo,
+            Self::Voice => TelegramChatAction::UploadVoice,
+        }
+    }
 }
 
 fn agent_message_has_media(message: &AgentMessage) -> bool {
@@ -495,10 +570,10 @@ mod tests {
     use super::{TelegramDelivery, TelegramMessageTarget};
     use crate::{
         telegram_api::{
-            TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
-            TelegramSendAudioRequest, TelegramSendDocumentRequest, TelegramSendMessageRequest,
-            TelegramSendPhotoRequest, TelegramSendVideoRequest, TelegramSendVoiceRequest,
-            TelegramUpdate,
+            TelegramApi, TelegramApiError, TelegramChatAction, TelegramEditMessageTextRequest,
+            TelegramMessageHandle, TelegramSendAudioRequest, TelegramSendChatActionRequest,
+            TelegramSendDocumentRequest, TelegramSendMessageRequest, TelegramSendPhotoRequest,
+            TelegramSendVideoRequest, TelegramSendVoiceRequest, TelegramUpdate,
         },
         text::split_telegram_text,
     };
@@ -611,6 +686,10 @@ mod tests {
         assert_eq!(photo_calls.len(), 1);
         assert_eq!(photo_calls[0].options.message_thread_id, Some(9));
         assert_eq!(photo_calls[0].options.caption.as_deref(), Some("caption"));
+        assert_eq!(
+            api.chat_actions.lock().unwrap()[0].action,
+            TelegramChatAction::UploadPhoto
+        );
     }
 
     #[tokio::test]
@@ -710,6 +789,14 @@ mod tests {
         assert_eq!(video_calls[0].options.message_thread_id, Some(9));
         assert_eq!(voice_calls[0].options.message_thread_id, Some(9));
         assert_eq!(document_calls[0].options.message_thread_id, Some(9));
+        let actions = api.chat_actions.lock().unwrap().clone();
+        assert_eq!(
+            actions
+                .iter()
+                .map(|request| request.action.clone())
+                .collect::<Vec<_>>(),
+            vec![TelegramChatAction::UploadDocument]
+        );
     }
 
     #[tokio::test]
@@ -728,6 +815,7 @@ mod tests {
             .unwrap();
 
         assert!(api.photo_calls.lock().unwrap().is_empty());
+        assert!(api.chat_actions.lock().unwrap().is_empty());
         let sent_calls = api.sent_calls.lock().unwrap().clone();
         assert_eq!(sent_calls.len(), 1);
         assert!(sent_calls[0].text.contains("provider media"));
@@ -761,6 +849,7 @@ mod tests {
         audio_calls: Mutex<Vec<TelegramSendAudioRequest>>,
         video_calls: Mutex<Vec<TelegramSendVideoRequest>>,
         voice_calls: Mutex<Vec<TelegramSendVoiceRequest>>,
+        chat_actions: Mutex<Vec<TelegramSendChatActionRequest>>,
         mode: FakeMode,
     }
 
@@ -790,6 +879,7 @@ mod tests {
                 audio_calls: Mutex::new(Vec::new()),
                 video_calls: Mutex::new(Vec::new()),
                 voice_calls: Mutex::new(Vec::new()),
+                chat_actions: Mutex::new(Vec::new()),
                 mode,
             }
         }
@@ -868,6 +958,16 @@ mod tests {
             _text: Option<&'a str>,
         ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn send_chat_action<'a>(
+            &'a self,
+            request: TelegramSendChatActionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.chat_actions.lock().unwrap().push(request);
+                Ok(())
+            })
         }
 
         fn send_photo<'a>(

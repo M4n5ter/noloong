@@ -5,6 +5,7 @@ use crate::{
         TelegramDelivery, TelegramDeliveryResult, TelegramMessageTarget, TelegramPreviewMessage,
     },
     i18n::TelegramUiCatalog,
+    telegram_api::{TelegramChatAction, TelegramMessageHandle},
 };
 use noloong_agent::interaction::DisplayEvent;
 use std::{
@@ -12,10 +13,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+const TELEGRAM_CHAT_ACTION_STALE_AFTER: Duration = Duration::from_secs(4);
+
 #[derive(Debug, Default)]
 pub struct TelegramDisplayState {
     messages: BTreeMap<String, DisplayMessageState>,
+    run_cards: BTreeMap<String, TelegramMessageHandle>,
+    chat_actions: BTreeMap<TelegramChatActionThrottleKey, Instant>,
     approvals: TelegramApprovalStore,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TelegramChatActionThrottleKey {
+    chat_id: i64,
+    message_thread_id: Option<i64>,
+    action: TelegramChatAction,
 }
 
 impl TelegramDisplayState {
@@ -59,6 +71,14 @@ pub async fn deliver_display_event(
             let action = record_delta(state, display_message_id.clone(), text, now, edit_throttle);
             match action {
                 DisplayPreviewAction::Send(text) => {
+                    send_chat_action_best_effort(
+                        state,
+                        delivery,
+                        target,
+                        TelegramChatAction::Typing,
+                        now,
+                    )
+                    .await;
                     let Some(sent) = delivery
                         .send_text(target, &text, None)
                         .await?
@@ -73,6 +93,14 @@ pub async fn deliver_display_event(
                     }
                 }
                 DisplayPreviewAction::Edit { message_id, text } => {
+                    send_chat_action_best_effort(
+                        state,
+                        delivery,
+                        target,
+                        TelegramChatAction::Typing,
+                        now,
+                    )
+                    .await;
                     delivery.edit_text(target, message_id, &text, None).await?;
                 }
                 DisplayPreviewAction::Skip => {}
@@ -119,20 +147,135 @@ pub async fn deliver_display_event(
                 .send_text(target, &catalog.tool_completed(&tool_call_id), None)
                 .await?;
         }
-        DisplayEvent::RunFailed { error, .. } => {
-            delivery
-                .send_text(target, &catalog.run_failed(&error), None)
-                .await?;
+        DisplayEvent::RunFailed { run_id, error } => {
+            finish_run_card(
+                state,
+                delivery,
+                target,
+                &run_id,
+                catalog.run_failed(&run_id, &error),
+            )
+            .await?;
         }
-        DisplayEvent::RunPaused { .. }
-        | DisplayEvent::RunStarted { .. }
-        | DisplayEvent::RunCompleted { .. }
-        | DisplayEvent::ToolUpdated { .. }
+        DisplayEvent::RunStarted { run_id } => {
+            send_chat_action_best_effort(
+                state,
+                delivery,
+                target,
+                TelegramChatAction::Typing,
+                Instant::now(),
+            )
+            .await;
+            upsert_run_card(
+                state,
+                delivery,
+                target,
+                &run_id,
+                catalog.run_started(&run_id),
+            )
+            .await?;
+        }
+        DisplayEvent::RunCompleted { run_id } => {
+            finish_run_card(
+                state,
+                delivery,
+                target,
+                &run_id,
+                catalog.run_completed(&run_id),
+            )
+            .await?;
+        }
+        DisplayEvent::RunPaused { run_id, reason } => {
+            finish_run_card(
+                state,
+                delivery,
+                target,
+                &run_id,
+                catalog.run_paused(&run_id, &reason),
+            )
+            .await?;
+        }
+        DisplayEvent::ToolUpdated { .. }
         | DisplayEvent::ToolStarted { .. }
         | DisplayEvent::ToolCompleted { .. }
         | DisplayEvent::RawEvent { .. } => {}
     }
     Ok(())
+}
+
+async fn send_chat_action_best_effort(
+    state: &mut TelegramDisplayState,
+    delivery: &TelegramDelivery,
+    target: TelegramMessageTarget,
+    action: TelegramChatAction,
+    now: Instant,
+) {
+    let key = TelegramChatActionThrottleKey {
+        chat_id: target.chat_id,
+        message_thread_id: target.message_thread_id,
+        action: action.clone(),
+    };
+    if state.chat_actions.get(&key).is_some_and(|last_sent_at| {
+        now.duration_since(*last_sent_at) < TELEGRAM_CHAT_ACTION_STALE_AFTER
+    }) {
+        return;
+    }
+    if delivery.send_chat_action(target, action).await.is_ok() {
+        state.chat_actions.insert(key, now);
+    }
+}
+
+async fn upsert_run_card(
+    state: &mut TelegramDisplayState,
+    delivery: &TelegramDelivery,
+    target: TelegramMessageTarget,
+    run_id: &str,
+    text: String,
+) -> TelegramDeliveryResult<()> {
+    let message_id = state
+        .run_cards
+        .get(run_id)
+        .map(|message| message.message_id);
+    if let Some(sent) = edit_existing_or_send_text(delivery, target, message_id, &text).await? {
+        state.run_cards.insert(run_id.into(), sent);
+    }
+    Ok(())
+}
+
+async fn finish_run_card(
+    state: &mut TelegramDisplayState,
+    delivery: &TelegramDelivery,
+    target: TelegramMessageTarget,
+    run_id: &str,
+    text: String,
+) -> TelegramDeliveryResult<()> {
+    let message_id = state
+        .run_cards
+        .remove(run_id)
+        .map(|message| message.message_id);
+    edit_existing_or_send_text(delivery, target, message_id, &text).await?;
+    Ok(())
+}
+
+async fn edit_existing_or_send_text(
+    delivery: &TelegramDelivery,
+    target: TelegramMessageTarget,
+    message_id: Option<i64>,
+    text: &str,
+) -> TelegramDeliveryResult<Option<TelegramMessageHandle>> {
+    if let Some(message_id) = message_id
+        && delivery
+            .edit_text(target, message_id, text, None)
+            .await
+            .is_ok()
+    {
+        return Ok(None);
+    }
+    Ok(delivery
+        .send_text(target, text, None)
+        .await?
+        .into_iter()
+        .next())
 }
 
 fn preview_from_display_state(message: DisplayMessageState) -> Option<TelegramPreviewMessage> {
@@ -184,8 +327,9 @@ mod tests {
         delivery::{TelegramDelivery, TelegramMessageTarget},
         i18n::TelegramUiCatalog,
         telegram_api::{
-            TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
-            TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramUpdate,
+            TelegramApi, TelegramApiError, TelegramChatAction, TelegramEditMessageTextRequest,
+            TelegramMessageHandle, TelegramSendChatActionRequest, TelegramSendMessageRequest,
+            TelegramSendPhotoRequest, TelegramUpdate,
         },
     };
     use noloong_agent::Locale;
@@ -239,6 +383,7 @@ mod tests {
 
         assert_eq!(api.sent_count(), 1);
         assert_eq!(api.edited_count(), 1);
+        assert_eq!(api.chat_action_kinds(), vec![TelegramChatAction::Typing]);
         assert_eq!(
             api.edited_texts(),
             vec![crate::render::render_markdown_v2("hello world")]
@@ -330,6 +475,122 @@ mod tests {
         assert_eq!(api.edited_count(), 1);
         assert_eq!(state.preview_message_id("m1"), None);
         assert!(!state.has_message("m1"));
+    }
+
+    #[tokio::test]
+    async fn display_run_card_updates_started_and_completed() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::RunStarted {
+                run_id: "run-1".into(),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::RunCompleted {
+                run_id: "run-1".into(),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.sent_count(), 1);
+        assert_eq!(api.edited_count(), 1);
+        assert_eq!(api.chat_action_kinds(), vec![TelegramChatAction::Typing]);
+        assert!(
+            api.edited_texts()
+                .into_iter()
+                .any(|text| text.contains("Run completed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn display_run_failed_without_started_sends_stable_card() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::RunFailed {
+                run_id: "run-1".into(),
+                error: "failed".into(),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.sent_count(), 1);
+        assert_eq!(api.edited_count(), 0);
+        assert!(
+            api.sent_texts()
+                .into_iter()
+                .any(|text| text.contains("Run failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn display_run_paused_updates_started_card() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::RunStarted {
+                run_id: "run-1".into(),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::RunPaused {
+                run_id: "run-1".into(),
+                reason: json!({"type": "tool_approval", "continuation": {}}),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.sent_count(), 1);
+        assert_eq!(api.edited_count(), 1);
+        assert!(
+            api.edited_texts()
+                .into_iter()
+                .any(|text| text.contains("Run paused") && text.contains("tool approval required"))
+        );
     }
 
     #[tokio::test]
@@ -520,6 +781,7 @@ mod tests {
         sent: Mutex<Vec<TelegramSendMessageRequest>>,
         edited: Mutex<Vec<TelegramEditMessageTextRequest>>,
         photos: Mutex<Vec<TelegramSendPhotoRequest>>,
+        chat_actions: Mutex<Vec<TelegramSendChatActionRequest>>,
     }
 
     impl FakeTelegramApi {
@@ -533,6 +795,15 @@ mod tests {
 
         fn photo_count(&self) -> usize {
             self.photos.lock().expect("fake photos lock poisoned").len()
+        }
+
+        fn chat_action_kinds(&self) -> Vec<TelegramChatAction> {
+            self.chat_actions
+                .lock()
+                .expect("fake chat actions lock poisoned")
+                .iter()
+                .map(|request| request.action.clone())
+                .collect()
         }
 
         fn edited_texts(&self) -> Vec<String> {
@@ -613,6 +884,19 @@ mod tests {
             _text: Option<&'a str>,
         ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn send_chat_action<'a>(
+            &'a self,
+            request: TelegramSendChatActionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.chat_actions
+                    .lock()
+                    .expect("fake chat actions lock poisoned")
+                    .push(request);
+                Ok(())
+            })
         }
 
         fn send_photo<'a>(

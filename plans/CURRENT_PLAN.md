@@ -197,14 +197,14 @@
 **Description:** 将 display delivery 从“不断编辑一条文本”升级为状态清晰的 run card：typing/upload actions、流式预览、最终消息、失败/暂停状态均有稳定 UI。
 
 **Acceptance criteria:**
-- [ ] run started 发送或更新轻量状态卡。
-- [ ] 文本流按节流编辑预览，最终回复替换或补发。
-- [ ] 长回复 split 后保留首尾和 continuation 标识。
-- [ ] `send_chat_action` 在长模型运行和文件上传时使用。
+- [x] run started 发送或更新轻量状态卡。
+- [x] 文本流按节流编辑预览，最终回复替换或补发。
+- [x] 长回复 split 后保留首尾和 continuation 标识。
+- [x] `send_chat_action` 在长模型运行和文件上传时使用。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram display`
-- [ ] fake display 覆盖 started/delta/final/failed/paused/chat action。
+- [x] `cargo test -p noloong-agent-telegram display`
+- [x] fake display 覆盖 started/delta/final/failed/paused/chat action。
 
 **Dependencies:** Task 7
 
