@@ -1,11 +1,21 @@
 use crate::commands::TelegramCockpitCommand;
-use noloong_agent::Locale;
+use noloong_agent::{Locale, interaction::InteractionSessionStatus};
 use noloong_agent_core::ToolPermissionOutcome;
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TelegramUiCatalog {
     locale: Locale,
+}
+
+pub struct TelegramStatusCard<'a> {
+    pub session_id: &'a str,
+    pub profile_id: &'a str,
+    pub status: &'a InteractionSessionStatus,
+    pub messages: usize,
+    pub tools: usize,
+    pub pending_approvals: usize,
+    pub plugins: usize,
 }
 
 impl TelegramUiCatalog {
@@ -173,6 +183,169 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn profile_list_title(self, count: usize) -> String {
+        match self.locale {
+            Locale::En => format!("Profiles: {count}"),
+            Locale::Zh => format!("运行配置：{count}"),
+        }
+    }
+
+    pub fn profile_item(self, index: usize, display_name: &str, profile_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("{index}. {display_name} ({profile_id})"),
+            Locale::Zh => format!("{index}. {display_name}（{profile_id}）"),
+        }
+    }
+
+    pub fn profile_selected(self, profile_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Default profile selected: {profile_id}"),
+            Locale::Zh => format!("已选择默认运行配置：{profile_id}"),
+        }
+    }
+
+    pub fn select_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Select",
+            Locale::Zh => "选择",
+        }
+    }
+
+    pub fn session_list_title(self, count: usize) -> String {
+        match self.locale {
+            Locale::En => format!("Sessions: {count}"),
+            Locale::Zh => format!("会话：{count}"),
+        }
+    }
+
+    pub fn no_sessions(self) -> &'static str {
+        match self.locale {
+            Locale::En => "No Telegram sessions yet",
+            Locale::Zh => "还没有 Telegram 会话",
+        }
+    }
+
+    pub fn no_active_session(self) -> &'static str {
+        match self.locale {
+            Locale::En => "No active session",
+            Locale::Zh => "没有当前会话",
+        }
+    }
+
+    pub fn session_item(
+        self,
+        index: usize,
+        session_id: &str,
+        profile_id: &str,
+        status: &InteractionSessionStatus,
+        active: bool,
+    ) -> String {
+        let marker = if active { " *" } else { "" };
+        let status = self.session_status(status);
+        match self.locale {
+            Locale::En => {
+                format!("{index}. {session_id}{marker}\nProfile: {profile_id}\nStatus: {status}")
+            }
+            Locale::Zh => {
+                format!("{index}. {session_id}{marker}\n配置：{profile_id}\n状态：{status}")
+            }
+        }
+    }
+
+    pub fn session_created(self, session_id: &str, profile_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("New active session: {session_id}\nProfile: {profile_id}"),
+            Locale::Zh => format!("新的当前会话：{session_id}\n配置：{profile_id}"),
+        }
+    }
+
+    pub fn session_switched(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Active session switched: {session_id}"),
+            Locale::Zh => format!("已切换当前会话：{session_id}"),
+        }
+    }
+
+    pub fn session_delete_confirm(self, session_id: &str, force_abort: bool) -> String {
+        match (self.locale, force_abort) {
+            (Locale::En, true) => {
+                format!("Delete running session and force abort?\nSession: {session_id}")
+            }
+            (Locale::En, false) => format!("Delete session?\nSession: {session_id}"),
+            (Locale::Zh, true) => format!("删除运行中的会话并强制中止？\n会话：{session_id}"),
+            (Locale::Zh, false) => format!("删除会话？\n会话：{session_id}"),
+        }
+    }
+
+    pub fn session_deleted(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Session deleted: {session_id}"),
+            Locale::Zh => format!("已删除会话：{session_id}"),
+        }
+    }
+
+    pub fn switch_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Switch",
+            Locale::Zh => "切换",
+        }
+    }
+
+    pub fn delete_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Delete",
+            Locale::Zh => "删除",
+        }
+    }
+
+    pub fn confirm_delete_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Confirm delete",
+            Locale::Zh => "确认删除",
+        }
+    }
+
+    pub fn status_card(self, card: TelegramStatusCard<'_>) -> String {
+        let status = self.session_status(card.status);
+        match self.locale {
+            Locale::En => format!(
+                "Active session\nSession: {}\nProfile: {}\nStatus: {status}\nMessages: {}\nTools: {}\nPending approvals: {}\nPlugins: {}",
+                card.session_id,
+                card.profile_id,
+                card.messages,
+                card.tools,
+                card.pending_approvals,
+                card.plugins
+            ),
+            Locale::Zh => format!(
+                "当前会话\n会话：{}\n配置：{}\n状态：{status}\n消息：{}\n工具：{}\n待审批：{}\n插件：{}",
+                card.session_id,
+                card.profile_id,
+                card.messages,
+                card.tools,
+                card.pending_approvals,
+                card.plugins
+            ),
+        }
+    }
+
+    pub fn session_status(self, status: &InteractionSessionStatus) -> &'static str {
+        match (self.locale, status) {
+            (Locale::En, InteractionSessionStatus::Idle) => "idle",
+            (Locale::En, InteractionSessionStatus::Running) => "running",
+            (Locale::En, InteractionSessionStatus::Completed) => "completed",
+            (Locale::En, InteractionSessionStatus::Aborted) => "aborted",
+            (Locale::En, InteractionSessionStatus::Failed) => "failed",
+            (Locale::En, InteractionSessionStatus::Paused) => "paused",
+            (Locale::Zh, InteractionSessionStatus::Idle) => "空闲",
+            (Locale::Zh, InteractionSessionStatus::Running) => "运行中",
+            (Locale::Zh, InteractionSessionStatus::Completed) => "已完成",
+            (Locale::Zh, InteractionSessionStatus::Aborted) => "已中止",
+            (Locale::Zh, InteractionSessionStatus::Failed) => "失败",
+            (Locale::Zh, InteractionSessionStatus::Paused) => "已暂停",
+        }
+    }
+
     pub fn callback_not_allowed(self) -> &'static str {
         match self.locale {
             Locale::En => "Not allowed",
@@ -184,6 +357,13 @@ impl TelegramUiCatalog {
         match self.locale {
             Locale::En => "Approval expired",
             Locale::Zh => "审批已过期",
+        }
+    }
+
+    pub fn callback_action_expired(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Action expired",
+            Locale::Zh => "操作已过期",
         }
     }
 

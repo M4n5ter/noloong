@@ -277,15 +277,17 @@
 **Description:** 让 Telegram 私聊可管理多个 sessions 与 profiles：创建新会话、切换 active session、查看当前状态、列出历史 sessions，并提供删除确认。
 
 **Acceptance criteria:**
-- [ ] `/profiles` 列出 profiles，并可用按钮切换默认 active profile。
-- [ ] `/new` 创建新 session 并设为 active。
-- [ ] `/sessions` 列出当前 chat 的 sessions，按钮可 switch/delete。
-- [ ] `/status` 显示 active session profile、status、queues、manifest summary。
-- [ ] session delete 必须二次确认，且 running session 需要 force abort 确认。
+- [x] `/profiles` 列出 profiles，并可用按钮切换默认 active profile。
+- [x] `/new` 创建新 session 并设为 active。
+- [x] `/sessions` 列出当前 chat 的 sessions，按钮可 switch/delete。
+- [x] `/status` 显示 active session profile、status、queues、manifest summary。
+- [x] session delete 必须二次确认，且 running session 需要 force abort 确认。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram session bridge`
-- [ ] fake interaction 覆盖 profile/list、session/create/list/get/delete。
+- [x] `cargo test -p noloong-agent-telegram session`
+- [x] `cargo test -p noloong-agent-telegram bridge`
+- [x] `cargo test -p noloong telegram_`
+- [x] fake interaction 覆盖 profile/list、session/create/list/get/delete。
 
 **Dependencies:** Task 10
 

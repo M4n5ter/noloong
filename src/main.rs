@@ -41,7 +41,7 @@ use noloong_agent_telegram::{
     config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
-    i18n::TelegramUiCatalog,
+    i18n::{TelegramStatusCard, TelegramUiCatalog},
     input::{TelegramCommand, TelegramInboundMessage, TelegramInboundUpdate},
     media::TelegramAttachmentResolver,
     network::{
@@ -52,7 +52,9 @@ use noloong_agent_telegram::{
         FileTelegramOffsetStore, TelegramCallbackQuery, TelegramPollOutcome, TelegramPoller,
         TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
-    session::TelegramSessionKey,
+    session::{
+        TelegramSessionAction, TelegramSessionActionStore, TelegramSessionKey, single_button_markup,
+    },
     telegram_api::{
         ReqwestTelegramApi, TelegramApi, TelegramApiError, TelegramInlineKeyboardMarkup,
     },
@@ -71,6 +73,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 
 type SharedDisplayState = Arc<Mutex<TelegramDisplayState>>;
 type SharedDisplayStates = Arc<Mutex<BTreeMap<TelegramSessionKey, SharedDisplayState>>>;
+type SharedSessionActions = Arc<Mutex<TelegramSessionActionStore>>;
 
 #[tokio::main]
 async fn main() {
@@ -264,6 +267,7 @@ async fn run_telegram_bridge_with_config(
     let display_states = Arc::new(Mutex::new(
         BTreeMap::<TelegramSessionKey, SharedDisplayState>::new(),
     ));
+    let session_actions = Arc::new(Mutex::new(TelegramSessionActionStore::default()));
     let edit_throttle = config.edit_throttle();
     let display_task = tokio::spawn(run_display_delivery(
         Arc::clone(&bridge),
@@ -279,6 +283,7 @@ async fn run_telegram_bridge_with_config(
         delivery,
         media_resolver,
         display_states,
+        session_actions,
         catalog,
         bot_username: config.bot_username.clone(),
     });
@@ -411,6 +416,7 @@ struct BridgeUpdateHandler {
     delivery: TelegramDelivery,
     media_resolver: TelegramAttachmentResolver,
     display_states: SharedDisplayStates,
+    session_actions: SharedSessionActions,
     catalog: TelegramUiCatalog,
     bot_username: Option<String>,
 }
@@ -466,6 +472,11 @@ impl BridgeUpdateHandler {
             Some(TelegramCockpitCommand::Start | TelegramCockpitCommand::Help) => {
                 self.send_command_help(command).await
             }
+            Some(TelegramCockpitCommand::Status) => self.send_status(command).await,
+            Some(TelegramCockpitCommand::New) => self.create_new_session(command).await,
+            Some(TelegramCockpitCommand::Switch) => self.switch_or_list_sessions(command).await,
+            Some(TelegramCockpitCommand::Sessions) => self.send_sessions(command).await,
+            Some(TelegramCockpitCommand::Profiles) => self.send_profiles(command).await,
             Some(TelegramCockpitCommand::Approvals) => self.send_pending_approvals(command).await,
             Some(command_id) => self.send_command_not_ready(command, command_id).await,
             None => self.send_unknown_command_help(command).await,
@@ -497,6 +508,158 @@ impl BridgeUpdateHandler {
             .await
     }
 
+    async fn send_profiles(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let profiles = self
+            .bridge
+            .list_profiles()
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        let mut text = self.catalog.profile_list_title(profiles.len());
+        let mut keyboard = Vec::new();
+        {
+            let mut actions = self.session_actions.lock().await;
+            for (index, profile) in profiles.iter().enumerate() {
+                text.push('\n');
+                text.push_str(&self.catalog.profile_item(
+                    index + 1,
+                    &profile.display_name,
+                    &profile.profile_id,
+                ));
+                keyboard.push(vec![actions.button(
+                    format!("{} {}", self.catalog.select_button(), profile.display_name),
+                    TelegramSessionAction::SelectProfile {
+                        profile_id: profile.profile_id.clone(),
+                    },
+                )]);
+            }
+        }
+        self.send_command_text_with_markup(
+            command,
+            &text,
+            Some(TelegramInlineKeyboardMarkup {
+                inline_keyboard: keyboard,
+            }),
+        )
+        .await
+    }
+
+    async fn create_new_session(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        let session_id = command_key(&command).derived_session_id(command.context.message_id);
+        let descriptor = self
+            .bridge
+            .create_chat_session(&command.context, session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        self.send_command_text(
+            command,
+            &self
+                .catalog
+                .session_created(&descriptor.session_id, &descriptor.profile_id),
+        )
+        .await
+    }
+
+    async fn switch_or_list_sessions(
+        &self,
+        command: TelegramCommand,
+    ) -> Result<(), TelegramPollingError> {
+        if command.args.trim().is_empty() {
+            return self.send_sessions(command).await;
+        }
+        let key = command_key(&command);
+        let descriptor = self
+            .bridge
+            .switch_session(key, command.args.trim())
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        self.send_command_text(
+            command,
+            &self.catalog.session_switched(&descriptor.session_id),
+        )
+        .await
+    }
+
+    async fn send_sessions(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let key = command_key(&command);
+        let sessions = self
+            .bridge
+            .list_sessions_for_chat(&key)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        if sessions.is_empty() {
+            return self
+                .send_command_text(command, self.catalog.no_sessions())
+                .await;
+        }
+        let active_session_id = self.bridge.session_id(&key);
+        let mut text = self.catalog.session_list_title(sessions.len());
+        let mut keyboard = Vec::new();
+        {
+            let mut actions = self.session_actions.lock().await;
+            for (index, session) in sessions.iter().enumerate() {
+                text.push('\n');
+                text.push_str(&self.catalog.session_item(
+                    index + 1,
+                    &session.session_id,
+                    &session.profile_id,
+                    &session.status,
+                    active_session_id.as_deref() == Some(session.session_id.as_str()),
+                ));
+                let mut row = Vec::new();
+                if active_session_id.as_deref() != Some(session.session_id.as_str()) {
+                    row.push(actions.button(
+                        self.catalog.switch_button(),
+                        TelegramSessionAction::SwitchSession {
+                            session_id: session.session_id.clone(),
+                        },
+                    ));
+                }
+                row.push(actions.button(
+                    self.catalog.delete_button(),
+                    TelegramSessionAction::RequestDelete {
+                        session_id: session.session_id.clone(),
+                    },
+                ));
+                keyboard.push(row);
+            }
+        }
+        self.send_command_text_with_markup(
+            command,
+            &text,
+            Some(TelegramInlineKeyboardMarkup {
+                inline_keyboard: keyboard,
+            }),
+        )
+        .await
+    }
+
+    async fn send_status(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let key = command_key(&command);
+        let Some(session_id) = self.bridge.session_id(&key) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let descriptor = self
+            .bridge
+            .get_session(&session_id)
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        let text = self.catalog.status_card(TelegramStatusCard {
+            session_id: &descriptor.session_id,
+            profile_id: &descriptor.profile_id,
+            status: &descriptor.status,
+            messages: descriptor.state.messages.len(),
+            tools: descriptor.manifest.enabled_tools.len(),
+            pending_approvals: descriptor.state.pending_tool_approvals.len(),
+            plugins: descriptor.manifest.plugins.len(),
+        });
+        self.send_command_text(command, &text).await
+    }
+
     async fn send_pending_approvals(
         &self,
         command: TelegramCommand,
@@ -521,11 +684,21 @@ impl BridgeUpdateHandler {
         command: TelegramCommand,
         text: &str,
     ) -> Result<(), TelegramPollingError> {
+        self.send_command_text_with_markup(command, text, None)
+            .await
+    }
+
+    async fn send_command_text_with_markup(
+        &self,
+        command: TelegramCommand,
+        text: &str,
+        reply_markup: Option<TelegramInlineKeyboardMarkup>,
+    ) -> Result<(), TelegramPollingError> {
         self.delivery
             .send_text(
                 TelegramMessageTarget::new(command.context.chat_id, command.context.thread_id),
                 text,
-                None,
+                reply_markup,
             )
             .await
             .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
@@ -580,6 +753,17 @@ impl BridgeUpdateHandler {
         let Some(data) = callback.data else {
             return Ok(());
         };
+        if TelegramSessionActionStore::is_session_action(&data) {
+            return self
+                .handle_session_callback(
+                    callback.id,
+                    message.message_id,
+                    TelegramMessageTarget::new(chat_id, message.message_thread_id),
+                    key,
+                    data,
+                )
+                .await;
+        }
         let selection = {
             let state = self.display_states.lock().await.get(&key).cloned();
             match state {
@@ -615,6 +799,111 @@ impl BridgeUpdateHandler {
             .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
         Ok(())
     }
+
+    async fn handle_session_callback(
+        &self,
+        callback_id: String,
+        message_id: i64,
+        target: TelegramMessageTarget,
+        key: TelegramSessionKey,
+        data: String,
+    ) -> Result<(), TelegramPollingError> {
+        let action = self.session_actions.lock().await.resolve(&data);
+        let Some(action) = action else {
+            self.api
+                .answer_callback_query(&callback_id, Some(self.catalog.callback_action_expired()))
+                .await
+                .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            return Ok(());
+        };
+        match action {
+            TelegramSessionAction::SelectProfile { profile_id } => {
+                self.bridge.set_preferred_profile(key, profile_id.clone());
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.profile_selected(&profile_id),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::SwitchSession { session_id } => {
+                let descriptor = self
+                    .bridge
+                    .switch_session(key, &session_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.session_switched(&descriptor.session_id),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::RequestDelete { session_id } => {
+                let descriptor = self
+                    .bridge
+                    .get_session(&session_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                let force_abort = matches!(
+                    descriptor.status,
+                    noloong_agent::interaction::InteractionSessionStatus::Running
+                        | noloong_agent::interaction::InteractionSessionStatus::Paused
+                );
+                let button = self.session_actions.lock().await.button(
+                    self.catalog.confirm_delete_button(),
+                    TelegramSessionAction::ConfirmDelete {
+                        session_id,
+                        force_abort,
+                    },
+                );
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self
+                            .catalog
+                            .session_delete_confirm(&descriptor.session_id, force_abort),
+                        Some(single_button_markup(button)),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::ConfirmDelete {
+                session_id,
+                force_abort,
+            } => {
+                self.bridge
+                    .delete_session(key, &session_id, force_abort)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.session_deleted(&session_id),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+        }
+        self.api
+            .answer_callback_query(&callback_id, Some(self.catalog.callback_recorded()))
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        Ok(())
+    }
+}
+
+fn command_key(command: &TelegramCommand) -> TelegramSessionKey {
+    TelegramSessionKey::new(command.context.chat_id, command.context.thread_id)
 }
 
 fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliError> {
@@ -1095,7 +1384,8 @@ mod tests {
     use noloong_agent::{
         AgentManifest, Locale,
         interaction::{
-            InteractionSessionDescriptor, InteractionSessionStatus, InteractionWsNotification,
+            InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
+            InteractionWsNotification,
         },
     };
     use noloong_agent_core::{AgentState, ToolApprovalRequest, ToolApprovalRequestSpec, ToolCall};
@@ -1111,6 +1401,7 @@ mod tests {
         polling::{
             TelegramCallbackQuery, TelegramChat, TelegramMessage, TelegramUpdate, TelegramUser,
         },
+        session::{TelegramSessionActionStore, telegram_session_metadata},
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
             TelegramSendMessageRequest, TelegramSetMyCommandsRequest,
@@ -1534,12 +1825,128 @@ mod tests {
 
         fixture
             .handler
-            .handle_command(status_command())
+            .handle_command(queue_command())
             .await
             .unwrap();
 
         assert!(fixture.interaction.methods().is_empty());
-        assert!(fixture.api.sent_texts().last().unwrap().contains("/status"));
+        assert!(fixture.api.sent_texts().last().unwrap().contains("/queue"));
+    }
+
+    #[tokio::test]
+    async fn telegram_profiles_command_lists_profiles_and_selects_default() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.interaction.set_profiles(vec![
+            profile_descriptor("profile-1"),
+            profile_descriptor("profile-2"),
+        ]);
+
+        fixture
+            .handler
+            .handle_command(telegram_command(6, "profiles"))
+            .await
+            .unwrap();
+        let callback_data = fixture.api.last_sent_callback_data(1, 0);
+        fixture
+            .handle_callback_with_data("profile-cb", 621, &callback_data)
+            .await
+            .unwrap();
+        fixture
+            .handler
+            .handle_command(telegram_command(7, "new"))
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(calls.iter().any(|(method, _)| method == "profile/list"));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "session/create" && params["profileId"] == "profile-2"
+        }));
+        assert!(
+            fixture
+                .api
+                .edited_texts()
+                .iter()
+                .any(|text| text.contains("Default profile selected"))
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_sessions_command_switches_and_confirms_delete() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.interaction.set_sessions(vec![
+            telegram_session_descriptor("telegram:42"),
+            telegram_session_descriptor_with_status(
+                "telegram:42:session:9",
+                InteractionSessionStatus::Running,
+            ),
+        ]);
+
+        fixture
+            .handler
+            .handle_command(telegram_command(8, "sessions"))
+            .await
+            .unwrap();
+        let switch_data = fixture.api.last_sent_callback_data(1, 0);
+        let delete_data = fixture.api.last_sent_callback_data(1, 1);
+        fixture
+            .handle_callback_with_data("switch-cb", 621, &switch_data)
+            .await
+            .unwrap();
+
+        fixture
+            .handler
+            .handle_command(telegram_command(9, "sessions"))
+            .await
+            .unwrap();
+        fixture
+            .handle_callback_with_data("delete-cb", 621, &delete_data)
+            .await
+            .unwrap();
+        let confirm_data = fixture.api.edited_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("confirm-cb", 621, &confirm_data)
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(calls.iter().any(|(method, _)| method == "session/list"));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "session/get" && params["sessionId"] == "telegram:42:session:9"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "session/delete"
+                && params["sessionId"] == "telegram:42:session:9"
+                && params["forceAbort"] == true
+        }));
+    }
+
+    #[tokio::test]
+    async fn telegram_status_command_reads_active_session() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+
+        fixture
+            .handler
+            .handle_command(telegram_command(10, "status"))
+            .await
+            .unwrap();
+
+        assert!(
+            fixture
+                .interaction
+                .calls()
+                .iter()
+                .any(|(method, _)| method == "session/get")
+        );
+        assert!(
+            fixture
+                .api
+                .sent_texts()
+                .last()
+                .unwrap()
+                .contains("Active session")
+        );
     }
 
     struct TelegramCallbackFixture {
@@ -1589,6 +1996,7 @@ mod tests {
                     TelegramFilePolicy::default(),
                 ),
                 display_states,
+                session_actions: Arc::new(Mutex::new(TelegramSessionActionStore::default())),
                 catalog: TelegramUiCatalog::new(Locale::En),
                 bot_username: None,
             };
@@ -1606,8 +2014,18 @@ mod tests {
             id: &str,
             user_id: u64,
         ) -> Result<(), noloong_agent_telegram::polling::TelegramPollingError> {
+            self.handle_callback_with_data(id, user_id, &self.callback_data)
+                .await
+        }
+
+        async fn handle_callback_with_data(
+            &self,
+            id: &str,
+            user_id: u64,
+            data: &str,
+        ) -> Result<(), noloong_agent_telegram::polling::TelegramPollingError> {
             self.handler
-                .handle_callback(callback_query(id, user_id, &self.callback_data))
+                .handle_callback(callback_query(id, user_id, data))
                 .await
         }
 
@@ -1671,8 +2089,8 @@ mod tests {
         telegram_command(4, "unknown")
     }
 
-    fn status_command() -> TelegramCommand {
-        telegram_command(5, "status")
+    fn queue_command() -> TelegramCommand {
+        telegram_command(5, "queue")
     }
 
     fn telegram_command(message_id: i64, name: &str) -> TelegramCommand {
@@ -1740,17 +2158,36 @@ mod tests {
 
     #[derive(Default)]
     struct FakeInteraction {
-        methods: StdMutex<Vec<String>>,
+        calls: StdMutex<Vec<(String, Value)>>,
         approval_list: StdMutex<BTreeMap<String, ToolApprovalRequest>>,
+        profiles: StdMutex<Vec<InteractionProfileDescriptor>>,
+        sessions: StdMutex<Vec<InteractionSessionDescriptor>>,
     }
 
     impl FakeInteraction {
         fn methods(&self) -> Vec<String> {
-            self.methods.lock().unwrap().clone()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(method, _)| method.clone())
+                .collect()
+        }
+
+        fn calls(&self) -> Vec<(String, Value)> {
+            self.calls.lock().unwrap().clone()
         }
 
         fn set_approval_list(&self, approvals: BTreeMap<String, ToolApprovalRequest>) {
             *self.approval_list.lock().unwrap() = approvals;
+        }
+
+        fn set_profiles(&self, profiles: Vec<InteractionProfileDescriptor>) {
+            *self.profiles.lock().unwrap() = profiles;
+        }
+
+        fn set_sessions(&self, sessions: Vec<InteractionSessionDescriptor>) {
+            *self.sessions.lock().unwrap() = sessions;
         }
     }
 
@@ -1758,14 +2195,78 @@ mod tests {
         fn request_value<'a>(
             &'a self,
             method: &'a str,
-            _params: Value,
+            params: Value,
         ) -> TelegramInteractionFuture<'a, Value> {
             Box::pin(async move {
-                self.methods.lock().unwrap().push(method.into());
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
                 match method {
                     "approval/list" => {
                         let approvals = self.approval_list.lock().unwrap().clone();
                         Ok(serde_json::to_value(approvals).unwrap())
+                    }
+                    "profile/list" => {
+                        let profiles = self.profiles.lock().unwrap().clone();
+                        let profiles = if profiles.is_empty() {
+                            vec![profile_descriptor("profile-1")]
+                        } else {
+                            profiles
+                        };
+                        Ok(serde_json::to_value(profiles).unwrap())
+                    }
+                    "session/create" => {
+                        let session_id = params["sessionId"]
+                            .as_str()
+                            .unwrap_or("session-1")
+                            .to_owned();
+                        let profile_id = params["profileId"]
+                            .as_str()
+                            .unwrap_or("profile-1")
+                            .to_owned();
+                        let descriptor = session_descriptor_with(
+                            &session_id,
+                            &profile_id,
+                            InteractionSessionStatus::Idle,
+                            params["metadata"].as_object().cloned().unwrap_or_default(),
+                        );
+                        self.sessions.lock().unwrap().push(descriptor.clone());
+                        Ok(serde_json::to_value(descriptor).unwrap())
+                    }
+                    "session/list" => {
+                        let sessions = self.sessions.lock().unwrap().clone();
+                        Ok(serde_json::to_value(sessions).unwrap())
+                    }
+                    "session/get" => {
+                        let session_id = params["sessionId"].as_str().unwrap_or("session-1");
+                        let descriptor = self
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|session| session.session_id == session_id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                session_descriptor_with(
+                                    session_id,
+                                    "profile-1",
+                                    InteractionSessionStatus::Idle,
+                                    Default::default(),
+                                )
+                            });
+                        Ok(serde_json::to_value(descriptor).unwrap())
+                    }
+                    "session/delete" => {
+                        let session_id = params["sessionId"].as_str().unwrap_or("session-1");
+                        let deleted = {
+                            let mut sessions = self.sessions.lock().unwrap();
+                            let index = sessions
+                                .iter()
+                                .position(|session| session.session_id == session_id);
+                            index.map(|index| sessions.remove(index))
+                        };
+                        Ok(serde_json::to_value(deleted).unwrap())
                     }
                     "display/subscribe" => Ok(json!({"subscriptionId": "subscription-1"})),
                     _ => Ok(serde_json::to_value(session_descriptor()).unwrap()),
@@ -1779,16 +2280,56 @@ mod tests {
         }
     }
 
+    fn profile_descriptor(profile_id: &str) -> InteractionProfileDescriptor {
+        InteractionProfileDescriptor {
+            profile_id: profile_id.into(),
+            display_name: profile_id.into(),
+            description: None,
+            default_manifest_patches: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
     fn session_descriptor() -> InteractionSessionDescriptor {
+        session_descriptor_with(
+            "session-1",
+            "profile-1",
+            InteractionSessionStatus::Idle,
+            Default::default(),
+        )
+    }
+
+    fn telegram_session_descriptor(session_id: &str) -> InteractionSessionDescriptor {
+        telegram_session_descriptor_with_status(session_id, InteractionSessionStatus::Idle)
+    }
+
+    fn telegram_session_descriptor_with_status(
+        session_id: &str,
+        status: InteractionSessionStatus,
+    ) -> InteractionSessionDescriptor {
+        session_descriptor_with(
+            session_id,
+            "profile-1",
+            status,
+            telegram_session_metadata(42, None, "private"),
+        )
+    }
+
+    fn session_descriptor_with(
+        session_id: &str,
+        profile_id: &str,
+        status: InteractionSessionStatus,
+        metadata: serde_json::Map<String, Value>,
+    ) -> InteractionSessionDescriptor {
         InteractionSessionDescriptor {
-            session_id: "session-1".into(),
-            profile_id: "profile-1".into(),
+            session_id: session_id.into(),
+            profile_id: profile_id.into(),
             parent_session_id: None,
             role: None,
-            status: InteractionSessionStatus::Idle,
+            status,
             manifest: AgentManifest::default(),
             state: AgentState::default(),
-            metadata: Default::default(),
+            metadata,
         }
     }
 
@@ -1805,6 +2346,18 @@ mod tests {
             self.sent.lock().unwrap()[0]
                 .reply_markup
                 .as_ref()
+                .unwrap()
+                .inline_keyboard[row][column]
+                .callback_data
+                .clone()
+        }
+
+        fn last_sent_callback_data(&self, row: usize, column: usize) -> String {
+            self.sent
+                .lock()
+                .unwrap()
+                .last()
+                .and_then(|request| request.reply_markup.as_ref())
                 .unwrap()
                 .inline_keyboard[row][column]
                 .callback_data
@@ -1839,6 +2392,27 @@ mod tests {
                 .iter()
                 .map(|request| request.reply_markup.clone())
                 .collect()
+        }
+
+        fn edited_texts(&self) -> Vec<String> {
+            self.edited
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.text.clone())
+                .collect()
+        }
+
+        fn edited_callback_data(&self, row: usize, column: usize) -> String {
+            self.edited
+                .lock()
+                .unwrap()
+                .last()
+                .and_then(|request| request.reply_markup.as_ref())
+                .unwrap()
+                .inline_keyboard[row][column]
+                .callback_data
+                .clone()
         }
 
         fn command_requests(&self) -> Vec<TelegramSetMyCommandsRequest> {

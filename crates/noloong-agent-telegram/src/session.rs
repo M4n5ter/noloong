@@ -1,4 +1,15 @@
+use crate::{
+    callback::ShortCallbackStore,
+    telegram_api::{TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup},
+};
 use std::collections::BTreeMap;
+
+const SESSION_ACTION_PREFIX: &str = "sc:";
+pub const TELEGRAM_METADATA_CHANNEL: &str = "channel";
+pub const TELEGRAM_METADATA_CHANNEL_TELEGRAM: &str = "telegram";
+pub const TELEGRAM_METADATA_CHAT_ID: &str = "chatId";
+pub const TELEGRAM_METADATA_CHAT_TYPE: &str = "chatType";
+pub const TELEGRAM_METADATA_THREAD_ID: &str = "threadId";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TelegramSessionMapper {
@@ -37,8 +48,15 @@ impl TelegramSessionKey {
         }
     }
 
+    pub fn derived_session_id(&self, nonce: i64) -> String {
+        format!("{}:session:{nonce}", self.session_id())
+    }
+
     pub fn from_session_id(session_id: &str) -> Option<Self> {
-        let value = session_id.strip_prefix("telegram:")?;
+        let value = session_id
+            .split_once(":session:")
+            .map_or(session_id, |(prefix, _)| prefix)
+            .strip_prefix("telegram:")?;
         let (chat_id, thread_id) = match value.split_once(":thread:") {
             Some((chat_id, thread_id)) => (chat_id, Some(thread_id.parse().ok()?)),
             None => (value, None),
@@ -50,6 +68,57 @@ impl TelegramSessionKey {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TelegramSessionActionStore {
+    actions: ShortCallbackStore<TelegramSessionAction>,
+}
+
+impl TelegramSessionActionStore {
+    pub fn button(
+        &mut self,
+        text: impl Into<String>,
+        action: TelegramSessionAction,
+    ) -> TelegramInlineKeyboardButton {
+        let key = self.actions.insert(action);
+        TelegramInlineKeyboardButton {
+            text: text.into(),
+            callback_data: format!("{SESSION_ACTION_PREFIX}{key}"),
+        }
+    }
+
+    pub fn resolve(&mut self, data: &str) -> Option<TelegramSessionAction> {
+        let key = data.strip_prefix(SESSION_ACTION_PREFIX)?;
+        self.actions.remove(key)
+    }
+
+    pub fn is_session_action(data: &str) -> bool {
+        data.starts_with(SESSION_ACTION_PREFIX)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TelegramSessionAction {
+    SelectProfile {
+        profile_id: String,
+    },
+    SwitchSession {
+        session_id: String,
+    },
+    RequestDelete {
+        session_id: String,
+    },
+    ConfirmDelete {
+        session_id: String,
+        force_abort: bool,
+    },
+}
+
+pub fn single_button_markup(button: TelegramInlineKeyboardButton) -> TelegramInlineKeyboardMarkup {
+    TelegramInlineKeyboardMarkup {
+        inline_keyboard: vec![vec![button]],
+    }
+}
+
 pub fn telegram_session_metadata(
     chat_id: i64,
     thread_id: Option<i64>,
@@ -57,23 +126,29 @@ pub fn telegram_session_metadata(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
-        "channel".into(),
-        serde_json::Value::String("telegram".into()),
+        TELEGRAM_METADATA_CHANNEL.into(),
+        serde_json::Value::String(TELEGRAM_METADATA_CHANNEL_TELEGRAM.into()),
     );
-    metadata.insert("chatId".into(), serde_json::json!(chat_id));
+    metadata.insert(TELEGRAM_METADATA_CHAT_ID.into(), serde_json::json!(chat_id));
     metadata.insert(
-        "chatType".into(),
+        TELEGRAM_METADATA_CHAT_TYPE.into(),
         serde_json::Value::String(chat_kind.into()),
     );
     if let Some(thread_id) = thread_id {
-        metadata.insert("threadId".into(), serde_json::json!(thread_id));
+        metadata.insert(
+            TELEGRAM_METADATA_THREAD_ID.into(),
+            serde_json::json!(thread_id),
+        );
     }
     metadata
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramSessionKey, TelegramSessionMapper, telegram_session_metadata};
+    use super::{
+        TelegramSessionAction, TelegramSessionActionStore, TelegramSessionKey,
+        TelegramSessionMapper, telegram_session_metadata,
+    };
 
     #[test]
     fn session_mapping_uses_stable_chat_and_thread_ids() {
@@ -97,6 +172,14 @@ mod tests {
             TelegramSessionKey::from_session_id("telegram:42"),
             Some(TelegramSessionKey::new(42, None))
         );
+        assert_eq!(
+            TelegramSessionKey::from_session_id("telegram:42:session:9"),
+            Some(TelegramSessionKey::new(42, None))
+        );
+        assert_eq!(
+            TelegramSessionKey::from_session_id("telegram:-100:thread:3:session:9"),
+            Some(TelegramSessionKey::new(-100, Some(3)))
+        );
         assert_eq!(TelegramSessionKey::from_session_id("other:42"), None);
     }
 
@@ -107,5 +190,21 @@ mod tests {
         assert_eq!(metadata["chatId"], -100);
         assert_eq!(metadata["threadId"], 3);
         assert_eq!(metadata["chatType"], "supergroup");
+    }
+
+    #[test]
+    fn session_action_store_allocates_short_single_use_callbacks() {
+        let mut store = TelegramSessionActionStore::default();
+        let action = TelegramSessionAction::SwitchSession {
+            session_id: "telegram:42".into(),
+        };
+        let button = store.button("Switch", action.clone());
+
+        assert!(button.callback_data.len() <= 64);
+        assert!(TelegramSessionActionStore::is_session_action(
+            &button.callback_data
+        ));
+        assert_eq!(store.resolve(&button.callback_data), Some(action));
+        assert_eq!(store.resolve(&button.callback_data), None);
     }
 }

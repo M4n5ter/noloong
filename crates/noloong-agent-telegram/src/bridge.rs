@@ -2,7 +2,10 @@ use crate::{
     access::{TelegramAccessPolicy, TelegramTextInput},
     config::{TelegramBridgeConfig, TelegramConfigError},
     input::{TelegramInboundContext, TelegramInboundMessage},
-    session::{TelegramSessionKey, telegram_session_metadata},
+    session::{
+        TELEGRAM_METADATA_CHANNEL, TELEGRAM_METADATA_CHANNEL_TELEGRAM, TELEGRAM_METADATA_CHAT_ID,
+        TELEGRAM_METADATA_THREAD_ID, TelegramSessionKey, telegram_session_metadata,
+    },
 };
 use noloong_agent::interaction::{
     DISPLAY_EVENT_NOTIFICATION, DisplayEvent, InteractionAuthorityCapability,
@@ -31,8 +34,11 @@ const METHOD_AGENT_PROMPT: &str = "agent/prompt";
 const METHOD_AGENT_FOLLOW_UP: &str = "agent/follow_up";
 const METHOD_APPROVAL_LIST: &str = "approval/list";
 const METHOD_APPROVAL_RESOLVE: &str = "approval/resolve";
+const METHOD_PROFILE_LIST: &str = "profile/list";
 const METHOD_SESSION_CREATE: &str = "session/create";
+const METHOD_SESSION_DELETE: &str = "session/delete";
 const METHOD_SESSION_GET: &str = "session/get";
+const METHOD_SESSION_LIST: &str = "session/list";
 const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
 const TELEGRAM_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.telegram";
 
@@ -97,6 +103,7 @@ pub struct TelegramBridge {
 #[derive(Default)]
 struct TelegramBridgeState {
     profile_id: Option<String>,
+    preferred_profiles: BTreeMap<TelegramSessionKey, String>,
     sessions: BTreeMap<TelegramSessionKey, TelegramRuntimeSession>,
 }
 
@@ -143,6 +150,10 @@ impl TelegramBridge {
                 InteractionAuthorityCapability::AgentRun,
                 InteractionAuthorityCapability::AgentQueue,
                 InteractionAuthorityCapability::ApprovalResolve,
+                InteractionAuthorityCapability::ManifestApply,
+                InteractionAuthorityCapability::ProcessControl,
+                InteractionAuthorityCapability::SessionDelete,
+                InteractionAuthorityCapability::SubagentSpawn,
             ]),
             requested_ux: InteractionUxCapabilities {
                 raw_events: false,
@@ -300,6 +311,85 @@ impl TelegramBridge {
             .await
     }
 
+    pub async fn list_profiles(&self) -> TelegramBridgeResult<Vec<InteractionProfileDescriptor>> {
+        self.request_as(METHOD_PROFILE_LIST, json!({})).await
+    }
+
+    pub async fn create_chat_session(
+        &self,
+        context: &TelegramInboundContext,
+        session_id: String,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let key = TelegramSessionKey::new(context.chat_id, context.thread_id);
+        let profile_id = self.profile_id_for_key(&key)?;
+        self.create_and_subscribe_session(key, context, session_id, profile_id)
+            .await
+    }
+
+    pub async fn get_session(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        self.request_as(METHOD_SESSION_GET, json!({"sessionId": session_id}))
+            .await
+    }
+
+    pub async fn list_sessions_for_chat(
+        &self,
+        key: &TelegramSessionKey,
+    ) -> TelegramBridgeResult<Vec<InteractionSessionDescriptor>> {
+        let sessions = self
+            .request_as::<Vec<InteractionSessionDescriptor>>(METHOD_SESSION_LIST, json!({}))
+            .await?;
+        Ok(sessions
+            .into_iter()
+            .filter(|session| session_belongs_to_telegram_key(session, key))
+            .collect())
+    }
+
+    pub async fn switch_session(
+        &self,
+        key: TelegramSessionKey,
+        session_id: &str,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let descriptor = self.get_session(session_id).await?;
+        if self.session_id(&key).as_deref() == Some(descriptor.session_id.as_str()) {
+            self.record_session_status(key, descriptor.status.clone());
+            return Ok(descriptor);
+        }
+        self.record_session(
+            key,
+            descriptor.session_id.clone(),
+            descriptor.status.clone(),
+        );
+        self.subscribe_session(key, &descriptor.session_id).await?;
+        Ok(descriptor)
+    }
+
+    pub async fn delete_session(
+        &self,
+        key: TelegramSessionKey,
+        session_id: &str,
+        force_abort: bool,
+    ) -> TelegramBridgeResult<Option<InteractionSessionDescriptor>> {
+        let deleted = self
+            .request_as(
+                METHOD_SESSION_DELETE,
+                json!({"sessionId": session_id, "forceAbort": force_abort}),
+            )
+            .await?;
+        self.remove_session_if_active(key, session_id);
+        Ok(deleted)
+    }
+
+    pub fn set_preferred_profile(&self, key: TelegramSessionKey, profile_id: String) {
+        self.state
+            .lock()
+            .expect("telegram bridge state lock poisoned")
+            .preferred_profiles
+            .insert(key, profile_id);
+    }
+
     pub fn subscribe_interaction_notifications(
         &self,
     ) -> broadcast::Receiver<InteractionWsNotification> {
@@ -334,7 +424,18 @@ impl TelegramBridge {
         }
 
         let session_id = key.session_id();
-        let profile_id = self.profile_id()?;
+        let profile_id = self.profile_id_for_key(&key)?;
+        self.create_and_subscribe_session(key, context, session_id, profile_id)
+            .await
+    }
+
+    async fn create_and_subscribe_session(
+        &self,
+        key: TelegramSessionKey,
+        context: &TelegramInboundContext,
+        session_id: String,
+        profile_id: String,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
             .request_as::<InteractionSessionDescriptor>(
                 METHOD_SESSION_CREATE,
@@ -355,11 +456,20 @@ impl TelegramBridge {
             descriptor.session_id.clone(),
             descriptor.status.clone(),
         );
+        self.subscribe_session(key, &descriptor.session_id).await?;
+        Ok(descriptor)
+    }
+
+    async fn subscribe_session(
+        &self,
+        key: TelegramSessionKey,
+        session_id: &str,
+    ) -> TelegramBridgeResult<()> {
         let subscription = self
             .request_as::<SubscriptionResult>(
                 METHOD_DISPLAY_SUBSCRIBE,
                 json!({
-                    "sessionId": descriptor.session_id,
+                    "sessionId": session_id,
                     "ux": {
                         "displayEvents": true,
                         "streamText": true,
@@ -373,15 +483,19 @@ impl TelegramBridge {
         if !self.record_subscription(key, subscription.subscription_id) {
             return Err(TelegramBridgeError::MissingSession(key.session_id()));
         }
-        Ok(descriptor)
+        Ok(())
     }
 
-    fn profile_id(&self) -> TelegramBridgeResult<String> {
-        self.state
+    fn profile_id_for_key(&self, key: &TelegramSessionKey) -> TelegramBridgeResult<String> {
+        let state = self
+            .state
             .lock()
-            .expect("telegram bridge state lock poisoned")
-            .profile_id
-            .clone()
+            .expect("telegram bridge state lock poisoned");
+        state
+            .preferred_profiles
+            .get(key)
+            .cloned()
+            .or_else(|| state.profile_id.clone())
             .or_else(|| self.config.profile_id.clone())
             .ok_or(TelegramBridgeError::NoProfiles)
     }
@@ -452,6 +566,20 @@ impl TelegramBridge {
         session.subscription_id.is_some()
     }
 
+    fn remove_session_if_active(&self, key: TelegramSessionKey, session_id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("telegram bridge state lock poisoned");
+        if state
+            .sessions
+            .get(&key)
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            state.sessions.remove(&key);
+        }
+    }
+
     async fn request_as<T>(&self, method: &str, params: Value) -> TelegramBridgeResult<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -460,6 +588,27 @@ impl TelegramBridge {
         serde_json::from_value(value)
             .map_err(|error| TelegramBridgeError::Decode(error.to_string()))
     }
+}
+
+fn session_belongs_to_telegram_key(
+    session: &InteractionSessionDescriptor,
+    key: &TelegramSessionKey,
+) -> bool {
+    session
+        .metadata
+        .get(TELEGRAM_METADATA_CHANNEL)
+        .and_then(Value::as_str)
+        .is_some_and(|channel| channel == TELEGRAM_METADATA_CHANNEL_TELEGRAM)
+        && session
+            .metadata
+            .get(TELEGRAM_METADATA_CHAT_ID)
+            .and_then(Value::as_i64)
+            .is_some_and(|chat_id| chat_id == key.chat_id)
+        && session
+            .metadata
+            .get(TELEGRAM_METADATA_THREAD_ID)
+            .and_then(Value::as_i64)
+            == key.thread_id
 }
 
 fn telegram_user_message(
@@ -568,7 +717,15 @@ mod tests {
         assert_eq!(calls[0].0, "initialize");
         assert_eq!(
             calls[0].1["requestedAuthority"],
-            json!(["agent.run", "agent.queue", "approval.resolve"])
+            json!([
+                "agent.run",
+                "agent.queue",
+                "approval.resolve",
+                "manifest.apply",
+                "process.control",
+                "subagent.spawn",
+                "session.delete"
+            ])
         );
         assert_eq!(calls[0].1["requestedUx"]["displayEvents"], true);
     }

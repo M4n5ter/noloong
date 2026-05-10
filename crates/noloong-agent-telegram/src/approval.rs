@@ -1,5 +1,6 @@
 use crate::{
     bridge::{TelegramBridge, TelegramBridgeResult},
+    callback::ShortCallbackStore,
     i18n::TelegramUiCatalog,
     telegram_api::{
         TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramMessageHandle,
@@ -20,15 +21,13 @@ const APPROVAL_ARGUMENT_VALUE_LIMIT: usize = 160;
 
 #[derive(Clone, Debug, Default)]
 pub struct TelegramApprovalStore {
-    next_id: u64,
-    approvals: BTreeMap<String, TelegramApprovalTarget>,
+    approvals: ShortCallbackStore<TelegramApprovalTarget>,
 }
 
 impl TelegramApprovalStore {
     pub fn allocate_buttons(&mut self) -> TelegramApprovalButtons {
-        self.next_id += 1;
         TelegramApprovalButtons {
-            key: base36(self.next_id),
+            key: self.approvals.reserve_key(),
         }
     }
 
@@ -39,7 +38,7 @@ impl TelegramApprovalStore {
         approval: &ToolApprovalRequest,
         message: TelegramMessageHandle,
     ) {
-        self.approvals.insert(
+        self.approvals.insert_reserved(
             buttons.key.clone(),
             TelegramApprovalTarget {
                 session_id,
@@ -300,22 +299,6 @@ fn char_boundary_from_end(text: &str, chars: usize) -> usize {
         .nth(chars - 1)
         .map(|(index, _)| index)
         .unwrap_or(0)
-}
-
-fn base36(mut value: u64) -> String {
-    if value == 0 {
-        return "0".into();
-    }
-    let mut chars = Vec::new();
-    while value > 0 {
-        let digit = (value % 36) as u8;
-        chars.push(match digit {
-            0..=9 => (b'0' + digit) as char,
-            _ => (b'a' + digit - 10) as char,
-        });
-        value /= 36;
-    }
-    chars.into_iter().rev().collect()
 }
 
 #[cfg(test)]
