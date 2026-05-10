@@ -262,4 +262,18 @@ mod tests {
         assert_eq!(store.resolve(&button.callback_data), Some(action));
         assert_eq!(store.resolve(&button.callback_data), None);
     }
+
+    #[test]
+    fn session_action_store_keeps_large_payloads_off_callback_data() {
+        let mut store = TelegramSessionActionStore::default();
+        let action = TelegramSessionAction::ConfirmWriteProcess {
+            session_id: "telegram:42".into(),
+            job_id: "job-1".into(),
+            text: "x".repeat(4096),
+        };
+
+        let button = store.button("Confirm", action);
+
+        assert!(button.callback_data.len() <= 64);
+    }
 }

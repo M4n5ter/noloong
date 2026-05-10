@@ -384,15 +384,15 @@
 **Description:** 处理移动端体验细节：MarkdownV2 fallback、按钮 callback 过期、重复点击、message not modified、rate limit、错误卡片、命令帮助、i18n 完整性。
 
 **Acceptance criteria:**
-- [ ] 所有用户可见字符串都来自 `TelegramUiCatalog`。
-- [ ] callback data 长度始终 <= 64 bytes。
-- [ ] duplicate callback 不会重复执行危险操作。
-- [ ] Telegram API 429 按 `retry_after` 退避。
-- [ ] Markdown parse error fallback 保留按钮和重要内容。
+- [x] 所有用户可见字符串都来自 `TelegramUiCatalog`。
+- [x] callback data 长度始终 <= 64 bytes。
+- [x] duplicate callback 不会重复执行危险操作。
+- [x] Telegram API 429 按 `retry_after` 退避。
+- [x] Markdown parse error fallback 保留按钮和重要内容。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram`
-- [ ] `rg -n '\"[^\"]*[\\u4e00-\\u9fff]|Run failed|Tool started|Approval' crates/noloong-agent-telegram/src`
+- [x] `cargo test -p noloong-agent-telegram`
+- [x] `rg -n '\"[^\"]*[\\u4e00-\\u9fff]|Run failed|Tool started|Approval' crates/noloong-agent-telegram/src`
 
 **Dependencies:** Tasks 9-14
 

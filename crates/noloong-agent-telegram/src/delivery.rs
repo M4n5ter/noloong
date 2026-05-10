@@ -571,9 +571,10 @@ mod tests {
     use crate::{
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramChatAction, TelegramEditMessageTextRequest,
-            TelegramMessageHandle, TelegramSendAudioRequest, TelegramSendChatActionRequest,
-            TelegramSendDocumentRequest, TelegramSendMessageRequest, TelegramSendPhotoRequest,
-            TelegramSendVideoRequest, TelegramSendVoiceRequest, TelegramUpdate,
+            TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramMessageHandle,
+            TelegramSendAudioRequest, TelegramSendChatActionRequest, TelegramSendDocumentRequest,
+            TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramSendVideoRequest,
+            TelegramSendVoiceRequest, TelegramUpdate,
         },
         text::split_telegram_text,
     };
@@ -609,9 +610,19 @@ mod tests {
     async fn send_edit_fallbacks_retry_plain_text_after_parse_error() {
         let api = Arc::new(FakeTelegramApi::parse_error_once());
         let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let reply_markup = TelegramInlineKeyboardMarkup {
+            inline_keyboard: vec![vec![TelegramInlineKeyboardButton {
+                text: "Open".into(),
+                callback_data: "open".into(),
+            }]],
+        };
 
         let sent = delivery
-            .send_text(TelegramMessageTarget::chat(42), "*hello*", None)
+            .send_text(
+                TelegramMessageTarget::chat(42),
+                "*hello*",
+                Some(reply_markup.clone()),
+            )
             .await
             .unwrap();
 
@@ -624,6 +635,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert!(calls[0].parse_mode.is_some());
         assert!(calls[1].parse_mode.is_none());
+        assert_eq!(calls[1].reply_markup, Some(reply_markup));
     }
 
     #[tokio::test]
@@ -919,6 +931,7 @@ mod tests {
                     return Err(TelegramApiError::Api {
                         code: 400,
                         description: "can't parse entities".into(),
+                        retry_after: None,
                     });
                 }
                 Ok(TelegramMessageHandle {
@@ -943,6 +956,7 @@ mod tests {
                     return Err(TelegramApiError::Api {
                         code: 400,
                         description: "message is not modified".into(),
+                        retry_after: None,
                     });
                 }
                 Ok(TelegramMessageHandle {
@@ -1037,6 +1051,7 @@ mod tests {
                 return Err(TelegramApiError::Api {
                     code: 400,
                     description: "media failed".into(),
+                    retry_after: None,
                 });
             }
             Ok(TelegramMessageHandle {

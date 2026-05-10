@@ -12,9 +12,10 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    time::Duration,
 };
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, time::sleep};
 
 pub type TelegramApiFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TelegramApiError>> + Send + 'a>>;
@@ -176,12 +177,34 @@ impl ReqwestTelegramApi {
     where
         T: Serialize + ?Sized,
     {
-        self.client
-            .post(self.method_url(method))
-            .json(body)
-            .send()
-            .await
-            .map_err(|error| self.network_error(method, error))
+        let mut retry_after = None;
+        let mut last_error = None;
+        for _ in 0..=1 {
+            if let Some(delay) = retry_after.take() {
+                sleep(Duration::from_secs(delay)).await;
+            }
+            let response = self
+                .client
+                .post(self.method_url(method))
+                .json(body)
+                .send()
+                .await
+                .map_err(|error| self.network_error(method, error))?;
+            if response.status().as_u16() != 429 {
+                return Ok(response);
+            }
+            let error = parse_telegram_error_response(response).await?;
+            retry_after = error.retry_after_seconds();
+            if retry_after.is_none() {
+                return Err(error);
+            }
+            last_error = Some(error);
+        }
+        Err(last_error.unwrap_or_else(|| {
+            TelegramApiError::Network(format!(
+                "{method} rate-limit retry did not produce a response"
+            ))
+        }))
     }
 
     async fn send_media(
@@ -190,19 +213,51 @@ impl ReqwestTelegramApi {
         file_field: &'static str,
         request: TelegramSendMediaRequest,
     ) -> Result<TelegramMessageHandle, TelegramApiError> {
-        let response = if let TelegramInputFile::FileId(file_id) = &request.input {
-            let body = media_json_body(file_field, file_id, &request)?;
-            self.send_json(method, &body).await?
-        } else {
-            let form = media_multipart_form(file_field, request).await?;
-            self.client
-                .post(self.method_url(method))
-                .multipart(form)
-                .send()
-                .await
-                .map_err(|error| self.network_error(method, error))?
-        };
+        let response = self
+            .send_media_with_rate_limit(method, file_field, request)
+            .await?;
         parse_sent_message(response).await
+    }
+
+    async fn send_media_with_rate_limit(
+        &self,
+        method: &str,
+        file_field: &'static str,
+        request: TelegramSendMediaRequest,
+    ) -> Result<reqwest::Response, TelegramApiError> {
+        let mut retry_after = None;
+        let mut last_error = None;
+        for _ in 0..=1 {
+            if let Some(delay) = retry_after.take() {
+                sleep(Duration::from_secs(delay)).await;
+            }
+            let response = if let TelegramInputFile::FileId(file_id) = &request.input {
+                let body = media_json_body(file_field, file_id, &request)?;
+                self.send_json(method, &body).await?
+            } else {
+                let form = media_multipart_form(file_field, request.clone()).await?;
+                self.client
+                    .post(self.method_url(method))
+                    .multipart(form)
+                    .send()
+                    .await
+                    .map_err(|error| self.network_error(method, error))?
+            };
+            if response.status().as_u16() != 429 {
+                return Ok(response);
+            }
+            let error = parse_telegram_error_response(response).await?;
+            retry_after = error.retry_after_seconds();
+            if retry_after.is_none() {
+                return Err(error);
+            }
+            last_error = Some(error);
+        }
+        Err(last_error.unwrap_or_else(|| {
+            TelegramApiError::Network(format!(
+                "{method} rate-limit retry did not produce a response"
+            ))
+        }))
     }
 
     async fn read_bounded_body(
@@ -715,7 +770,11 @@ pub enum TelegramApiError {
     #[error("telegram network error: {0}")]
     Network(String),
     #[error("telegram api error {code}: {description}")]
-    Api { code: i64, description: String },
+    Api {
+        code: i64,
+        description: String,
+        retry_after: Option<u64>,
+    },
     #[error("telegram response decode failed: {0}")]
     Decode(String),
     #[error("telegram local file failed: {0}")]
@@ -738,6 +797,13 @@ impl TelegramApiError {
     pub fn is_conflict(&self) -> bool {
         matches!(self, Self::Api { code: 409, .. })
     }
+
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Api { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -756,6 +822,13 @@ struct TelegramSentChat {
 struct TelegramErrorResponse {
     error_code: i64,
     description: String,
+    #[serde(default)]
+    parameters: Option<TelegramResponseParameters>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct TelegramResponseParameters {
+    retry_after: Option<u64>,
 }
 
 async fn parse_sent_message(
@@ -778,12 +851,7 @@ where
         .await
         .map_err(|error| TelegramApiError::Network(error.to_string()))?;
     if !status.is_success() {
-        let error = serde_json::from_slice::<TelegramErrorResponse>(&bytes)
-            .map_err(|error| TelegramApiError::Decode(error.to_string()))?;
-        return Err(TelegramApiError::Api {
-            code: error.error_code,
-            description: error.description,
-        });
+        return Err(parse_telegram_error_bytes(&bytes)?);
     }
     let body = serde_json::from_slice::<TelegramApiResponse<T>>(&bytes)
         .map_err(|error| TelegramApiError::Decode(error.to_string()))?;
@@ -799,14 +867,38 @@ async fn parse_file_error_response<T>(
         .await
         .map_err(|error| TelegramApiError::Network(error.to_string()))?;
     match serde_json::from_slice::<TelegramErrorResponse>(&bytes) {
-        Ok(error) => Err(TelegramApiError::Api {
-            code: error.error_code,
-            description: error.description,
-        }),
+        Ok(error) => Err(telegram_api_error(error)),
         Err(_) => Err(TelegramApiError::Api {
             code: i64::from(status_code),
             description: String::from_utf8_lossy(&bytes).into_owned(),
+            retry_after: None,
         }),
+    }
+}
+
+async fn parse_telegram_error_response(
+    response: reqwest::Response,
+) -> Result<TelegramApiError, TelegramApiError> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| TelegramApiError::Network(error.to_string()))?;
+    parse_telegram_error_bytes(&bytes)
+}
+
+fn parse_telegram_error_bytes(bytes: &[u8]) -> Result<TelegramApiError, TelegramApiError> {
+    serde_json::from_slice::<TelegramErrorResponse>(bytes)
+        .map(telegram_api_error)
+        .map_err(|error| TelegramApiError::Decode(error.to_string()))
+}
+
+fn telegram_api_error(error: TelegramErrorResponse) -> TelegramApiError {
+    TelegramApiError::Api {
+        code: error.error_code,
+        description: error.description,
+        retry_after: error
+            .parameters
+            .and_then(|parameters| parameters.retry_after),
     }
 }
 
@@ -921,10 +1013,11 @@ fn insert_optional_string(body: &mut Map<String, Value>, key: &'static str, valu
 #[cfg(test)]
 mod tests {
     use super::{
-        TelegramApiResponse, TelegramChatAction, TelegramEditMessageTextRequest,
+        TelegramApiError, TelegramApiResponse, TelegramChatAction, TelegramEditMessageTextRequest,
         TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramInputFile,
         TelegramParseMode, TelegramSendChatActionRequest, TelegramSendMediaRequest,
         TelegramSendMessageRequest, TelegramSentMessage, media_json_body,
+        parse_telegram_error_bytes,
     };
     use serde_json::json;
 
@@ -1039,5 +1132,28 @@ mod tests {
 
         assert_eq!(response.result.message_id, 9);
         assert_eq!(response.result.chat.id, 42);
+    }
+
+    #[test]
+    fn api_error_extracts_retry_after_parameter() {
+        let error = parse_telegram_error_bytes(
+            br#"{
+                "ok": false,
+                "error_code": 429,
+                "description": "Too Many Requests: retry after 7",
+                "parameters": {"retry_after": 7}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            error,
+            TelegramApiError::Api {
+                code: 429,
+                description: "Too Many Requests: retry after 7".into(),
+                retry_after: Some(7),
+            }
+        );
+        assert_eq!(error.retry_after_seconds(), Some(7));
     }
 }

@@ -370,6 +370,12 @@ impl TelegramPoller {
                 }
                 Ok(TelegramPollOutcome::Polled)
             }
+            Err(error) if error.retry_after_seconds().is_some() => {
+                Ok(TelegramPollOutcome::RetryAfter {
+                    delay_seconds: error.retry_after_seconds().unwrap_or(1),
+                    reason: error.to_string(),
+                })
+            }
             Err(error) if error.is_conflict() => {
                 self.conflict_retries += 1;
                 if self.conflict_retries > 3 {
@@ -720,6 +726,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn polling_uses_telegram_retry_after() {
+        let api = Arc::new(FakeApi::with_errors(vec![rate_limited(7)]));
+        let handler = Arc::new(FakeHandler::default());
+        let mut poller = TelegramPoller::new(api, handler);
+
+        let outcome = poller.poll_once().await.unwrap();
+
+        assert_eq!(
+            outcome,
+            TelegramPollOutcome::RetryAfter {
+                delay_seconds: 7,
+                reason: "telegram api error 429: Too Many Requests".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn polling_conflict_becomes_fatal_after_retries() {
         let api = Arc::new(FakeApi::with_errors(vec![
             conflict(),
@@ -809,6 +832,15 @@ mod tests {
         TelegramApiError::Api {
             code: 409,
             description: "terminated by other getUpdates request".into(),
+            retry_after: None,
+        }
+    }
+
+    fn rate_limited(retry_after: u64) -> TelegramApiError {
+        TelegramApiError::Api {
+            code: 429,
+            description: "Too Many Requests".into(),
+            retry_after: Some(retry_after),
         }
     }
 

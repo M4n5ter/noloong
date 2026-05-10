@@ -672,6 +672,7 @@ mod tests {
                         Err(TelegramApiError::Api {
                             code: 404,
                             description: "not found".into(),
+                            retry_after: None,
                         })
                     })
             })
@@ -692,6 +693,7 @@ mod tests {
                         Err(TelegramApiError::Api {
                             code: 404,
                             description: "not found".into(),
+                            retry_after: None,
                         })
                     })
             })

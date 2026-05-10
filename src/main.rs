@@ -2622,6 +2622,10 @@ mod tests {
             .handle_callback_with_data("confirm-cb", 621, &confirm_data)
             .await
             .unwrap();
+        fixture
+            .handle_callback_with_data("confirm-cb-repeat", 621, &confirm_data)
+            .await
+            .unwrap();
 
         let calls = fixture.interaction.calls();
         assert!(calls.iter().any(|(method, _)| method == "session/list"));
@@ -2633,6 +2637,20 @@ mod tests {
                 && params["sessionId"] == "telegram:42:session:9"
                 && params["forceAbort"] == true
         }));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "session/delete")
+                .count(),
+            1
+        );
+        assert!(
+            fixture
+                .api
+                .answered_texts()
+                .iter()
+                .any(|text| text.as_deref() == Some("Action expired"))
+        );
     }
 
     #[tokio::test]
