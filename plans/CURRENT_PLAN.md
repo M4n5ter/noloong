@@ -174,14 +174,14 @@
 **Description:** 扩展 delivery/rendering，将 assistant message 中的 `ContentBlock::Media` 发送为 Telegram 原生 photo/document/audio/video/voice。文本和媒体混合时使用 caption 或相邻消息，保证移动端可读。
 
 **Acceptance criteria:**
-- [ ] inline base64 media 可上传为 Telegram file。
-- [ ] `file://` media 可从本地路径上传。
-- [ ] provider-only media 无本地数据时渲染为可读 fallback card。
-- [ ] 发送失败时降级为文本说明，不丢失最终回复。
+- [x] inline base64 media 可上传为 Telegram file。
+- [x] `file://` media 可从本地路径上传。
+- [x] provider-only media 无本地数据时渲染为可读 fallback card。
+- [x] 发送失败时降级为文本说明，不丢失最终回复。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram delivery render`
-- [ ] fake API 覆盖 send_photo/send_document/send_audio/send_video fallback。
+- [x] `cargo test -p noloong-agent-telegram delivery`
+- [x] fake API 覆盖 send_photo/send_document/send_audio/send_video/send_voice、provider-only fallback、media send failure fallback。
 
 **Dependencies:** Task 1
 

@@ -1,7 +1,9 @@
 use crate::{
     approval::{TelegramApprovalSelection, TelegramApprovalStore, render_approval_request},
     bridge::InteractionDisplayNotification,
-    delivery::{TelegramDelivery, TelegramDeliveryResult, TelegramMessageTarget},
+    delivery::{
+        TelegramDelivery, TelegramDeliveryResult, TelegramMessageTarget, TelegramPreviewMessage,
+    },
     i18n::TelegramUiCatalog,
 };
 use noloong_agent::interaction::DisplayEvent;
@@ -81,22 +83,13 @@ pub async fn deliver_display_event(
             message,
             ..
         } => {
-            let text = crate::render::render_agent_message_text(&message);
-            let preview_message_id = state
+            let preview = state
                 .messages
                 .remove(&display_message_id)
-                .and_then(|message| message.preview_message_id);
-            if let Some(message_id) = preview_message_id {
-                if delivery
-                    .edit_text(target, message_id, &text, None)
-                    .await
-                    .is_err()
-                {
-                    delivery.send_text(target, &text, None).await?;
-                }
-            } else {
-                delivery.send_text(target, &text, None).await?;
-            }
+                .and_then(preview_from_display_state);
+            delivery
+                .send_agent_final_message(target, preview, &message)
+                .await?;
         }
         DisplayEvent::ApprovalRequested { approval } => {
             let text = render_approval_request(&approval, catalog);
@@ -142,6 +135,13 @@ pub async fn deliver_display_event(
     Ok(())
 }
 
+fn preview_from_display_state(message: DisplayMessageState) -> Option<TelegramPreviewMessage> {
+    Some(TelegramPreviewMessage {
+        message_id: message.preview_message_id?,
+        text: message.accumulated_text,
+    })
+}
+
 enum DisplayPreviewAction {
     Send(String),
     Edit { message_id: i64, text: String },
@@ -185,13 +185,14 @@ mod tests {
         i18n::TelegramUiCatalog,
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
-            TelegramSendMessageRequest, TelegramUpdate,
+            TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramUpdate,
         },
     };
     use noloong_agent::Locale;
     use noloong_agent::interaction::DisplayEvent;
     use noloong_agent_core::{
-        AgentMessage, ContentBlock, ToolApprovalRequest, ToolApprovalRequestSpec, ToolCall,
+        AgentMessage, ContentBlock, MediaBlock, MediaKind, ToolApprovalRequest,
+        ToolApprovalRequestSpec, ToolCall,
     };
     use serde_json::{Map, Value, json};
     use std::{
@@ -332,6 +333,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn display_final_sends_media_natively_after_preview() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::AssistantMessageDelta {
+                display_message_id: "m1".into(),
+                text: "draft".into(),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::AssistantMessageFinal {
+                display_message_id: "m1".into(),
+                message: AgentMessage::assistant(
+                    "a1",
+                    vec![
+                        ContentBlock::Text {
+                            text: "final".into(),
+                        },
+                        ContentBlock::Media {
+                            media: MediaBlock::inline_base64(MediaKind::Image, "YWJj"),
+                        },
+                    ],
+                ),
+                truncated: false,
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.sent_count(), 1);
+        assert_eq!(api.edited_count(), 1);
+        assert_eq!(api.photo_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn display_final_skips_noop_preview_edit_before_media() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::AssistantMessageDelta {
+                display_message_id: "m1".into(),
+                text: "final".into(),
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::AssistantMessageFinal {
+                display_message_id: "m1".into(),
+                message: AgentMessage::assistant(
+                    "a1",
+                    vec![
+                        ContentBlock::Text {
+                            text: "final".into(),
+                        },
+                        ContentBlock::Media {
+                            media: MediaBlock::inline_base64(MediaKind::Image, "YWJj"),
+                        },
+                    ],
+                ),
+                truncated: false,
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.sent_count(), 1);
+        assert_eq!(api.edited_count(), 0);
+        assert_eq!(api.photo_count(), 1);
+    }
+
+    #[tokio::test]
     async fn approval_request_sends_markup_without_extra_edit() {
         let api = Arc::new(FakeTelegramApi::default());
         let delivery = TelegramDelivery::new(api.clone(), 3900);
@@ -416,6 +519,7 @@ mod tests {
     struct FakeTelegramApi {
         sent: Mutex<Vec<TelegramSendMessageRequest>>,
         edited: Mutex<Vec<TelegramEditMessageTextRequest>>,
+        photos: Mutex<Vec<TelegramSendPhotoRequest>>,
     }
 
     impl FakeTelegramApi {
@@ -425,6 +529,10 @@ mod tests {
 
         fn edited_count(&self) -> usize {
             self.edited.lock().expect("fake edited lock poisoned").len()
+        }
+
+        fn photo_count(&self) -> usize {
+            self.photos.lock().expect("fake photos lock poisoned").len()
         }
 
         fn edited_texts(&self) -> Vec<String> {
@@ -505,6 +613,23 @@ mod tests {
             _text: Option<&'a str>,
         ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn send_photo<'a>(
+            &'a self,
+            request: TelegramSendPhotoRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TelegramMessageHandle, TelegramApiError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let mut photos = self.photos.lock().expect("fake photos lock poisoned");
+                let message_id = photos.len() as i64 + 10;
+                photos.push(request.clone());
+                Ok(TelegramMessageHandle {
+                    chat_id: request.chat_id,
+                    message_id,
+                })
+            })
         }
     }
 }

@@ -84,7 +84,7 @@ pub fn rewrite_pipe_tables(text: &str) -> String {
     output.join("\n")
 }
 
-fn render_content_block_text(block: &ContentBlock) -> Option<String> {
+pub(crate) fn render_content_block_text(block: &ContentBlock) -> Option<String> {
     match block {
         ContentBlock::Text { text } => Some(text.clone()),
         ContentBlock::Json { value } => Some(value.to_string()),
