@@ -6,6 +6,7 @@ pub mod delivery;
 pub mod display;
 pub mod i18n;
 pub mod input;
+pub mod media;
 pub mod network;
 pub mod polling;
 pub mod render;

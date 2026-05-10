@@ -37,7 +37,8 @@ use noloong_agent_telegram::{
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
     i18n::TelegramUiCatalog,
-    input::TelegramInboundUpdate,
+    input::{TelegramInboundMessage, TelegramInboundUpdate},
+    media::TelegramAttachmentResolver,
     network::{
         TelegramNetworkConfig, TelegramNetworkResolutionMode, build_telegram_http_client,
         discover_fallback_addrs, network_resolution_mode,
@@ -249,6 +250,8 @@ async fn run_telegram_bridge_with_config(
             .with_max_download_bytes(config.file_policy.max_download_bytes),
     ) as Arc<dyn TelegramApi>;
     let delivery = TelegramDelivery::new(Arc::clone(&api), config.max_outbound_chars);
+    let media_resolver =
+        TelegramAttachmentResolver::new(Arc::clone(&api), config.file_policy.clone());
     let catalog = TelegramUiCatalog::new(config.locale);
     let display_states = Arc::new(Mutex::new(
         BTreeMap::<TelegramSessionKey, SharedDisplayState>::new(),
@@ -266,6 +269,7 @@ async fn run_telegram_bridge_with_config(
         bridge,
         api,
         delivery,
+        media_resolver,
         display_states,
         catalog,
         bot_username: config.bot_username.clone(),
@@ -388,6 +392,7 @@ struct BridgeUpdateHandler {
     bridge: Arc<TelegramBridge>,
     api: Arc<dyn TelegramApi>,
     delivery: TelegramDelivery,
+    media_resolver: TelegramAttachmentResolver,
     display_states: SharedDisplayStates,
     catalog: TelegramUiCatalog,
     bot_username: Option<String>,
@@ -402,13 +407,18 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
             {
                 match inbound {
                     TelegramInboundUpdate::Message(message) => {
-                        if let Some(input) = message.into_text_input() {
+                        if message.attachments.is_empty() {
+                            let Some(input) = message.into_text_input() else {
+                                return Ok(());
+                            };
                             self.bridge
                                 .handle_text_message(input, self.bot_username.as_deref())
                                 .await
                                 .map_err(|error| {
                                     TelegramPollingError::Handler(error.to_string())
                                 })?;
+                        } else {
+                            self.handle_media_message(message).await?;
                         }
                     }
                     TelegramInboundUpdate::Command(command) => {
@@ -425,6 +435,35 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
 }
 
 impl BridgeUpdateHandler {
+    async fn handle_media_message(
+        &self,
+        message: TelegramInboundMessage,
+    ) -> Result<(), TelegramPollingError> {
+        let target = TelegramMessageTarget::new(message.context.chat_id, message.context.thread_id);
+        self.bridge
+            .preflight_inbound_message(&message, self.bot_username.as_deref())
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        let media = match self.media_resolver.resolve_all(&message.attachments).await {
+            Ok(media) => media,
+            Err(error) => {
+                self.delivery
+                    .send_text(
+                        target,
+                        &self.catalog.media_input_failed(&error.to_string()),
+                        None,
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                return Ok(());
+            }
+        };
+        self.bridge
+            .handle_inbound_message(message, media, self.bot_username.as_deref())
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        Ok(())
+    }
+
     async fn handle_callback(
         &self,
         callback: TelegramCallbackQuery,

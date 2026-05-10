@@ -120,14 +120,14 @@
 **Description:** 实现 Telegram attachment resolver：调用 `get_file` / download，根据 file policy 生成 `ContentBlock::Media`，并把 Telegram file metadata 写入 `MediaBlock.metadata`。
 
 **Acceptance criteria:**
-- [ ] 小文件按 MIME/kind 生成 inline base64 media。
-- [ ] 大文件写入受控目录，并生成 `MediaSource::Uri { uri: "file://..." }`。
-- [ ] 图片映射 `MediaKind::Image`，语音/音频映射 `Audio`，视频映射 `Video`，其它 document 映射 `File`。
-- [ ] 超过最大下载大小时生成明确用户可见错误，不创建 agent prompt。
+- [x] 小文件按 MIME/kind 生成 inline base64 media。
+- [x] 大文件写入受控目录，并生成 `MediaSource::Uri { uri: "file://..." }`。
+- [x] 图片映射 `MediaKind::Image`，语音/音频映射 `Audio`，视频映射 `Video`，其它 document 映射 `File`。
+- [x] 超过最大下载大小时生成明确用户可见错误，不创建 agent prompt。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram input media`
-- [ ] fake API 覆盖 file_id reuse、下载失败、MIME 缺失、大小超限。
+- [x] `cargo test -p noloong-agent-telegram media`
+- [x] fake API 覆盖 file_id reuse、下载失败、MIME 缺失、大小超限。
 
 **Dependencies:** Task 2, Task 4
 
@@ -143,14 +143,14 @@
 **Description:** 将 `handle_text_message` 升级为 `handle_inbound_message`。idle/completed 走 `agent/prompt`，running/paused 走 `agent/follow_up`，并确保媒体输入不会被文本 batching 破坏顺序。
 
 **Acceptance criteria:**
-- [ ] 文本-only 消息继续保持 batching 行为。
-- [ ] 带附件消息立即形成一个 `AgentMessage`，不与其它消息合并。
-- [ ] running/paused 状态下用户输入进入 follow-up queue。
-- [ ] message id 使用稳定 Telegram chat/message id，避免重复提交。
+- [x] 文本-only 消息继续保持 batching 行为。
+- [x] 带附件消息立即形成一个 `AgentMessage`，不与其它消息合并。
+- [x] running/paused 状态下用户输入进入 follow-up queue。
+- [x] message id 使用稳定 Telegram chat/message id，避免重复提交。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram bridge`
-- [ ] fake interaction 覆盖 text-only、media-only、caption+media、running follow-up。
+- [x] `cargo test -p noloong-agent-telegram bridge`
+- [x] fake interaction 覆盖 text-only、caption+media、running follow-up；media resolver 覆盖 media-only block 生成。
 
 **Dependencies:** Task 5
 

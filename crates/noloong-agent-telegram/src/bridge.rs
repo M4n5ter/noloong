@@ -1,6 +1,7 @@
 use crate::{
     access::{TelegramAccessPolicy, TelegramTextInput},
     config::{TelegramBridgeConfig, TelegramConfigError},
+    input::{TelegramInboundContext, TelegramInboundMessage},
     session::{TelegramSessionKey, telegram_session_metadata},
 };
 use noloong_agent::interaction::{
@@ -10,7 +11,9 @@ use noloong_agent::interaction::{
     InteractionWsClient, InteractionWsNotification,
 };
 use noloong_agent::{ManifestPatch, SystemPromptAddition};
-use noloong_agent_core::{AgentMessage, ToolPermissionDecision};
+use noloong_agent_core::{
+    AgentMessage, ContentBlock, MediaBlock, MessageRole, ToolPermissionDecision,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -190,12 +193,58 @@ impl TelegramBridge {
             return Err(TelegramBridgeError::EmptyMessage);
         }
 
-        let key = TelegramSessionKey::new(input.chat_id, input.thread_id);
-        let session = self.ensure_session(key, &input).await?;
-        let message = AgentMessage::user(
-            format!("telegram:{}:{}", input.chat_id, input.message_id),
-            text,
-        );
+        let context = TelegramInboundContext::from_text_input(&input);
+        let message = telegram_user_message(&context, vec![ContentBlock::Text { text }]);
+        self.submit_user_message(&context, message).await
+    }
+
+    pub async fn handle_inbound_message(
+        &self,
+        input: TelegramInboundMessage,
+        media: Vec<MediaBlock>,
+        bot_username: Option<&str>,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let context = input.context.clone();
+        self.preflight_inbound_message(&input, bot_username)?;
+
+        let mut content = Vec::new();
+        if let Some(text) = input.text_without_bot_mention(bot_username) {
+            content.push(ContentBlock::Text { text });
+        }
+        content.extend(media.into_iter().map(|media| ContentBlock::Media { media }));
+        if content.is_empty() {
+            return Err(TelegramBridgeError::EmptyMessage);
+        }
+
+        let message = telegram_user_message(&context, content);
+        self.submit_user_message(&context, message).await
+    }
+
+    pub fn preflight_inbound_message(
+        &self,
+        input: &TelegramInboundMessage,
+        bot_username: Option<&str>,
+    ) -> TelegramBridgeResult<()> {
+        let context = &input.context;
+        if !self.config.access.allows(context.chat_id, context.user_id) {
+            return Err(TelegramBridgeError::Unauthorized);
+        }
+        if self.config.access.require_mention_in_groups
+            && context.chat_kind.is_group()
+            && !input.addresses_bot(bot_username)
+        {
+            return Err(TelegramBridgeError::NotAddressed);
+        }
+        Ok(())
+    }
+
+    async fn submit_user_message(
+        &self,
+        context: &TelegramInboundContext,
+        message: AgentMessage,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let key = TelegramSessionKey::new(context.chat_id, context.thread_id);
+        let session = self.ensure_session(key, context).await?;
         let status = self.session_status(&key)?;
         let method = match status {
             InteractionSessionStatus::Running | InteractionSessionStatus::Paused => {
@@ -261,7 +310,7 @@ impl TelegramBridge {
     async fn ensure_session(
         &self,
         key: TelegramSessionKey,
-        input: &TelegramTextInput,
+        context: &TelegramInboundContext,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         if let Some(session_id) = self.session_id(&key) {
             let descriptor = self
@@ -284,9 +333,9 @@ impl TelegramBridge {
                     "profileId": profile_id,
                     "manifestPatches": [telegram_system_prompt_patch()],
                     "metadata": telegram_session_metadata(
-                        input.chat_id,
-                        input.thread_id,
-                        input.chat_kind.as_str()
+                        context.chat_id,
+                        context.thread_id,
+                        context.chat_kind.as_str()
                     ),
                 }),
             )
@@ -403,6 +452,30 @@ impl TelegramBridge {
     }
 }
 
+fn telegram_user_message(
+    context: &TelegramInboundContext,
+    content: Vec<ContentBlock>,
+) -> AgentMessage {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "telegram".into(),
+        json!({
+            "chatId": context.chat_id,
+            "threadId": context.thread_id,
+            "messageId": context.message_id,
+            "chatKind": context.chat_kind.as_str(),
+            "userId": context.user_id,
+            "isReplyToBot": context.is_reply_to_bot,
+        }),
+    );
+    AgentMessage {
+        id: format!("telegram:{}:{}", context.chat_id, context.message_id),
+        role: MessageRole::User,
+        content,
+        metadata,
+    }
+}
+
 fn telegram_system_prompt_patch() -> ManifestPatch {
     ManifestPatch::UpsertSystemPromptAddition {
         addition: SystemPromptAddition::new(
@@ -442,12 +515,16 @@ mod tests {
     use crate::{
         access::{TelegramAccessPolicy, TelegramChatKind, TelegramTextInput},
         config::TelegramBridgeConfig,
+        input::{
+            TelegramAttachment, TelegramAttachmentFile, TelegramAttachmentKind,
+            TelegramInboundContext, TelegramInboundMessage,
+        },
     };
     use noloong_agent::{
         AgentManifest,
         interaction::{InteractionClientError, InteractionWsNotification},
     };
-    use noloong_agent_core::AgentState;
+    use noloong_agent_core::{AgentState, MediaBlock, MediaKind};
     use serde_json::{Value, json};
     use std::{
         collections::VecDeque,
@@ -544,6 +621,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_prompts_with_caption_and_media_blocks() {
+        let fake = Arc::new(FakeInteraction::default());
+        fake.push_response(initialize_response());
+        fake.push_response(session("telegram:42", "default", "idle"));
+        fake.push_response(json!({"subscriptionId": "subscription-1"}));
+        fake.push_response(session("telegram:42", "default", "running"));
+        let bridge = test_bridge(Arc::clone(&fake), None);
+        bridge.initialize().await.unwrap();
+        let mut media = MediaBlock::inline_base64(MediaKind::Image, "YWJj");
+        media.mime_type = Some("image/jpeg".into());
+
+        bridge
+            .handle_inbound_message(
+                inbound_media_message("look"),
+                vec![media],
+                Some("noloong_bot"),
+            )
+            .await
+            .unwrap();
+
+        let calls = fake.calls();
+        assert_eq!(calls[3].0, "agent/prompt");
+        assert_eq!(calls[3].1["input"]["message"]["id"], "telegram:42:9");
+        assert_eq!(
+            calls[3].1["input"]["message"]["content"][0],
+            json!({"type": "text", "text": "look"})
+        );
+        assert_eq!(
+            calls[3].1["input"]["message"]["content"][1]["media"]["kind"],
+            "image"
+        );
+        assert_eq!(
+            calls[3].1["input"]["message"]["metadata"]["telegram"]["messageId"],
+            9
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_routes_media_message_to_follow_up_when_running() {
+        let fake = Arc::new(FakeInteraction::default());
+        fake.push_response(initialize_response());
+        fake.push_response(session("telegram:42", "default", "running"));
+        fake.push_response(json!({"subscriptionId": "subscription-1"}));
+        fake.push_response(session("telegram:42", "default", "running"));
+        let bridge = test_bridge(Arc::clone(&fake), None);
+        bridge.initialize().await.unwrap();
+
+        bridge
+            .handle_inbound_message(
+                inbound_media_message("next"),
+                vec![MediaBlock::inline_base64(MediaKind::Image, "YWJj")],
+                Some("noloong_bot"),
+            )
+            .await
+            .unwrap();
+
+        let calls = fake.calls();
+        assert_eq!(calls[3].0, "agent/follow_up");
+        assert_eq!(calls[3].1["message"]["id"], "telegram:42:9");
+    }
+
+    #[tokio::test]
     async fn bridge_rejects_unauthorized_message() {
         let fake = Arc::new(FakeInteraction::default());
         let bridge = test_bridge(fake, None);
@@ -590,6 +729,33 @@ mod tests {
             message_id: 1,
             text: text.into(),
             is_reply_to_bot: false,
+        }
+    }
+
+    fn inbound_media_message(text: &str) -> TelegramInboundMessage {
+        TelegramInboundMessage {
+            context: TelegramInboundContext {
+                chat_id: 42,
+                thread_id: None,
+                chat_kind: TelegramChatKind::Private,
+                user_id: Some(7),
+                message_id: 9,
+                is_reply_to_bot: false,
+            },
+            text: Some(text.into()),
+            attachments: vec![TelegramAttachment {
+                file: TelegramAttachmentFile {
+                    file_id: "photo-id".into(),
+                    file_unique_id: "photo-unique".into(),
+                    file_name: None,
+                    mime_type: None,
+                    file_size: Some(3),
+                },
+                kind: TelegramAttachmentKind::Photo {
+                    width: 640,
+                    height: 480,
+                },
+            }],
         }
     }
 

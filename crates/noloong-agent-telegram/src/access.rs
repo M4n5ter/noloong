@@ -89,24 +89,15 @@ pub struct TelegramTextInput {
 impl TelegramTextInput {
     pub fn addresses_bot(&self, bot_username: Option<&str>) -> bool {
         self.is_reply_to_bot
-            || bot_username.is_some_and(|username| {
-                self.text
-                    .split_whitespace()
-                    .any(|word| mention_token_matches_username(word, username))
-            })
+            || bot_username
+                .is_some_and(|username| telegram_text_mentions_username(&self.text, username))
     }
 
     pub fn text_without_bot_mention(&self, bot_username: Option<&str>) -> String {
         let Some(username) = bot_username else {
             return self.text.trim().to_owned();
         };
-        self.text
-            .split_whitespace()
-            .filter(|word| !mention_token_matches_username(word, username))
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_owned()
+        telegram_text_without_username_mention(&self.text, username)
     }
 }
 
@@ -155,6 +146,20 @@ pub fn telegram_username_matches(username: &str, expected: Option<&str>) -> bool
         return false;
     };
     telegram_username_body(username).eq_ignore_ascii_case(telegram_username_body(expected))
+}
+
+pub(crate) fn telegram_text_mentions_username(text: &str, username: &str) -> bool {
+    text.split_whitespace()
+        .any(|word| mention_token_matches_username(word, username))
+}
+
+pub(crate) fn telegram_text_without_username_mention(text: &str, username: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| !mention_token_matches_username(word, username))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_owned()
 }
 
 fn telegram_username_body(username: &str) -> &str {

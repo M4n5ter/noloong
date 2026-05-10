@@ -14,6 +14,7 @@ use std::{
     pin::Pin,
 };
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 
 pub type TelegramApiFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TelegramApiError>> + Send + 'a>>;
@@ -26,11 +27,24 @@ pub trait TelegramApi: Send + Sync {
     ) -> TelegramApiFuture<'a, Vec<TelegramUpdate>>;
 
     fn get_file<'a>(&'a self, _file_id: &'a str) -> TelegramApiFuture<'a, TelegramFile> {
-        unsupported("getFile")
+        unsupported_api_future("getFile")
     }
 
     fn download_file<'a>(&'a self, _file_path: &'a str) -> TelegramApiFuture<'a, Vec<u8>> {
-        unsupported("downloadFile")
+        unsupported_api_future("downloadFile")
+    }
+
+    fn download_file_to_path<'a>(
+        &'a self,
+        file_path: &'a str,
+        target_path: &'a Path,
+    ) -> TelegramApiFuture<'a, ()> {
+        Box::pin(async move {
+            let data = self.download_file(file_path).await?;
+            tokio::fs::write(target_path, data)
+                .await
+                .map_err(|error| TelegramApiError::File(error.to_string()))
+        })
     }
 
     fn send_message<'a>(
@@ -47,49 +61,49 @@ pub trait TelegramApi: Send + Sync {
         &'a self,
         _request: TelegramSendPhotoRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
-        unsupported("sendPhoto")
+        unsupported_api_future("sendPhoto")
     }
 
     fn send_document<'a>(
         &'a self,
         _request: TelegramSendDocumentRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
-        unsupported("sendDocument")
+        unsupported_api_future("sendDocument")
     }
 
     fn send_audio<'a>(
         &'a self,
         _request: TelegramSendAudioRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
-        unsupported("sendAudio")
+        unsupported_api_future("sendAudio")
     }
 
     fn send_voice<'a>(
         &'a self,
         _request: TelegramSendVoiceRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
-        unsupported("sendVoice")
+        unsupported_api_future("sendVoice")
     }
 
     fn send_video<'a>(
         &'a self,
         _request: TelegramSendVideoRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
-        unsupported("sendVideo")
+        unsupported_api_future("sendVideo")
     }
 
     fn send_chat_action<'a>(
         &'a self,
         _request: TelegramSendChatActionRequest,
     ) -> TelegramApiFuture<'a, ()> {
-        unsupported("sendChatAction")
+        unsupported_api_future("sendChatAction")
     }
 
     fn set_my_commands<'a>(
         &'a self,
         _request: TelegramSetMyCommandsRequest,
     ) -> TelegramApiFuture<'a, ()> {
-        unsupported("setMyCommands")
+        unsupported_api_future("setMyCommands")
     }
 
     fn answer_callback_query<'a>(
@@ -226,6 +240,51 @@ impl ReqwestTelegramApi {
         }
         Ok(data)
     }
+
+    async fn write_bounded_body(
+        &self,
+        method: &str,
+        response: reqwest::Response,
+        target_path: &Path,
+    ) -> Result<(), TelegramApiError> {
+        let status = response.status();
+        let max_bytes = self.max_download_bytes;
+        if !status.is_success() {
+            return parse_file_error_response(status.as_u16(), response).await;
+        }
+        if let Some(limit) = max_bytes
+            && let Some(content_length) = response.content_length()
+            && content_length > limit as u64
+        {
+            return Err(TelegramApiError::FileTooLarge {
+                limit,
+                actual: Some(content_length),
+            });
+        }
+        let mut file = tokio::fs::File::create(target_path)
+            .await
+            .map_err(|error| TelegramApiError::File(error.to_string()))?;
+        let mut written = 0_usize;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| self.network_error(method, error))?;
+            if let Some(limit) = max_bytes
+                && written.saturating_add(chunk.len()) > limit
+            {
+                return Err(TelegramApiError::FileTooLarge {
+                    limit,
+                    actual: None,
+                });
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| TelegramApiError::File(error.to_string()))?;
+            written += chunk.len();
+        }
+        file.flush()
+            .await
+            .map_err(|error| TelegramApiError::File(error.to_string()))
+    }
 }
 
 impl TelegramApi for ReqwestTelegramApi {
@@ -265,6 +324,23 @@ impl TelegramApi for ReqwestTelegramApi {
                 .await
                 .map_err(|error| self.network_error("downloadFile", error))?;
             self.read_bounded_body("downloadFile", response).await
+        })
+    }
+
+    fn download_file_to_path<'a>(
+        &'a self,
+        file_path: &'a str,
+        target_path: &'a Path,
+    ) -> TelegramApiFuture<'a, ()> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .get(self.file_url(file_path))
+                .send()
+                .await
+                .map_err(|error| self.network_error("downloadFile", error))?;
+            self.write_bounded_body("downloadFile", response, target_path)
+                .await
         })
     }
 
@@ -726,7 +802,7 @@ async fn parse_file_error_response<T>(
     }
 }
 
-fn unsupported<'a, T>(method: &'static str) -> TelegramApiFuture<'a, T> {
+pub(crate) fn unsupported_api_future<'a, T>(method: &'static str) -> TelegramApiFuture<'a, T> {
     Box::pin(async move { Err(TelegramApiError::Unsupported(method.into())) })
 }
 

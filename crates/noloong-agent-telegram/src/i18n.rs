@@ -106,6 +106,13 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn media_input_failed(self, error: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Media input failed: {error}"),
+            Locale::Zh => format!("媒体输入失败：{error}"),
+        }
+    }
+
     fn approval_outcome(self, outcome: &ToolPermissionOutcome) -> &'static str {
         match (self.locale, outcome) {
             (Locale::En, ToolPermissionOutcome::Allow) => "allow",

@@ -1,5 +1,8 @@
 use crate::{
-    access::{TelegramChatKind, TelegramTextInput, telegram_username_matches},
+    access::{
+        TelegramChatKind, TelegramTextInput, telegram_text_mentions_username,
+        telegram_text_without_username_mention, telegram_username_matches,
+    },
     polling::{
         TelegramAudio, TelegramDocument, TelegramMessage, TelegramMessageEntity, TelegramPhotoSize,
         TelegramVideo, TelegramVoice,
@@ -60,6 +63,22 @@ impl TelegramInboundMessage {
             is_reply_to_bot: self.context.is_reply_to_bot,
         })
     }
+
+    pub fn addresses_bot(&self, bot_username: Option<&str>) -> bool {
+        self.context.is_reply_to_bot
+            || self.text.as_deref().is_some_and(|text| {
+                bot_username.is_some_and(|username| telegram_text_mentions_username(text, username))
+            })
+    }
+
+    pub fn text_without_bot_mention(&self, bot_username: Option<&str>) -> Option<String> {
+        let text = self.text.as_deref()?;
+        let text = match bot_username {
+            Some(username) => telegram_text_without_username_mention(text, username),
+            None => text.trim().to_owned(),
+        };
+        (!text.trim().is_empty()).then_some(text)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +125,17 @@ impl TelegramInboundContext {
             is_reply_to_bot: message_is_reply_to_bot(message, bot_username),
         }
     }
+
+    pub fn from_text_input(input: &TelegramTextInput) -> Self {
+        Self {
+            chat_id: input.chat_id,
+            thread_id: input.thread_id,
+            chat_kind: input.chat_kind.clone(),
+            user_id: input.user_id,
+            message_id: input.message_id,
+            is_reply_to_bot: input.is_reply_to_bot,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +154,7 @@ pub struct TelegramAttachmentFile {
 }
 
 impl TelegramAttachmentFile {
-    fn new(
+    pub(crate) fn new(
         file_id: &str,
         file_unique_id: &str,
         file_name: Option<&str>,
@@ -304,6 +334,31 @@ fn best_photo_size(photo: &[TelegramPhotoSize]) -> Option<&TelegramPhotoSize> {
 }
 
 impl TelegramAttachment {
+    pub(crate) fn width(&self) -> Option<u32> {
+        match self.kind {
+            TelegramAttachmentKind::Photo { width, .. }
+            | TelegramAttachmentKind::Video { width, .. } => Some(width),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn height(&self) -> Option<u32> {
+        match self.kind {
+            TelegramAttachmentKind::Photo { height, .. }
+            | TelegramAttachmentKind::Video { height, .. } => Some(height),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn duration(&self) -> Option<u32> {
+        match self.kind {
+            TelegramAttachmentKind::Audio { duration }
+            | TelegramAttachmentKind::Voice { duration }
+            | TelegramAttachmentKind::Video { duration, .. } => Some(duration),
+            _ => None,
+        }
+    }
+
     fn from_photo(photo: &TelegramPhotoSize) -> Self {
         Self {
             file: TelegramAttachmentFile::new(

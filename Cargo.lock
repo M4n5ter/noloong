@@ -1746,6 +1746,7 @@ name = "noloong-agent-telegram"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "futures-util",
  "noloong-agent",
  "noloong-agent-core",
@@ -1754,6 +1755,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "url",
 ]
 
 [[package]]
