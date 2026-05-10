@@ -32,6 +32,22 @@ pub struct TelegramMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<TelegramMessageEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caption_entities: Vec<TelegramMessageEntity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub photo: Vec<TelegramPhotoSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<TelegramDocument>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<TelegramAudio>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<TelegramVoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<TelegramVideo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message: Option<Box<TelegramMessage>>,
 }
 
@@ -49,6 +65,87 @@ pub struct TelegramUser {
     pub id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramMessageEntity {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub offset: usize,
+    pub length: usize,
+}
+
+impl TelegramMessageEntity {
+    pub fn is_bot_command_at_start(&self) -> bool {
+        self.kind == "bot_command" && self.offset == 0
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramPhotoSize {
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramDocument {
+    pub file_id: String,
+    pub file_unique_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramAudio {
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub duration: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramVoice {
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub duration: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramVideo {
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -302,9 +399,25 @@ fn is_supported_update(update: &TelegramUpdate) -> bool {
     update
         .message
         .as_ref()
-        .and_then(|message| message.text.as_ref())
-        .is_some()
+        .is_some_and(TelegramMessage::has_user_input)
         || update.callback_query.is_some()
+}
+
+impl TelegramMessage {
+    pub fn has_user_input(&self) -> bool {
+        self.text
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty())
+            || self
+                .caption
+                .as_ref()
+                .is_some_and(|caption| !caption.trim().is_empty())
+            || !self.photo.is_empty()
+            || self.document.is_some()
+            || self.audio.is_some()
+            || self.voice.is_some()
+            || self.video.is_some()
+    }
 }
 
 fn network_backoff_seconds(retries: u8) -> u64 {
@@ -345,6 +458,18 @@ mod tests {
         poller.poll_once().await.unwrap();
 
         assert_eq!(poller.offset(), Some(9));
+        assert_eq!(handler.handled_ids(), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn polling_handles_media_only_updates() {
+        let api = Arc::new(FakeApi::with_updates(vec![photo_update(7)]));
+        let handler = Arc::new(FakeHandler::default());
+        let mut poller = TelegramPoller::new(api, handler.clone());
+
+        poller.poll_once().await.unwrap();
+
+        assert_eq!(poller.offset(), Some(8));
         assert_eq!(handler.handled_ids(), vec![7]);
     }
 
@@ -460,6 +585,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn telegram_message_deserializes_rich_media_fields() {
+        let update = serde_json::from_value::<TelegramUpdate>(serde_json::json!({
+            "update_id": 7,
+            "message": {
+                "message_id": 11,
+                "message_thread_id": 3,
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 42, "username": "alice"},
+                "caption": "see attached",
+                "caption_entities": [{"type": "bot_command", "offset": 0, "length": 4}],
+                "photo": [{
+                    "file_id": "photo-1",
+                    "file_unique_id": "photo-u1",
+                    "width": 800,
+                    "height": 600,
+                    "file_size": 123
+                }],
+                "document": {
+                    "file_id": "doc-1",
+                    "file_unique_id": "doc-u1",
+                    "file_name": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 456
+                },
+                "audio": {
+                    "file_id": "audio-1",
+                    "file_unique_id": "audio-u1",
+                    "duration": 12,
+                    "file_name": "sound.mp3",
+                    "mime_type": "audio/mpeg",
+                    "file_size": 789
+                },
+                "voice": {
+                    "file_id": "voice-1",
+                    "file_unique_id": "voice-u1",
+                    "duration": 5,
+                    "mime_type": "audio/ogg",
+                    "file_size": 111
+                },
+                "video": {
+                    "file_id": "video-1",
+                    "file_unique_id": "video-u1",
+                    "width": 1280,
+                    "height": 720,
+                    "duration": 20,
+                    "file_name": "clip.mp4",
+                    "mime_type": "video/mp4",
+                    "file_size": 222
+                }
+            }
+        }))
+        .unwrap();
+
+        let message = update.message.unwrap();
+        assert_eq!(message.caption.as_deref(), Some("see attached"));
+        assert_eq!(message.caption_entities[0].kind, "bot_command");
+        assert_eq!(message.photo[0].file_id, "photo-1");
+        assert_eq!(
+            message.document.unwrap().file_name.as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(message.audio.unwrap().duration, 12);
+        assert_eq!(
+            message.voice.unwrap().mime_type.as_deref(),
+            Some("audio/ogg")
+        );
+        assert_eq!(message.video.unwrap().width, 1280);
+    }
+
     #[tokio::test]
     async fn polling_retries_network_errors() {
         let api = Arc::new(FakeApi::with_errors(vec![TelegramApiError::Network(
@@ -511,6 +706,14 @@ mod tests {
                 },
                 from: None,
                 text: Some(text.into()),
+                caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
+                photo: Vec::new(),
+                document: None,
+                audio: None,
+                voice: None,
+                video: None,
                 reply_to_message: None,
             }),
             callback_query: None,
@@ -521,6 +724,38 @@ mod tests {
         TelegramUpdate {
             update_id,
             message: None,
+            callback_query: None,
+        }
+    }
+
+    fn photo_update(update_id: i64) -> TelegramUpdate {
+        TelegramUpdate {
+            update_id,
+            message: Some(TelegramMessage {
+                message_id: update_id,
+                message_thread_id: None,
+                chat: TelegramChat {
+                    id: 42,
+                    kind: "private".into(),
+                },
+                from: None,
+                text: None,
+                caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
+                photo: vec![super::TelegramPhotoSize {
+                    file_id: "photo-1".into(),
+                    file_unique_id: "photo-u1".into(),
+                    width: 800,
+                    height: 600,
+                    file_size: Some(123),
+                }],
+                document: None,
+                audio: None,
+                voice: None,
+                video: None,
+                reply_to_message: None,
+            }),
             callback_query: None,
         }
     }

@@ -97,14 +97,14 @@
 **Description:** 将 `TelegramUpdate` 从 text-only 扩展到 photo/document/audio/voice/video/caption，并保留 chat/thread/user/reply metadata。命令消息仍单独路由，不进入文本 batching。
 
 **Acceptance criteria:**
-- [ ] `TelegramMessage` 反序列化 photo、document、audio、voice、video、caption、entities。
-- [ ] 新增 `TelegramInboundMessage`，可表达 text + media attachments。
-- [ ] 支持 caption 作为文本块，附件按 Telegram 顺序转入 media blocks。
-- [ ] command detection 支持 `/cmd` 和 `/cmd@bot_username`。
+- [x] `TelegramMessage` 反序列化 photo、document、audio、voice、video、caption、entities。
+- [x] 新增 `TelegramInboundMessage`，可表达 text + media attachments。
+- [x] 支持 caption 作为文本块，附件按 Telegram 顺序转入 media attachment model。
+- [x] command detection 支持 `/cmd` 和 `/cmd@bot_username`。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram input`
-- [ ] serde fixtures 覆盖图片、文档、语音、视频、caption、bot mention。
+- [x] `cargo test -p noloong-agent-telegram input`
+- [x] serde fixtures 覆盖图片、文档、语音、视频、caption、bot mention。
 
 **Dependencies:** Task 1
 

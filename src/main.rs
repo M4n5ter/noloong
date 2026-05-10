@@ -31,20 +31,20 @@ use noloong_agent::{
     },
 };
 use noloong_agent_telegram::{
-    access::{TelegramAccessPolicy, TelegramChatKind, TelegramTextInput},
+    access::TelegramAccessPolicy,
     bridge::TelegramBridge,
     config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
     i18n::TelegramUiCatalog,
+    input::TelegramInboundUpdate,
     network::{
         TelegramNetworkConfig, TelegramNetworkResolutionMode, build_telegram_http_client,
         discover_fallback_addrs, network_resolution_mode,
     },
     polling::{
-        FileTelegramOffsetStore, TelegramCallbackQuery, TelegramMessage, TelegramPollOutcome,
-        TelegramPoller, TelegramPollingError, TelegramUpdate, TelegramUpdateHandler,
-        TelegramUpdateHandlerFuture,
+        FileTelegramOffsetStore, TelegramCallbackQuery, TelegramPollOutcome, TelegramPoller,
+        TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
     session::TelegramSessionKey,
     telegram_api::{ReqwestTelegramApi, TelegramApi},
@@ -397,12 +397,24 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
     fn handle_update<'a>(&'a self, update: TelegramUpdate) -> TelegramUpdateHandlerFuture<'a> {
         Box::pin(async move {
             if let Some(message) = update.message
-                && let Some(input) = telegram_text_input(message, self.bot_username.as_deref())
+                && let Some(inbound) =
+                    TelegramInboundUpdate::from_message(message, self.bot_username.as_deref())
             {
-                self.bridge
-                    .handle_text_message(input, self.bot_username.as_deref())
-                    .await
-                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                match inbound {
+                    TelegramInboundUpdate::Message(message) => {
+                        if let Some(input) = message.into_text_input() {
+                            self.bridge
+                                .handle_text_message(input, self.bot_username.as_deref())
+                                .await
+                                .map_err(|error| {
+                                    TelegramPollingError::Handler(error.to_string())
+                                })?;
+                        }
+                    }
+                    TelegramInboundUpdate::Command(command) => {
+                        log::debug!("telegram command received: /{}", command.name);
+                    }
+                }
             }
             if let Some(callback) = update.callback_query {
                 self.handle_callback(callback).await?;
@@ -469,35 +481,15 @@ impl BridgeUpdateHandler {
     }
 }
 
+#[cfg(test)]
 fn telegram_text_input(
-    message: TelegramMessage,
+    message: noloong_agent_telegram::polling::TelegramMessage,
     bot_username: Option<&str>,
-) -> Option<TelegramTextInput> {
-    let text = message.text?;
-    let is_reply_to_bot = message
-        .reply_to_message
-        .as_ref()
-        .and_then(|reply| reply.from.as_ref())
-        .and_then(|user| user.username.as_deref())
-        .is_some_and(|username| same_telegram_username(username, bot_username));
-    Some(TelegramTextInput {
-        chat_id: message.chat.id,
-        thread_id: message.message_thread_id,
-        chat_kind: TelegramChatKind::parse(&message.chat.kind),
-        user_id: message.from.map(|user| user.id),
-        message_id: message.message_id,
-        text,
-        is_reply_to_bot,
-    })
-}
-
-fn same_telegram_username(username: &str, expected: Option<&str>) -> bool {
-    let Some(expected) = expected else {
-        return false;
-    };
-    username
-        .trim_start_matches('@')
-        .eq_ignore_ascii_case(expected.trim_start_matches('@'))
+) -> Option<noloong_agent_telegram::access::TelegramTextInput> {
+    match TelegramInboundUpdate::from_message(message, bot_username)? {
+        TelegramInboundUpdate::Message(message) => message.into_text_input(),
+        TelegramInboundUpdate::Command(_) => None,
+    }
 }
 
 fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliError> {
@@ -1187,6 +1179,14 @@ mod tests {
                 username: Some("alice".into()),
             }),
             text: Some("continue".into()),
+            caption: None,
+            entities: Vec::new(),
+            caption_entities: Vec::new(),
+            photo: Vec::new(),
+            document: None,
+            audio: None,
+            voice: None,
+            video: None,
             reply_to_message: Some(Box::new(TelegramMessage {
                 message_id: 1,
                 message_thread_id: None,
@@ -1199,6 +1199,14 @@ mod tests {
                     username: Some("Noloong_Bot".into()),
                 }),
                 text: Some("previous".into()),
+                caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
+                photo: Vec::new(),
+                document: None,
+                audio: None,
+                voice: None,
+                video: None,
                 reply_to_message: None,
             })),
         };
