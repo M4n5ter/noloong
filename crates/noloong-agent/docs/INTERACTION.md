@@ -37,17 +37,19 @@ Third-party TypeScript/Python bridge processes should connect as clients to the 
 
 All params and results use `camelCase`. Sensitive methods require authority capabilities granted during `initialize`.
 
-## First-party Telegram Client
+## First-party Telegram Agent Cockpit
 
-`crates/noloong-agent-telegram` is the first first-party interaction client. It dogfoods the same WebSocket JSON-RPC protocol as third-party clients:
+`crates/noloong-agent-telegram` is the first built-in interaction client. It dogfoods the same WebSocket JSON-RPC protocol as third-party clients and is treated as a Telegram Agent Cockpit rather than a text-only bridge:
 
 - `noloong telegram` starts the agent host, loopback WebSocket server, and Telegram long-polling bridge in one process.
 - `noloong serve interaction` starts only the host/control plane.
 - `noloong telegram-bridge` connects a Telegram bridge to an existing WebSocket control plane.
 
-The Telegram bridge never receives model/provider credentials. It may select a configured `profileId`, but runtime profiles and providers are owned by the Rust host. The bridge requires an allowlist by default through `TELEGRAM_ALLOWED_USERS` or `TELEGRAM_ALLOWED_CHATS`; `--telegram-allow-all` is explicit and should only be used for private testing. Group/supergroup mention gating uses `TELEGRAM_BOT_USERNAME` or `--telegram-bot-username`. Telegram-side UI locale is controlled by `TELEGRAM_LOCALE` or `--telegram-locale`; it localizes inline approval buttons, callback notifications, approval status text, and tool status messages.
+The Telegram bridge never receives model/provider credentials. It may select a configured `profileId`, but runtime profiles and providers are owned by the Rust host. The bridge requires an allowlist by default through `TELEGRAM_ALLOWED_USERS` or `TELEGRAM_ALLOWED_CHATS`; `--telegram-allow-all` is explicit and should only be used for private testing. Group/supergroup mention gating uses `TELEGRAM_BOT_USERNAME` or `--telegram-bot-username`. Telegram-side UI locale is controlled by `TELEGRAM_LOCALE` or `--telegram-locale`; it localizes inline approval buttons, callback notifications, approval status text, tool status messages, process cards, queue cards, manifest cards, and subagent cards.
 
-For ChatGPT subscription profiles, credentials still stay in the Rust host. Run `noloong chatgpt login --flow browser` once to create the default token file at `~/.agents/noloong/chatgpt/token.json`, then point the host at `examples/profile-configs/chatgpt-codex-subscription.json`. `NOLOONG_CHATGPT_TOKEN_FILE` can override the token file path. The example profile uses `gpt-5.4-mini` and enables Codex compact automatically; set `"compaction": {"type": "none"}` to disable it.
+The first-party Telegram client is personal-first and long-polling-first. It supports media input, native media/file output, command-menu cockpit actions, streaming run cards, approval cards, process control, session/profile switching, queue editing, manifest proposal approval/application, and subagent spawning. Its bridge runtime settings include `filePolicy` and `startupUpdatePolicy`; those are not profile settings and are documented in `crates/noloong-agent-telegram/docs/TELEGRAM.md`. Webhook and Mini App transports are intentionally outside the current phase.
+
+For ChatGPT subscription profiles, credentials still stay in the Rust host. Run `noloong chatgpt login --flow browser` once to create the default token file, then point the host at `examples/profile-configs/chatgpt-codex-subscription.json`. Runnable OpenRouter free and ChatGPT subscription smoke commands, plus `/processes`, `/manifest`, and other cockpit checks, are documented in `crates/noloong-agent-telegram/docs/TELEGRAM.md`.
 
 ## Initialize
 

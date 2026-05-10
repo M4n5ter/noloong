@@ -1,6 +1,8 @@
-# Telegram Interaction Client
+# Telegram Agent Cockpit
 
 `noloong-agent-telegram` is the first built-in interaction client for Noloong. It is not part of `noloong-agent-core`; it is an application-layer bridge that connects Telegram Bot API updates to the `noloong-agent` JSON-RPC interaction control plane.
+
+The current design is a personal-first, long-polling-first Agent Cockpit. Telegram is the mobile control surface for sessions, profile selection, media input/output, approvals, background processes, queues, manifest proposals, subagents, and long-running run status. Group and topic routing are supported through the existing allowlist and mention gates, but the optimized path is still a private chat with one trusted operator.
 
 ## Architecture
 
@@ -20,7 +22,7 @@ This is true even for `noloong telegram`, where the WebSocket server is bound to
 
 ## Commands
 
-Single-process mode:
+OpenRouter free single-process smoke:
 
 ```sh
 NOLOONG_PROFILE_CONFIG=examples/profile-configs/telegram-openrouter-free.json \
@@ -32,7 +34,7 @@ TELEGRAM_LOCALE=zh \
 noloong telegram
 ```
 
-ChatGPT subscription mode:
+ChatGPT subscription single-process smoke:
 
 ```sh
 noloong chatgpt login --flow browser
@@ -44,7 +46,7 @@ TELEGRAM_LOCALE=zh \
 noloong telegram
 ```
 
-The ChatGPT profile reads `~/.agents/noloong/chatgpt/token.json` by default and uses `gpt-5.4-mini`. Use `NOLOONG_CHATGPT_TOKEN_FILE` or `noloong chatgpt login --token-file <path>` when a different token location is needed. Codex compact is enabled automatically for `chatgpt_responses`; set `"compaction": {"type": "none"}` in the profile to disable it.
+The ChatGPT profile reads `~/.agents/noloong/chatgpt/token.json` by default. Use `NOLOONG_CHATGPT_TOKEN_FILE` or `noloong chatgpt login --token-file <path>` when a different token location is needed.
 
 Split host:
 
@@ -69,9 +71,25 @@ noloong telegram-bridge
 
 ## Profile Config
 
-Telegram config does not contain model/provider settings. The root binary loads profiles from `NOLOONG_PROFILE_CONFIG` or `--profile-config`.
+Telegram bridge config does not contain model/provider settings. The root binary loads runtime profiles from `NOLOONG_PROFILE_CONFIG` or `--profile-config`; Telegram runtime settings stay in CLI flags or environment variables so the same profile can be reused by terminal, WebSocket, Telegram, or third-party clients.
 
 See `examples/profile-configs/telegram-openrouter-free.json` for a runnable example that uses `openrouter/free` and reads credentials from `OPENROUTER_API_KEY`.
+
+The JSONC variant, `examples/profile-configs/telegram-openrouter-free.jsonc`, includes the companion Telegram bridge runtime knobs as comments. The effective bridge runtime shape uses camelCase fields:
+
+```json
+{
+  "filePolicy": {
+    "inlineMaxBytes": 262144,
+    "maxDownloadBytes": 20971520,
+    "downloadDir": ".noloong/telegram-files",
+    "retentionSeconds": 604800
+  },
+  "startupUpdatePolicy": "skip_pending_without_checkpoint"
+}
+```
+
+This is only the file/startup policy subset of `TelegramBridgeConfig`; a complete bridge config also needs the bot token, interaction URL, access policy, network settings, and UX timings. For `noloong telegram` and `noloong telegram-bridge`, configure the same values with `TELEGRAM_FILE_INLINE_MAX_BYTES`, `TELEGRAM_FILE_MAX_DOWNLOAD_BYTES`, `TELEGRAM_FILE_DOWNLOAD_DIR`, `TELEGRAM_FILE_RETENTION_SECONDS`, and `TELEGRAM_STARTUP_UPDATE_POLICY`, or with the equivalent `--telegram-file-*` and `--telegram-startup-update-policy` flags.
 
 Supported provider types:
 
@@ -103,6 +121,12 @@ Bridge environment variables:
 - `TELEGRAM_ALLOWED_CHATS`
 - `TELEGRAM_REQUIRE_MENTION_IN_GROUPS`
 - `TELEGRAM_LOCALE`
+- `TELEGRAM_FILE_INLINE_MAX_BYTES`
+- `TELEGRAM_FILE_MAX_DOWNLOAD_BYTES`
+- `TELEGRAM_FILE_DOWNLOAD_DIR`
+- `TELEGRAM_FILE_RETENTION_SECONDS`
+- `TELEGRAM_STARTUP_UPDATE_POLICY`
+- `TELEGRAM_OFFSET_CHECKPOINT`
 - `NOLOONG_INTERACTION_URL`
 - `NOLOONG_INTERACTION_TOKEN`
 
@@ -129,6 +153,50 @@ export TELEGRAM_DISABLE_ENV_PROXY=1
 export TELEGRAM_FALLBACK_IPS=149.154.167.220
 ```
 
-## V1 Scope
+## Cockpit Surface
 
-V1 supports text input, text batching, display event delivery, streaming edits, final replies, tool status messages, and inline approval buttons. It does not support Telegram webhook, media input/output, file upload, per-chat profile mapping, or topic auto-management.
+Telegram commands are registered through the Bot API command menu on startup. The current cockpit surface includes:
+
+- `/start` and `/help`: show the command surface.
+- `/status`: render the active session descriptor, profile, status, message count, tools, pending approvals, and plugin count.
+- `/new`, `/profiles`, `/sessions`: create and switch sessions, select profiles, and delete sessions with confirmation.
+- `/continue`, `/abort`: resume or abort the active run; aborting a running session uses an inline confirmation button.
+- `/queue`: list, append, clear, and mode-switch steering and follow-up queues.
+- `/approvals`: list pending approval cards and resolve them with localized inline buttons.
+- `/processes` and `/process <job_id>`: list background commands, read bounded output, wait, write stdin with confirmation, terminate with confirmation, and send long output as a document.
+- `/manifest`: inspect manifest state, resolved system prompt, pending proposals, approve proposals, and apply approved patches with confirmation.
+- `/subagent <role> [initial prompt]`: create a child session, subscribe Telegram display routing, and prompt it after subscription is active.
+- `/settings`: reserved command-menu entry for bridge settings; it currently returns a localized not-implemented card.
+
+## Media and Files
+
+The bridge uses a hybrid file policy:
+
+- Text and small Telegram media are converted to inline `MediaBlock` data with Telegram metadata preserved.
+- Large Telegram files are downloaded to the configured `downloadDir` and passed to the agent as `file://` media URIs.
+- Assistant image, document, audio, voice, and video blocks are sent with native Telegram media APIs when local bytes or files are available.
+- Provider-only media that cannot be uploaded is rendered as a readable fallback card.
+- Long process output is truncated for chat readability and can be sent as a Telegram document.
+
+`startupUpdatePolicy` defaults to `skip_pending_without_checkpoint`: if no offset checkpoint exists, the bridge consumes pending updates and starts from new messages to avoid replaying old user input after restart. With a checkpoint, polling resumes from the stored `update_id + 1`.
+
+## Live Smoke SOP
+
+Use a private chat with the allowlisted test user.
+
+Minimal smoke:
+
+- Start the bridge with either the OpenRouter free or ChatGPT subscription command above.
+- Send `/status`.
+- Send one text prompt and wait for the final reply.
+
+Extended regression:
+
+- Photo, document, voice, and video input.
+- Native assistant media or document output.
+- Approval card allow/deny.
+- `/processes` and `/process <job_id>` after asking the agent to run a background command.
+- `/manifest` proposal approve/apply path.
+- `/subagent researcher <task>` routing.
+
+Webhook, Mini App, payments, inline mode, business connections, channel administration, and topic auto-management are intentionally out of scope for this phase.

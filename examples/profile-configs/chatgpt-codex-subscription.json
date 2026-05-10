@@ -10,7 +10,7 @@
       "description": "ChatGPT subscription through the Codex Responses backend.",
       "provider": {
         "type": "chatgpt_responses",
-        "model": "gpt-5.3-codex-spark",
+        "model": "gpt-5.4-mini",
         "stateMode": "stateless",
         "reasoning": {
           "effort": "medium",

@@ -408,13 +408,13 @@
 **Description:** 更新 Telegram docs、interaction docs 和示例配置，明确 Agent Cockpit 能力、文件策略、安全默认值、长任务体验、命令列表和 live testing SOP。
 
 **Acceptance criteria:**
-- [ ] `TELEGRAM.md` 不再描述 V1 缺少 media/file/profile/process 等能力。
-- [ ] docs 说明 personal-first、long-polling-first、hybrid file policy。
-- [ ] 示例配置包含 Telegram file policy 和 startup update policy。
-- [ ] 文档给出 ChatGPT subscription 与 OpenRouter free 两条 smoke 命令。
+- [x] `TELEGRAM.md` 不再描述 V1 缺少 media/file/profile/process 等能力。
+- [x] docs 说明 personal-first、long-polling-first、hybrid file policy。
+- [x] 示例配置包含 Telegram file policy 和 startup update policy。
+- [x] 文档给出 ChatGPT subscription 与 OpenRouter free 两条 smoke 命令。
 
 **Verification:**
-- [ ] `rg -n "Telegram Agent Cockpit|filePolicy|startupUpdatePolicy|/processes|/manifest" crates/noloong-agent-telegram/docs crates/noloong-agent/docs examples/profile-configs`
+- [x] `rg -n "Telegram Agent Cockpit|filePolicy|startupUpdatePolicy|/processes|/manifest" crates/noloong-agent-telegram/docs crates/noloong-agent/docs examples/profile-configs`
 
 **Dependencies:** Task 15
 

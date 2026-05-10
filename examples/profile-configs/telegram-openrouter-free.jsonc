@@ -1,6 +1,10 @@
 {
   "$schema": "../../schemas/profile-config.schema.json",
   // JSONC is supported only for root profile config files.
+  //
+  // Telegram bridge runtime settings such as filePolicy and startupUpdatePolicy
+  // are intentionally not profile settings. Configure them with CLI flags or
+  // environment variables; see crates/noloong-agent-telegram/docs/TELEGRAM.md.
   "defaultProfileId": "telegram-openrouter-free",
   "registryStore": {
     "type": "memory",
