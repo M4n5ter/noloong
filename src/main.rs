@@ -481,17 +481,6 @@ impl BridgeUpdateHandler {
     }
 }
 
-#[cfg(test)]
-fn telegram_text_input(
-    message: noloong_agent_telegram::polling::TelegramMessage,
-    bot_username: Option<&str>,
-) -> Option<noloong_agent_telegram::access::TelegramTextInput> {
-    match TelegramInboundUpdate::from_message(message, bot_username)? {
-        TelegramInboundUpdate::Message(message) => message.into_text_input(),
-        TelegramInboundUpdate::Command(_) => None,
-    }
-}
-
 fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliError> {
     let path = env_or_value(path, DEFAULT_PROFILE_CONFIG_ENV)
         .ok_or(config::CliConfigError::MissingProfileConfig)?;
@@ -959,14 +948,16 @@ mod tests {
     use super::{
         BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand, CliError,
         ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
-        run_profile_config_schema, telegram_config_from_values, telegram_text_input,
-        validate_interaction_bind,
+        run_profile_config_schema, telegram_config_from_values, validate_interaction_bind,
     };
     use crate::schema::profile_config_schema_json;
     use crate::test_support::{remove_temp_file, write_temp_file};
     use clap::Parser;
     use noloong_agent::Locale;
-    use noloong_agent_telegram::polling::{TelegramChat, TelegramMessage, TelegramUser};
+    use noloong_agent_telegram::{
+        input::TelegramInboundUpdate,
+        polling::{TelegramChat, TelegramMessage, TelegramUser},
+    };
     use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
     #[test]
@@ -1211,7 +1202,11 @@ mod tests {
             })),
         };
 
-        let input = telegram_text_input(message, Some("@noloong_bot")).unwrap();
+        let input =
+            match TelegramInboundUpdate::from_message(message, Some("@noloong_bot")).unwrap() {
+                TelegramInboundUpdate::Message(message) => message.into_text_input().unwrap(),
+                TelegramInboundUpdate::Command(_) => panic!("expected text input"),
+            };
 
         assert!(input.is_reply_to_bot);
     }

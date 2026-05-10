@@ -90,10 +90,9 @@ impl TelegramTextInput {
     pub fn addresses_bot(&self, bot_username: Option<&str>) -> bool {
         self.is_reply_to_bot
             || bot_username.is_some_and(|username| {
-                let mention = format!("@{}", username.trim_start_matches('@'));
                 self.text
                     .split_whitespace()
-                    .any(|word| trim_mention_token(word) == mention)
+                    .any(|word| mention_token_matches_username(word, username))
             })
     }
 
@@ -101,10 +100,9 @@ impl TelegramTextInput {
         let Some(username) = bot_username else {
             return self.text.trim().to_owned();
         };
-        let mention = format!("@{}", username.trim_start_matches('@'));
         self.text
             .split_whitespace()
-            .filter(|word| trim_mention_token(word) != mention)
+            .filter(|word| !mention_token_matches_username(word, username))
             .collect::<Vec<_>>()
             .join(" ")
             .trim()
@@ -150,6 +148,22 @@ impl TelegramChatKind {
 
 fn default_require_mention_in_groups() -> bool {
     true
+}
+
+pub fn telegram_username_matches(username: &str, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    telegram_username_body(username).eq_ignore_ascii_case(telegram_username_body(expected))
+}
+
+fn telegram_username_body(username: &str) -> &str {
+    username.trim().trim_start_matches('@')
+}
+
+fn mention_token_matches_username(word: &str, username: &str) -> bool {
+    let token = trim_mention_token(word);
+    token.starts_with('@') && telegram_username_matches(token, Some(username))
 }
 
 fn trim_mention_token(word: &str) -> &str {

@@ -1,5 +1,5 @@
 use crate::{
-    access::{TelegramChatKind, TelegramTextInput},
+    access::{TelegramChatKind, TelegramTextInput, telegram_username_matches},
     polling::{
         TelegramAudio, TelegramDocument, TelegramMessage, TelegramMessageEntity, TelegramPhotoSize,
         TelegramVideo, TelegramVoice,
@@ -26,38 +26,23 @@ impl TelegramInboundUpdate {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TelegramInboundMessage {
-    pub chat_id: i64,
-    pub thread_id: Option<i64>,
-    pub chat_kind: TelegramChatKind,
-    pub user_id: Option<u64>,
-    pub message_id: i64,
+    pub context: TelegramInboundContext,
     pub text: Option<String>,
     pub attachments: Vec<TelegramAttachment>,
-    pub is_reply_to_bot: bool,
 }
 
 impl TelegramInboundMessage {
     pub fn from_message(message: TelegramMessage, bot_username: Option<&str>) -> Option<Self> {
-        let text = message
-            .text
-            .clone()
-            .or_else(|| message.caption.clone())
-            .map(|text| text.trim().to_owned())
-            .filter(|text| !text.is_empty());
         let attachments = telegram_attachments(&message);
+        let context = TelegramInboundContext::from_message(&message, bot_username);
+        let text = message_text(message.text, message.caption);
         if text.is_none() && attachments.is_empty() {
             return None;
         }
-        let is_reply_to_bot = message_is_reply_to_bot(&message, bot_username);
         Some(Self {
-            chat_id: message.chat.id,
-            thread_id: message.message_thread_id,
-            chat_kind: TelegramChatKind::parse(&message.chat.kind),
-            user_id: message.from.map(|user| user.id),
-            message_id: message.message_id,
+            context,
             text,
             attachments,
-            is_reply_to_bot,
         })
     }
 
@@ -66,24 +51,20 @@ impl TelegramInboundMessage {
             return None;
         }
         Some(TelegramTextInput {
-            chat_id: self.chat_id,
-            thread_id: self.thread_id,
-            chat_kind: self.chat_kind,
-            user_id: self.user_id,
-            message_id: self.message_id,
+            chat_id: self.context.chat_id,
+            thread_id: self.context.thread_id,
+            chat_kind: self.context.chat_kind,
+            user_id: self.context.user_id,
+            message_id: self.context.message_id,
             text: self.text?,
-            is_reply_to_bot: self.is_reply_to_bot,
+            is_reply_to_bot: self.context.is_reply_to_bot,
         })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TelegramCommand {
-    pub chat_id: i64,
-    pub thread_id: Option<i64>,
-    pub chat_kind: TelegramChatKind,
-    pub user_id: Option<u64>,
-    pub message_id: i64,
+    pub context: TelegramInboundContext,
     pub name: String,
     pub bot_username: Option<String>,
     pub args: String,
@@ -95,11 +76,7 @@ impl TelegramCommand {
         let text = message.text.as_ref()?;
         let command = parse_command_text(text, &message.entities, bot_username)?;
         Some(Self {
-            chat_id: message.chat.id,
-            thread_id: message.message_thread_id,
-            chat_kind: TelegramChatKind::parse(&message.chat.kind),
-            user_id: message.from.as_ref().map(|user| user.id),
-            message_id: message.message_id,
+            context: TelegramInboundContext::from_message(message, bot_username),
             name: command.name,
             bot_username: command.bot_username,
             args: command.args,
@@ -109,25 +86,79 @@ impl TelegramCommand {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramInboundContext {
+    pub chat_id: i64,
+    pub thread_id: Option<i64>,
+    pub chat_kind: TelegramChatKind,
+    pub user_id: Option<u64>,
+    pub message_id: i64,
+    pub is_reply_to_bot: bool,
+}
+
+impl TelegramInboundContext {
+    fn from_message(message: &TelegramMessage, bot_username: Option<&str>) -> Self {
+        Self {
+            chat_id: message.chat.id,
+            thread_id: message.message_thread_id,
+            chat_kind: TelegramChatKind::parse(&message.chat.kind),
+            user_id: message.from.as_ref().map(|user| user.id),
+            message_id: message.message_id,
+            is_reply_to_bot: message_is_reply_to_bot(message, bot_username),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TelegramAttachment {
+    pub file: TelegramAttachmentFile,
     pub kind: TelegramAttachmentKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramAttachmentFile {
     pub file_id: String,
     pub file_unique_id: String,
     pub file_name: Option<String>,
     pub mime_type: Option<String>,
     pub file_size: Option<u64>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub duration: Option<u32>,
+}
+
+impl TelegramAttachmentFile {
+    fn new(
+        file_id: &str,
+        file_unique_id: &str,
+        file_name: Option<&str>,
+        mime_type: Option<&str>,
+        file_size: Option<u64>,
+    ) -> Self {
+        Self {
+            file_id: file_id.to_owned(),
+            file_unique_id: file_unique_id.to_owned(),
+            file_name: file_name.map(str::to_owned),
+            mime_type: mime_type.map(str::to_owned),
+            file_size,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TelegramAttachmentKind {
-    Photo,
+    Photo {
+        width: u32,
+        height: u32,
+    },
     Document,
-    Audio,
-    Voice,
-    Video,
+    Audio {
+        duration: u32,
+    },
+    Voice {
+        duration: u32,
+    },
+    Video {
+        width: u32,
+        height: u32,
+        duration: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +259,21 @@ fn join_text(existing: &str, next: &str) -> String {
     format!("{existing}\n{next}")
 }
 
+fn message_text(text: Option<String>, caption: Option<String>) -> Option<String> {
+    text.or(caption).and_then(trim_owned_text)
+}
+
+fn trim_owned_text(text: String) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == text.len() {
+        return Some(text);
+    }
+    Some(trimmed.to_owned())
+}
+
 fn telegram_attachments(message: &TelegramMessage) -> Vec<TelegramAttachment> {
     let mut attachments = Vec::new();
     if let Some(photo) = best_photo_size(&message.photo) {
@@ -260,71 +306,77 @@ fn best_photo_size(photo: &[TelegramPhotoSize]) -> Option<&TelegramPhotoSize> {
 impl TelegramAttachment {
     fn from_photo(photo: &TelegramPhotoSize) -> Self {
         Self {
-            kind: TelegramAttachmentKind::Photo,
-            file_id: photo.file_id.clone(),
-            file_unique_id: photo.file_unique_id.clone(),
-            file_name: None,
-            mime_type: None,
-            file_size: photo.file_size,
-            width: Some(photo.width),
-            height: Some(photo.height),
-            duration: None,
+            file: TelegramAttachmentFile::new(
+                &photo.file_id,
+                &photo.file_unique_id,
+                None,
+                None,
+                photo.file_size,
+            ),
+            kind: TelegramAttachmentKind::Photo {
+                width: photo.width,
+                height: photo.height,
+            },
         }
     }
 
     fn from_document(document: &TelegramDocument) -> Self {
         Self {
+            file: TelegramAttachmentFile::new(
+                &document.file_id,
+                &document.file_unique_id,
+                document.file_name.as_deref(),
+                document.mime_type.as_deref(),
+                document.file_size,
+            ),
             kind: TelegramAttachmentKind::Document,
-            file_id: document.file_id.clone(),
-            file_unique_id: document.file_unique_id.clone(),
-            file_name: document.file_name.clone(),
-            mime_type: document.mime_type.clone(),
-            file_size: document.file_size,
-            width: None,
-            height: None,
-            duration: None,
         }
     }
 
     fn from_audio(audio: &TelegramAudio) -> Self {
         Self {
-            kind: TelegramAttachmentKind::Audio,
-            file_id: audio.file_id.clone(),
-            file_unique_id: audio.file_unique_id.clone(),
-            file_name: audio.file_name.clone(),
-            mime_type: audio.mime_type.clone(),
-            file_size: audio.file_size,
-            width: None,
-            height: None,
-            duration: Some(audio.duration),
+            file: TelegramAttachmentFile::new(
+                &audio.file_id,
+                &audio.file_unique_id,
+                audio.file_name.as_deref(),
+                audio.mime_type.as_deref(),
+                audio.file_size,
+            ),
+            kind: TelegramAttachmentKind::Audio {
+                duration: audio.duration,
+            },
         }
     }
 
     fn from_voice(voice: &TelegramVoice) -> Self {
         Self {
-            kind: TelegramAttachmentKind::Voice,
-            file_id: voice.file_id.clone(),
-            file_unique_id: voice.file_unique_id.clone(),
-            file_name: None,
-            mime_type: voice.mime_type.clone(),
-            file_size: voice.file_size,
-            width: None,
-            height: None,
-            duration: Some(voice.duration),
+            file: TelegramAttachmentFile::new(
+                &voice.file_id,
+                &voice.file_unique_id,
+                None,
+                voice.mime_type.as_deref(),
+                voice.file_size,
+            ),
+            kind: TelegramAttachmentKind::Voice {
+                duration: voice.duration,
+            },
         }
     }
 
     fn from_video(video: &TelegramVideo) -> Self {
         Self {
-            kind: TelegramAttachmentKind::Video,
-            file_id: video.file_id.clone(),
-            file_unique_id: video.file_unique_id.clone(),
-            file_name: video.file_name.clone(),
-            mime_type: video.mime_type.clone(),
-            file_size: video.file_size,
-            width: Some(video.width),
-            height: Some(video.height),
-            duration: Some(video.duration),
+            file: TelegramAttachmentFile::new(
+                &video.file_id,
+                &video.file_unique_id,
+                video.file_name.as_deref(),
+                video.mime_type.as_deref(),
+                video.file_size,
+            ),
+            kind: TelegramAttachmentKind::Video {
+                width: video.width,
+                height: video.height,
+                duration: video.duration,
+            },
         }
     }
 }
@@ -392,12 +444,7 @@ fn message_is_reply_to_bot(message: &TelegramMessage, bot_username: Option<&str>
 }
 
 fn same_telegram_username(username: &str, expected: Option<&str>) -> bool {
-    let Some(expected) = expected else {
-        return false;
-    };
-    username
-        .trim_start_matches('@')
-        .eq_ignore_ascii_case(expected.trim_start_matches('@'))
+    telegram_username_matches(username, expected)
 }
 
 #[cfg(test)]
@@ -407,7 +454,10 @@ mod tests {
         TelegramTextBatcherConfig,
     };
     use crate::access::{TelegramChatKind, TelegramTextInput};
-    use crate::polling::{TelegramChat, TelegramMessage, TelegramMessageEntity, TelegramPhotoSize};
+    use crate::polling::{
+        TelegramChat, TelegramMessage, TelegramMessageEntity, TelegramMessageEntityKind,
+        TelegramPhotoSize,
+    };
 
     #[test]
     fn text_batching_combines_continuous_messages() {
@@ -477,10 +527,16 @@ mod tests {
             panic!("expected inbound message");
         };
         assert_eq!(message.text.as_deref(), Some("look"));
-        assert_eq!(message.thread_id, Some(3));
+        assert_eq!(message.context.thread_id, Some(3));
         assert_eq!(message.attachments.len(), 1);
-        assert_eq!(message.attachments[0].kind, TelegramAttachmentKind::Photo);
-        assert_eq!(message.attachments[0].file_id, "large");
+        assert_eq!(
+            message.attachments[0].kind,
+            TelegramAttachmentKind::Photo {
+                width: 1280,
+                height: 720
+            }
+        );
+        assert_eq!(message.attachments[0].file.file_id, "large");
         assert!(message.into_text_input().is_none());
     }
 
@@ -498,7 +554,7 @@ mod tests {
                 text: Some("/status@Noloong_Bot verbose".into()),
                 caption: None,
                 entities: vec![TelegramMessageEntity {
-                    kind: "bot_command".into(),
+                    kind: TelegramMessageEntityKind::BotCommand,
                     offset: 0,
                     length: 19,
                 }],

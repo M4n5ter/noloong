@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     future::Future,
     io::ErrorKind,
@@ -71,14 +71,51 @@ pub struct TelegramUser {
 #[serde(rename_all = "snake_case")]
 pub struct TelegramMessageEntity {
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: TelegramMessageEntityKind,
     pub offset: usize,
     pub length: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TelegramMessageEntityKind {
+    BotCommand,
+    Unknown(String),
+}
+
+impl TelegramMessageEntityKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::BotCommand => "bot_command",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for TelegramMessageEntityKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TelegramMessageEntityKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "bot_command" => Self::BotCommand,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
 impl TelegramMessageEntity {
     pub fn is_bot_command_at_start(&self) -> bool {
-        self.kind == "bot_command" && self.offset == 0
+        self.kind == TelegramMessageEntityKind::BotCommand && self.offset == 0
     }
 }
 
@@ -405,14 +442,18 @@ fn is_supported_update(update: &TelegramUpdate) -> bool {
 
 impl TelegramMessage {
     pub fn has_user_input(&self) -> bool {
+        self.has_text_input() || self.has_attachment_input()
+    }
+
+    pub fn has_text_input(&self) -> bool {
         self.text
-            .as_ref()
+            .as_deref()
+            .or(self.caption.as_deref())
             .is_some_and(|text| !text.trim().is_empty())
-            || self
-                .caption
-                .as_ref()
-                .is_some_and(|caption| !caption.trim().is_empty())
-            || !self.photo.is_empty()
+    }
+
+    pub fn has_attachment_input(&self) -> bool {
+        !self.photo.is_empty()
             || self.document.is_some()
             || self.audio.is_some()
             || self.voice.is_some()
@@ -428,8 +469,9 @@ fn network_backoff_seconds(retries: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TelegramOffsetStore, TelegramOffsetStoreFuture, TelegramPollOutcome, TelegramPoller,
-        TelegramPollingError, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
+        TelegramMessageEntityKind, TelegramOffsetStore, TelegramOffsetStoreFuture,
+        TelegramPollOutcome, TelegramPoller, TelegramPollingError, TelegramUpdateHandler,
+        TelegramUpdateHandlerFuture,
     };
     use crate::{
         config::TelegramStartupUpdatePolicy,
@@ -641,7 +683,10 @@ mod tests {
 
         let message = update.message.unwrap();
         assert_eq!(message.caption.as_deref(), Some("see attached"));
-        assert_eq!(message.caption_entities[0].kind, "bot_command");
+        assert_eq!(
+            message.caption_entities[0].kind,
+            TelegramMessageEntityKind::BotCommand
+        );
         assert_eq!(message.photo[0].file_id, "photo-1");
         assert_eq!(
             message.document.unwrap().file_name.as_deref(),
