@@ -5,6 +5,7 @@ use crate::{
     telegram_api::{
         TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramMessageHandle,
     },
+    text::{truncate_end_chars, truncate_middle_chars},
 };
 use noloong_agent_core::{
     ToolApprovalRequest, ToolPermissionDecision, ToolPermissionOutcome, ToolPermissionRequirement,
@@ -202,7 +203,7 @@ fn render_permission(permission: &ToolPermissionRequirement) -> String {
 fn render_arguments(arguments: &Value) -> String {
     match arguments {
         Value::Object(arguments) => render_argument_object(arguments),
-        _ => truncate_middle(&arguments.to_string(), APPROVAL_ARGUMENT_RENDER_LIMIT),
+        _ => truncate_middle_chars(&arguments.to_string(), APPROVAL_ARGUMENT_RENDER_LIMIT),
     }
 }
 
@@ -233,7 +234,7 @@ fn render_argument_object(arguments: &serde_json::Map<String, Value>) -> String 
     }
     text.push('}');
 
-    truncate_middle(&text, APPROVAL_ARGUMENT_RENDER_LIMIT)
+    truncate_middle_chars(&text, APPROVAL_ARGUMENT_RENDER_LIMIT)
 }
 
 fn render_argument_value_summary(value: &Value) -> String {
@@ -241,64 +242,10 @@ fn render_argument_value_summary(value: &Value) -> String {
         Value::Array(items) => format!("[{} items]", items.len()),
         Value::Object(map) => format!("{{{} keys}}", map.len()),
         Value::String(text) => {
-            Value::String(truncate_end(text, APPROVAL_ARGUMENT_VALUE_LIMIT)).to_string()
+            Value::String(truncate_end_chars(text, APPROVAL_ARGUMENT_VALUE_LIMIT)).to_string()
         }
         Value::Bool(_) | Value::Number(_) | Value::Null => value.to_string(),
     }
-}
-
-fn truncate_middle(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.into();
-    }
-    if max_chars <= 5 {
-        return truncate_end(text, max_chars);
-    }
-
-    let separator = " ... ";
-    let keep = max_chars.saturating_sub(separator.chars().count());
-    let head = keep / 2;
-    let tail = keep.saturating_sub(head);
-    let head_end = char_boundary_after(text, head);
-    let tail_start = char_boundary_from_end(text, tail);
-
-    format!("{}{}{}", &text[..head_end], separator, &text[tail_start..])
-}
-
-fn truncate_end(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= max_chars {
-        return text.into();
-    }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    let end = char_boundary_after(text, max_chars - 3);
-    format!("{}...", &text[..end])
-}
-
-fn char_boundary_after(text: &str, chars: usize) -> usize {
-    if chars == 0 {
-        return 0;
-    }
-    text.char_indices()
-        .nth(chars)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len())
-}
-
-fn char_boundary_from_end(text: &str, chars: usize) -> usize {
-    if chars == 0 {
-        return text.len();
-    }
-    text.char_indices()
-        .rev()
-        .nth(chars - 1)
-        .map(|(index, _)| index)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

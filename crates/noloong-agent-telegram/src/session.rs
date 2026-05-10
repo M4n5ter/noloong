@@ -156,6 +156,16 @@ pub enum TelegramSessionAction {
         job_id: String,
         text: String,
     },
+    ApproveManifestProposal {
+        session_id: String,
+        proposal_id: String,
+    },
+    RequestApplyApprovedManifest {
+        session_id: String,
+    },
+    ConfirmApplyApprovedManifest {
+        session_id: String,
+    },
 }
 
 pub fn single_button_markup(button: TelegramInlineKeyboardButton) -> TelegramInlineKeyboardMarkup {

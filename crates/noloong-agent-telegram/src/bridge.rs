@@ -14,7 +14,10 @@ use noloong_agent::interaction::{
     InteractionSessionDescriptor, InteractionSessionStatus, InteractionUxCapabilities,
     InteractionWsClient, InteractionWsNotification,
 };
-use noloong_agent::{JobSnapshot, ManifestPatch, ProcessOutput, SystemPromptAddition, WaitOutcome};
+use noloong_agent::{
+    AgentManifest, JobSnapshot, ManifestPatch, ManifestPatchProposal, ProcessOutput,
+    ResolvedSystemPrompt, SystemPromptAddition, WaitOutcome,
+};
 use noloong_agent_core::{
     AgentMessage, ContentBlock, MediaBlock, MessageRole, QueueMode, ToolApprovalRequest,
     ToolPermissionDecision,
@@ -50,6 +53,12 @@ const METHOD_PROCESS_READ: &str = "process/read";
 const METHOD_PROCESS_WAIT: &str = "process/wait";
 const METHOD_PROCESS_WRITE: &str = "process/write";
 const METHOD_PROCESS_TERMINATE: &str = "process/terminate";
+const METHOD_MANIFEST_GET: &str = "manifest/get";
+const METHOD_MANIFEST_SYSTEM_PROMPT_GET: &str = "manifest/system_prompt/get";
+const METHOD_MANIFEST_PROPOSALS_LIST: &str = "manifest/proposals/list";
+const METHOD_MANIFEST_PROPOSALS_APPROVE: &str = "manifest/proposals/approve";
+const METHOD_MANIFEST_APPLY_APPROVED: &str = "manifest/apply_approved";
+const METHOD_SUBAGENT_SPAWN: &str = "subagent/spawn";
 const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
 const TELEGRAM_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.telegram";
 
@@ -116,6 +125,8 @@ struct TelegramBridgeState {
     profile_id: Option<String>,
     preferred_profiles: BTreeMap<TelegramSessionKey, String>,
     sessions: BTreeMap<TelegramSessionKey, TelegramRuntimeSession>,
+    // Display session ids are not always derivable from Telegram chat ids; subagents use registry ids.
+    display_routes: BTreeMap<String, TelegramSessionKey>,
 }
 
 #[derive(Clone, Debug)]
@@ -464,6 +475,110 @@ impl TelegramBridge {
         .await
     }
 
+    pub async fn get_manifest(&self, session_id: &str) -> TelegramBridgeResult<AgentManifest> {
+        self.request_as(METHOD_MANIFEST_GET, json!({"sessionId": session_id}))
+            .await
+    }
+
+    pub async fn get_system_prompt(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<ResolvedSystemPrompt> {
+        self.request_as(
+            METHOD_MANIFEST_SYSTEM_PROMPT_GET,
+            json!({"sessionId": session_id}),
+        )
+        .await
+    }
+
+    pub async fn list_manifest_proposals(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<Vec<ManifestPatchProposal>> {
+        self.request_as(
+            METHOD_MANIFEST_PROPOSALS_LIST,
+            json!({"sessionId": session_id}),
+        )
+        .await
+    }
+
+    pub async fn approve_manifest_proposal(
+        &self,
+        session_id: &str,
+        proposal_id: &str,
+    ) -> TelegramBridgeResult<ManifestPatchProposal> {
+        self.request_as(
+            METHOD_MANIFEST_PROPOSALS_APPROVE,
+            json!({"sessionId": session_id, "proposalId": proposal_id}),
+        )
+        .await
+    }
+
+    pub async fn apply_approved_manifest(
+        &self,
+        session_id: &str,
+    ) -> TelegramBridgeResult<ManifestApplyResult> {
+        self.request_as(
+            METHOD_MANIFEST_APPLY_APPROVED,
+            json!({"sessionId": session_id}),
+        )
+        .await
+    }
+
+    pub async fn spawn_subagent(
+        &self,
+        context: &TelegramInboundContext,
+        parent_session_id: &str,
+        role: Option<String>,
+        initial_prompt: Option<String>,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        let key = TelegramSessionKey::new(context.chat_id, context.thread_id);
+        let descriptor = self
+            .request_as::<InteractionSessionDescriptor>(
+                METHOD_SUBAGENT_SPAWN,
+                json!({
+                    "parentSessionId": parent_session_id,
+                    "role": role,
+                    "metadata": telegram_session_metadata(
+                        context.chat_id,
+                        context.thread_id,
+                        context.chat_kind.as_str()
+                    ),
+                }),
+            )
+            .await?;
+        let subagent_session_id = descriptor.session_id.clone();
+        self.subscribe_display_session(key, &subagent_session_id)
+            .await?;
+
+        let Some(prompt) = initial_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+        else {
+            return Ok(descriptor);
+        };
+        let message = telegram_user_message(
+            context,
+            vec![ContentBlock::Text {
+                text: prompt.into(),
+            }],
+        );
+        let descriptor = self
+            .request_as::<InteractionSessionDescriptor>(
+                METHOD_AGENT_PROMPT,
+                json!({
+                    "sessionId": subagent_session_id.as_str(),
+                    "input": {"type": "message", "message": message},
+                }),
+            )
+            .await?;
+        if descriptor.session_id != subagent_session_id {
+            self.record_display_route(key, descriptor.session_id.clone());
+        }
+        Ok(descriptor)
+    }
+
     pub async fn list_profiles(&self) -> TelegramBridgeResult<Vec<InteractionProfileDescriptor>> {
         self.request_as(METHOD_PROFILE_LIST, json!({})).await
     }
@@ -621,6 +736,18 @@ impl TelegramBridge {
         key: TelegramSessionKey,
         session_id: &str,
     ) -> TelegramBridgeResult<()> {
+        let subscription_id = self.subscribe_display_session(key, session_id).await?;
+        if !self.record_subscription(key, subscription_id) {
+            return Err(TelegramBridgeError::MissingSession(key.session_id()));
+        }
+        Ok(())
+    }
+
+    async fn subscribe_display_session(
+        &self,
+        key: TelegramSessionKey,
+        session_id: &str,
+    ) -> TelegramBridgeResult<String> {
         let subscription = self
             .request_as::<SubscriptionResult>(
                 METHOD_DISPLAY_SUBSCRIBE,
@@ -636,10 +763,8 @@ impl TelegramBridge {
                 }),
             )
             .await?;
-        if !self.record_subscription(key, subscription.subscription_id) {
-            return Err(TelegramBridgeError::MissingSession(key.session_id()));
-        }
-        Ok(())
+        self.record_display_route(key, session_id.into());
+        Ok(subscription.subscription_id)
     }
 
     fn profile_id_for_key(&self, key: &TelegramSessionKey) -> TelegramBridgeResult<String> {
@@ -663,6 +788,16 @@ impl TelegramBridge {
             .sessions
             .get(key)
             .map(|session| session.session_id.clone())
+    }
+
+    pub fn session_key_for_display(&self, session_id: &str) -> Option<TelegramSessionKey> {
+        self.state
+            .lock()
+            .expect("telegram bridge state lock poisoned")
+            .display_routes
+            .get(session_id)
+            .copied()
+            .or_else(|| TelegramSessionKey::from_session_id(session_id))
     }
 
     fn session_status(
@@ -734,11 +869,20 @@ impl TelegramBridge {
         session.subscription_id.is_some()
     }
 
+    fn record_display_route(&self, key: TelegramSessionKey, session_id: String) {
+        self.state
+            .lock()
+            .expect("telegram bridge state lock poisoned")
+            .display_routes
+            .insert(session_id, key);
+    }
+
     fn remove_session_if_active(&self, key: TelegramSessionKey, session_id: &str) {
         let mut state = self
             .state
             .lock()
             .expect("telegram bridge state lock poisoned");
+        state.display_routes.remove(session_id);
         if state
             .sessions
             .get(&key)
@@ -837,6 +981,12 @@ pub struct InteractionDisplayNotification {
     pub session_id: String,
     pub subscription_id: String,
     pub event: DisplayEvent,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestApplyResult {
+    pub applied_proposal_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

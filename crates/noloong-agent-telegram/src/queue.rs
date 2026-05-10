@@ -1,3 +1,4 @@
+use crate::text::truncate_string_to_chars;
 use noloong_agent::interaction::{AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent};
 use noloong_agent_core::{ContentBlock, MediaKind};
 use serde::{Deserialize, Serialize};
@@ -63,7 +64,7 @@ pub fn summarize_queued_message(
         summary.push_str(labels.non_text_message);
     }
     if truncated {
-        truncate_to_chars(&mut summary, QUEUE_MESSAGE_RENDER_LIMIT.saturating_sub(3));
+        truncate_string_to_chars(&mut summary, QUEUE_MESSAGE_RENDER_LIMIT.saturating_sub(3));
         summary.push_str("...");
     }
     summary
@@ -113,13 +114,6 @@ fn append_with_limit(target: &mut String, text: &str, max_chars: usize) -> bool 
         remaining -= 1;
     }
     false
-}
-
-fn truncate_to_chars(target: &mut String, max_chars: usize) {
-    let Some((index, _)) = target.char_indices().nth(max_chars) else {
-        return;
-    };
-    target.truncate(index);
 }
 
 #[cfg(test)]

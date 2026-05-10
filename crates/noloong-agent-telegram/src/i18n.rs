@@ -4,9 +4,15 @@ use crate::{
         TelegramQueueKind, TelegramQueueSnapshot, TelegramQueueSummaryLabels,
         TelegramQueuedMessageIntent,
     },
+    text::whitespace_prefix_summary,
 };
-use noloong_agent::{JobSnapshot, JobStatus, WaitOutcome};
-use noloong_agent::{Locale, interaction::InteractionSessionStatus};
+use noloong_agent::{
+    AgentManifest, JobSnapshot, JobStatus, ManifestPatchProposal, ResolvedSystemPrompt, WaitOutcome,
+};
+use noloong_agent::{
+    Locale,
+    interaction::{InteractionSessionDescriptor, InteractionSessionStatus},
+};
 use noloong_agent_core::{QueueMode, ToolPermissionOutcome};
 use serde_json::Value;
 
@@ -24,6 +30,14 @@ pub struct TelegramStatusCard<'a> {
     pub pending_approvals: usize,
     pub plugins: usize,
 }
+
+pub struct TelegramManifestCard<'a> {
+    pub manifest: &'a AgentManifest,
+    pub system_prompt: &'a ResolvedSystemPrompt,
+    pub proposals: &'a [ManifestPatchProposal],
+}
+
+pub const MANIFEST_PROPOSAL_DISPLAY_LIMIT: usize = 5;
 
 impl TelegramUiCatalog {
     pub fn new(locale: Locale) -> Self {
@@ -577,6 +591,159 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn manifest_card(self, card: TelegramManifestCard<'_>) -> String {
+        let tools = card
+            .manifest
+            .enabled_tools
+            .iter()
+            .map(|tool| tool.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools = if tools.is_empty() {
+            self.manifest_no_enabled_tools().to_owned()
+        } else {
+            tools
+        };
+        let prompt_summary = whitespace_prefix_summary(&card.system_prompt.effective_text, 260);
+        let mut lines = match self.locale {
+            Locale::En => vec![
+                "Manifest".to_owned(),
+                format!(
+                    "System prompt: {}",
+                    self.manifest_prompt_source(card.system_prompt)
+                ),
+                format!("Prompt summary: {prompt_summary}"),
+                format!("Enabled tools: {tools}"),
+                format!("Plugins: {}", card.manifest.plugins.len()),
+                format!("Pending proposals: {}", card.proposals.len()),
+            ],
+            Locale::Zh => vec![
+                "Manifest".to_owned(),
+                format!(
+                    "系统提示词：{}",
+                    self.manifest_prompt_source(card.system_prompt)
+                ),
+                format!("提示词摘要：{prompt_summary}"),
+                format!("已启用工具：{tools}"),
+                format!("插件：{}", card.manifest.plugins.len()),
+                format!("待处理提案：{}", card.proposals.len()),
+            ],
+        };
+        if card.proposals.is_empty() {
+            lines.push(self.manifest_no_pending_proposals().into());
+        } else {
+            for (index, proposal) in card
+                .proposals
+                .iter()
+                .take(MANIFEST_PROPOSAL_DISPLAY_LIMIT)
+                .enumerate()
+            {
+                lines.push(self.manifest_proposal_item(index + 1, proposal));
+            }
+            let remaining = card
+                .proposals
+                .len()
+                .saturating_sub(MANIFEST_PROPOSAL_DISPLAY_LIMIT);
+            if remaining > 0 {
+                lines.push(match self.locale {
+                    Locale::En => format!("... and {remaining} more proposals"),
+                    Locale::Zh => format!("... 另有 {remaining} 个提案"),
+                });
+            }
+        }
+        lines.join("\n")
+    }
+
+    pub fn manifest_proposal_item(self, index: usize, proposal: &ManifestPatchProposal) -> String {
+        match self.locale {
+            Locale::En => format!("{index}. `{}`\n{}", proposal.proposal_id, proposal.summary),
+            Locale::Zh => format!("{index}. `{}`\n{}", proposal.proposal_id, proposal.summary),
+        }
+    }
+
+    pub fn manifest_proposal_approved(self, proposal: &ManifestPatchProposal) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "Manifest proposal approved\nProposal: `{}`\n{}",
+                proposal.proposal_id, proposal.summary
+            ),
+            Locale::Zh => format!(
+                "Manifest 提案已批准\n提案：`{}`\n{}",
+                proposal.proposal_id, proposal.summary
+            ),
+        }
+    }
+
+    pub fn manifest_apply_confirm(self, session_id: &str) -> String {
+        match self.locale {
+            Locale::En => format!("Apply approved manifest proposals?\nSession: {session_id}"),
+            Locale::Zh => format!("应用已批准的 manifest 提案？\n会话：{session_id}"),
+        }
+    }
+
+    pub fn manifest_applied(self, applied_proposal_ids: &[String]) -> String {
+        if applied_proposal_ids.is_empty() {
+            return match self.locale {
+                Locale::En => "No approved manifest proposals to apply".into(),
+                Locale::Zh => "没有可应用的已批准 manifest 提案".into(),
+            };
+        }
+        let ids = applied_proposal_ids
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match self.locale {
+            Locale::En => format!("Manifest updated\nApplied: {ids}"),
+            Locale::Zh => format!("Manifest 已更新\n已应用：{ids}"),
+        }
+    }
+
+    pub fn approve_manifest_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Approve",
+            Locale::Zh => "批准",
+        }
+    }
+
+    pub fn apply_manifest_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Apply approved",
+            Locale::Zh => "应用已批准",
+        }
+    }
+
+    pub fn confirm_apply_manifest_button(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Confirm apply",
+            Locale::Zh => "确认应用",
+        }
+    }
+
+    pub fn subagent_usage(self) -> &'static str {
+        match self.locale {
+            Locale::En => "Usage: /subagent <role> [initial prompt]",
+            Locale::Zh => "用法：/subagent <role> [initial prompt]",
+        }
+    }
+
+    pub fn subagent_spawned(self, descriptor: &InteractionSessionDescriptor) -> String {
+        match self.locale {
+            Locale::En => format!(
+                "Subagent session created\nSession: {}\nRole: {}\nStatus: {}",
+                descriptor.session_id,
+                descriptor.role.as_deref().unwrap_or("subagent"),
+                self.session_status(&descriptor.status)
+            ),
+            Locale::Zh => format!(
+                "子智能体会话已创建\n会话：{}\n角色：{}\n状态：{}",
+                descriptor.session_id,
+                descriptor.role.as_deref().unwrap_or("subagent"),
+                self.session_status(&descriptor.status)
+            ),
+        }
+    }
+
     pub fn status_card(self, card: TelegramStatusCard<'_>) -> String {
         let status = self.session_status(card.status);
         match self.locale {
@@ -731,6 +898,36 @@ impl TelegramUiCatalog {
         match self.locale {
             Locale::En => format!("Media input failed: {error}"),
             Locale::Zh => format!("媒体输入失败：{error}"),
+        }
+    }
+
+    fn manifest_no_enabled_tools(self) -> &'static str {
+        match self.locale {
+            Locale::En => "none",
+            Locale::Zh => "无",
+        }
+    }
+
+    fn manifest_no_pending_proposals(self) -> &'static str {
+        match self.locale {
+            Locale::En => "No pending manifest proposals",
+            Locale::Zh => "没有待处理 manifest 提案",
+        }
+    }
+
+    fn manifest_prompt_source(self, system_prompt: &ResolvedSystemPrompt) -> String {
+        let source = system_prompt.source.as_str();
+        let configured = system_prompt
+            .configured_profile
+            .map(|profile| profile.as_str())
+            .unwrap_or("custom");
+        let resolved = system_prompt
+            .resolved_profile
+            .map(|profile| profile.as_str())
+            .unwrap_or(configured);
+        match self.locale {
+            Locale::En => format!("{source}, configured={configured}, resolved={resolved}"),
+            Locale::Zh => format!("{source}，配置={configured}，解析={resolved}"),
         }
     }
 

@@ -352,14 +352,15 @@
 **Description:** 暴露 manifest proposal 与 subagent spawn 能力。Telegram 侧只做安全 UI，不让用户直接编辑完整 manifest JSON。
 
 **Acceptance criteria:**
-- [ ] `/manifest` 显示 system prompt summary、enabled tools、pending proposals。
-- [ ] pending proposal 可 approve，apply approved 必须确认。
-- [ ] `/subagent` 可基于 active session spawn 子会话，并可带 initial prompt。
-- [ ] subagent session 自动加入当前 chat 的 session list。
+- [x] `/manifest` 显示 system prompt summary、enabled tools、pending proposals。
+- [x] pending proposal 可 approve，apply approved 必须确认。
+- [x] `/subagent` 可基于 active session spawn 子会话，并可带 initial prompt。
+- [x] subagent session 自动加入当前 chat 的 session list。
 
 **Verification:**
-- [ ] `cargo test -p noloong-agent-telegram manifest subagent`
-- [ ] fake interaction 覆盖 `manifest/*` 与 `subagent/spawn`。
+- [x] `cargo test -p noloong-agent-telegram`
+- [x] `cargo test -p noloong telegram_`
+- [x] fake interaction 覆盖 `manifest/*` 与 `subagent/spawn`。
 
 **Dependencies:** Task 11
 

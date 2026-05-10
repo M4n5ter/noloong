@@ -42,7 +42,10 @@ use noloong_agent_telegram::{
     config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
-    i18n::{TelegramStatusCard, TelegramUiCatalog},
+    i18n::{
+        MANIFEST_PROPOSAL_DISPLAY_LIMIT, TelegramManifestCard, TelegramStatusCard,
+        TelegramUiCatalog,
+    },
     input::{TelegramCommand, TelegramInboundMessage, TelegramInboundUpdate},
     media::TelegramAttachmentResolver,
     network::{
@@ -388,7 +391,7 @@ async fn run_display_delivery(
         let Some(display) = TelegramBridge::parse_display_notification(notification)? else {
             continue;
         };
-        let Some(key) = TelegramSessionKey::from_session_id(&display.session_id) else {
+        let Some(key) = bridge.session_key_for_display(&display.session_id) else {
             continue;
         };
         let state = display_state_for(&display_states, key).await;
@@ -491,6 +494,8 @@ impl BridgeUpdateHandler {
             Some(TelegramCockpitCommand::Approvals) => self.send_pending_approvals(command).await,
             Some(TelegramCockpitCommand::Processes) => self.send_processes(command).await,
             Some(TelegramCockpitCommand::Process) => self.send_process(command).await,
+            Some(TelegramCockpitCommand::Manifest) => self.send_manifest(command).await,
+            Some(TelegramCockpitCommand::Subagent) => self.spawn_subagent(command).await,
             Some(command_id) => self.send_command_not_ready(command, command_id).await,
             None => self.send_unknown_command_help(command).await,
         }
@@ -1043,6 +1048,83 @@ impl BridgeUpdateHandler {
         }
     }
 
+    async fn send_manifest(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let Some(session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let (manifest, system_prompt, proposals) = tokio::try_join!(
+            self.bridge.get_manifest(&session_id),
+            self.bridge.get_system_prompt(&session_id),
+            self.bridge.list_manifest_proposals(&session_id),
+        )
+        .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        let text = self.catalog.manifest_card(TelegramManifestCard {
+            manifest: &manifest,
+            system_prompt: &system_prompt,
+            proposals: &proposals,
+        });
+        let reply_markup = self.manifest_markup(&session_id, &proposals).await;
+        self.send_command_text_with_markup(command, &text, reply_markup)
+            .await
+    }
+
+    async fn manifest_markup(
+        &self,
+        session_id: &str,
+        proposals: &[noloong_agent::ManifestPatchProposal],
+    ) -> Option<TelegramInlineKeyboardMarkup> {
+        if proposals.is_empty() {
+            return None;
+        }
+        let mut actions = self.session_actions.lock().await;
+        Some(TelegramInlineKeyboardMarkup {
+            inline_keyboard: proposals
+                .iter()
+                .take(MANIFEST_PROPOSAL_DISPLAY_LIMIT)
+                .map(|proposal| {
+                    vec![actions.button(
+                        format!(
+                            "{} {}",
+                            self.catalog.approve_manifest_button(),
+                            proposal.proposal_id
+                        ),
+                        TelegramSessionAction::ApproveManifestProposal {
+                            session_id: session_id.into(),
+                            proposal_id: proposal.proposal_id.clone(),
+                        },
+                    )]
+                })
+                .collect(),
+        })
+    }
+
+    async fn spawn_subagent(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
+        let Some(parent_session_id) = self.active_session_id(&command) else {
+            return self
+                .send_command_text(command, self.catalog.no_active_session())
+                .await;
+        };
+        let Some(args) = parse_subagent_command_args(&command.args) else {
+            return self
+                .send_command_text(command, self.catalog.subagent_usage())
+                .await;
+        };
+        let descriptor = self
+            .bridge
+            .spawn_subagent(
+                &command.context,
+                &parent_session_id,
+                Some(args.role),
+                args.initial_prompt,
+            )
+            .await
+            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        self.send_command_text(command, &self.catalog.subagent_spawned(&descriptor))
+            .await
+    }
+
     async fn send_command_text(
         &self,
         command: TelegramCommand,
@@ -1418,6 +1500,62 @@ impl BridgeUpdateHandler {
                     .await
                     .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
             }
+            TelegramSessionAction::ApproveManifestProposal {
+                session_id,
+                proposal_id,
+            } => {
+                let proposal = self
+                    .bridge
+                    .approve_manifest_proposal(&session_id, &proposal_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                let button = self.session_actions.lock().await.button(
+                    self.catalog.apply_manifest_button(),
+                    TelegramSessionAction::RequestApplyApprovedManifest { session_id },
+                );
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.manifest_proposal_approved(&proposal),
+                        Some(single_button_markup(button)),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::RequestApplyApprovedManifest { session_id } => {
+                let button = self.session_actions.lock().await.button(
+                    self.catalog.confirm_apply_manifest_button(),
+                    TelegramSessionAction::ConfirmApplyApprovedManifest {
+                        session_id: session_id.clone(),
+                    },
+                );
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.manifest_apply_confirm(&session_id),
+                        Some(single_button_markup(button)),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
+            TelegramSessionAction::ConfirmApplyApprovedManifest { session_id } => {
+                let result = self
+                    .bridge
+                    .apply_approved_manifest(&session_id)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                self.delivery
+                    .edit_text(
+                        target,
+                        message_id,
+                        &self.catalog.manifest_applied(&result.applied_proposal_ids),
+                        Some(TelegramInlineKeyboardMarkup::empty()),
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+            }
         }
         self.api
             .answer_callback_query(&callback_id, Some(self.catalog.callback_recorded()))
@@ -1453,6 +1591,25 @@ fn parse_process_command_args(args: &str) -> Option<(String, ProcessCommandOpera
         job_id.into(),
         ProcessCommandOperation::Write { text: text.into() },
     ))
+}
+
+struct SubagentCommandArgs {
+    role: String,
+    initial_prompt: Option<String>,
+}
+
+fn parse_subagent_command_args(args: &str) -> Option<SubagentCommandArgs> {
+    let args = args.trim();
+    if args.is_empty() {
+        return None;
+    }
+    let (role, prompt) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let prompt = prompt.trim();
+    let initial_prompt = (!prompt.is_empty()).then(|| prompt.to_owned());
+    Some(SubagentCommandArgs {
+        role: role.into(),
+        initial_prompt,
+    })
 }
 
 fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliError> {
@@ -1931,8 +2088,8 @@ mod tests {
     use crate::test_support::{remove_temp_file, write_temp_file};
     use clap::Parser;
     use noloong_agent::{
-        AgentManifest, JobSnapshot, JobStatus, Locale, OutputChunk, ProcessOutput,
-        ProcessOutputStream, WaitOutcome,
+        AgentManifest, JobSnapshot, JobStatus, Locale, ManifestPatch, ManifestPatchProposal,
+        OutputChunk, ProcessOutput, ProcessOutputStream, SystemPromptAddition, WaitOutcome,
         interaction::{
             InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
             InteractionWsNotification,
@@ -2379,14 +2536,14 @@ mod tests {
 
         fixture
             .handler
-            .handle_command(telegram_command(5, "manifest"))
+            .handle_command(telegram_command(5, "settings"))
             .await
             .unwrap();
 
         assert!(fixture.interaction.methods().is_empty());
         assert_eq!(
             fixture.api.sent_texts().last().unwrap(),
-            "/manifest is in the cockpit menu\\. Its control surface is not implemented yet\\."
+            "/settings is in the cockpit menu\\. Its control surface is not implemented yet\\."
         );
     }
 
@@ -2745,6 +2902,96 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn telegram_manifest_command_approves_and_applies_proposal() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+        fixture
+            .interaction
+            .set_manifest_proposals(vec![manifest_proposal("manifest-proposal-1")]);
+
+        fixture
+            .handler
+            .handle_command(telegram_command(19, "manifest"))
+            .await
+            .unwrap();
+        let approve_data = fixture.api.last_sent_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("manifest-approve-cb", 621, &approve_data)
+            .await
+            .unwrap();
+        let apply_data = fixture.api.edited_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("manifest-apply-request-cb", 621, &apply_data)
+            .await
+            .unwrap();
+        let confirm_data = fixture.api.edited_callback_data(0, 0);
+        fixture
+            .handle_callback_with_data("manifest-apply-cb", 621, &confirm_data)
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(calls.iter().any(|(method, params)| {
+            method == "manifest/get" && params["sessionId"] == "telegram:42"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "manifest/system_prompt/get" && params["sessionId"] == "telegram:42"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "manifest/proposals/list" && params["sessionId"] == "telegram:42"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "manifest/proposals/approve"
+                && params["sessionId"] == "telegram:42"
+                && params["proposalId"] == "manifest-proposal-1"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "manifest/apply_approved" && params["sessionId"] == "telegram:42"
+        }));
+    }
+
+    #[tokio::test]
+    async fn telegram_subagent_command_spawns_child_and_prompts() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture.establish_session().await;
+
+        fixture
+            .handler
+            .handle_command(telegram_command_with_args(
+                20,
+                "subagent",
+                "researcher inspect storage",
+            ))
+            .await
+            .unwrap();
+        fixture
+            .handler
+            .handle_command(telegram_command(21, "sessions"))
+            .await
+            .unwrap();
+
+        let calls = fixture.interaction.calls();
+        assert!(calls.iter().any(|(method, params)| {
+            method == "subagent/spawn"
+                && params["parentSessionId"] == "telegram:42"
+                && params["role"] == "researcher"
+                && params["metadata"]["channel"] == "telegram"
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "agent/prompt"
+                && params["sessionId"] == "session-subagent-1"
+                && params["input"]["message"]["content"][0]["text"] == "inspect storage"
+        }));
+        assert!(
+            fixture
+                .api
+                .sent_texts()
+                .iter()
+                .any(|text| text.contains("session\\-subagent\\-1"))
+        );
+    }
+
     struct TelegramCallbackFixture {
         handler: BridgeUpdateHandler,
         api: Arc<FakeTelegramApi>,
@@ -2942,6 +3189,16 @@ mod tests {
         }
     }
 
+    fn manifest_proposal(proposal_id: &str) -> ManifestPatchProposal {
+        ManifestPatchProposal {
+            proposal_id: proposal_id.into(),
+            patch: ManifestPatch::UpsertSystemPromptAddition {
+                addition: SystemPromptAddition::new("telegram.test", "Test addition."),
+            },
+            summary: "upsert system prompt addition telegram.test".into(),
+        }
+    }
+
     fn telegram_text_input(text: &str) -> TelegramTextInput {
         TelegramTextInput {
             chat_id: 42,
@@ -3005,6 +3262,8 @@ mod tests {
         queue_modes: StdMutex<BTreeMap<(String, TelegramQueueKind), QueueMode>>,
         processes: StdMutex<Vec<JobSnapshot>>,
         process_outputs: StdMutex<BTreeMap<String, ProcessOutput>>,
+        manifest_proposals: StdMutex<Vec<ManifestPatchProposal>>,
+        approved_manifest_proposals: StdMutex<Vec<ManifestPatchProposal>>,
     }
 
     impl FakeInteraction {
@@ -3065,6 +3324,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(output.job_id.clone(), output);
+        }
+
+        fn set_manifest_proposals(&self, proposals: Vec<ManifestPatchProposal>) {
+            *self.manifest_proposals.lock().unwrap() = proposals;
         }
     }
 
@@ -3168,6 +3431,14 @@ mod tests {
                             });
                         Ok(serde_json::to_value(self.session_by_id(&request.session_id)).unwrap())
                     }
+                    "agent/prompt" => {
+                        let request = parse_fake_request::<FakePromptRequest>(params);
+                        let mut descriptor = self.session_by_id(&request.session_id);
+                        let _input = request.input;
+                        descriptor.status = InteractionSessionStatus::Running;
+                        self.upsert_session(descriptor.clone());
+                        Ok(serde_json::to_value(descriptor).unwrap())
+                    }
                     "queue/list" => {
                         let request = parse_fake_request::<FakeQueueRequest>(params);
                         let messages = self.queue_messages(&request.session_id, request.queue);
@@ -3250,6 +3521,73 @@ mod tests {
                         )
                         .unwrap())
                     }
+                    "manifest/get" => {
+                        let request = parse_fake_request::<FakeSessionRequest>(params);
+                        Ok(
+                            serde_json::to_value(self.session_by_id(&request.session_id).manifest)
+                                .unwrap(),
+                        )
+                    }
+                    "manifest/system_prompt/get" => {
+                        let request = parse_fake_request::<FakeSessionRequest>(params);
+                        let manifest = self.session_by_id(&request.session_id).manifest;
+                        let prompt = noloong_agent::system_prompt::resolve_system_prompt(
+                            manifest.locale,
+                            &manifest.system_prompt,
+                            None,
+                        );
+                        Ok(serde_json::to_value(prompt).unwrap())
+                    }
+                    "manifest/proposals/list" => Ok(serde_json::to_value(
+                        self.manifest_proposals.lock().unwrap().clone(),
+                    )
+                    .unwrap()),
+                    "manifest/proposals/approve" => {
+                        let request = parse_fake_request::<FakeManifestProposalRequest>(params);
+                        let FakeManifestProposalRequest {
+                            session_id: _session_id,
+                            proposal_id,
+                        } = request;
+                        let proposal = {
+                            let mut proposals = self.manifest_proposals.lock().unwrap();
+                            let index = proposals
+                                .iter()
+                                .position(|proposal| proposal.proposal_id == proposal_id)
+                                .unwrap();
+                            proposals.remove(index)
+                        };
+                        self.approved_manifest_proposals
+                            .lock()
+                            .unwrap()
+                            .push(proposal.clone());
+                        Ok(serde_json::to_value(proposal).unwrap())
+                    }
+                    "manifest/apply_approved" => {
+                        let _request = parse_fake_request::<FakeSessionRequest>(params);
+                        let applied_proposal_ids = self
+                            .approved_manifest_proposals
+                            .lock()
+                            .unwrap()
+                            .drain(..)
+                            .map(|proposal| proposal.proposal_id)
+                            .collect::<Vec<_>>();
+                        Ok(serde_json::json!({
+                            "appliedProposalIds": applied_proposal_ids
+                        }))
+                    }
+                    "subagent/spawn" => {
+                        let request = parse_fake_request::<FakeSubagentSpawnRequest>(params);
+                        let descriptor = session_descriptor_with_parent(
+                            "session-subagent-1",
+                            "profile-1",
+                            Some(request.parent_session_id),
+                            request.role,
+                            InteractionSessionStatus::Idle,
+                            request.metadata,
+                        );
+                        self.upsert_session(descriptor.clone());
+                        Ok(serde_json::to_value(descriptor).unwrap())
+                    }
                     "display/subscribe" => Ok(json!({"subscriptionId": "subscription-1"})),
                     _ => Ok(serde_json::to_value(session_descriptor()).unwrap()),
                 }
@@ -3315,6 +3653,17 @@ mod tests {
                 })
                 .unwrap_or_else(|| job_snapshot(job_id, status))
         }
+
+        fn upsert_session(&self, descriptor: InteractionSessionDescriptor) {
+            let mut sessions = self.sessions.lock().unwrap();
+            match sessions
+                .iter_mut()
+                .find(|session| session.session_id == descriptor.session_id)
+            {
+                Some(session) => *session = descriptor,
+                None => sessions.push(descriptor),
+            }
+        }
     }
 
     #[derive(serde::Deserialize)]
@@ -3328,6 +3677,13 @@ mod tests {
     struct FakeFollowUpRequest {
         session_id: String,
         message: AgentMessage,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakePromptRequest {
+        session_id: String,
+        input: Value,
     }
 
     #[derive(serde::Deserialize)]
@@ -3378,6 +3734,21 @@ mod tests {
         text: String,
     }
 
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeManifestProposalRequest {
+        session_id: String,
+        proposal_id: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeSubagentSpawnRequest {
+        parent_session_id: String,
+        role: Option<String>,
+        metadata: serde_json::Map<String, Value>,
+    }
+
     fn parse_fake_request<T>(params: Value) -> T
     where
         T: serde::de::DeserializeOwned,
@@ -3426,11 +3797,22 @@ mod tests {
         status: InteractionSessionStatus,
         metadata: serde_json::Map<String, Value>,
     ) -> InteractionSessionDescriptor {
+        session_descriptor_with_parent(session_id, profile_id, None, None, status, metadata)
+    }
+
+    fn session_descriptor_with_parent(
+        session_id: &str,
+        profile_id: &str,
+        parent_session_id: Option<String>,
+        role: Option<String>,
+        status: InteractionSessionStatus,
+        metadata: serde_json::Map<String, Value>,
+    ) -> InteractionSessionDescriptor {
         InteractionSessionDescriptor {
             session_id: session_id.into(),
             profile_id: profile_id.into(),
-            parent_session_id: None,
-            role: None,
+            parent_session_id,
+            role,
             status,
             manifest: AgentManifest::default(),
             state: AgentState::default(),

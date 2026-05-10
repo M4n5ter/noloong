@@ -4,6 +4,84 @@ pub fn telegram_utf16_units(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
+pub(crate) fn truncate_end_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_chars {
+        return text.into();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let end = char_boundary_after(text, max_chars - 3);
+    format!("{}...", &text[..end])
+}
+
+pub(crate) fn truncate_middle_chars(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.into();
+    }
+    if max_chars <= 5 {
+        return truncate_end_chars(text, max_chars);
+    }
+
+    let separator = " ... ";
+    let keep = max_chars.saturating_sub(separator.chars().count());
+    let head = keep / 2;
+    let tail = keep.saturating_sub(head);
+    let head_end = char_boundary_after(text, head);
+    let tail_start = char_boundary_from_end(text, tail);
+
+    format!("{}{}{}", &text[..head_end], separator, &text[tail_start..])
+}
+
+pub(crate) fn truncate_string_to_chars(target: &mut String, max_chars: usize) {
+    let Some((index, _)) = target.char_indices().nth(max_chars) else {
+        return;
+    };
+    target.truncate(index);
+}
+
+pub(crate) fn whitespace_prefix_summary(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut summary = String::new();
+    let mut chars = 0;
+    let mut truncated = false;
+    for word in text.split_whitespace() {
+        let separator_chars = usize::from(!summary.is_empty());
+        let word_chars = word.chars().count();
+        if chars + separator_chars + word_chars <= max_chars {
+            if separator_chars == 1 {
+                summary.push(' ');
+                chars += 1;
+            }
+            summary.push_str(word);
+            chars += word_chars;
+            continue;
+        }
+
+        truncated = true;
+        if separator_chars == 1 && chars < max_chars {
+            summary.push(' ');
+            chars += 1;
+        }
+        for ch in word.chars().take(max_chars.saturating_sub(chars)) {
+            summary.push(ch);
+        }
+        break;
+    }
+
+    if truncated {
+        summary.push_str("...");
+    }
+    summary
+}
+
 pub fn split_telegram_text(text: &str, max_units: usize) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
@@ -87,13 +165,37 @@ fn push_line_with_limit(
     }
 }
 
+fn char_boundary_after(text: &str, chars: usize) -> usize {
+    if chars == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(chars)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn char_boundary_from_end(text: &str, chars: usize) -> usize {
+    if chars == 0 {
+        return text.len();
+    }
+    text.char_indices()
+        .rev()
+        .nth(chars.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
 fn continuation_marker(total: usize) -> String {
     format!("[{total}/{total}]\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{split_telegram_text, split_telegram_text_with_continuation, telegram_utf16_units};
+    use super::{
+        split_telegram_text, split_telegram_text_with_continuation, telegram_utf16_units,
+        truncate_middle_chars, whitespace_prefix_summary,
+    };
 
     #[test]
     fn split_keeps_head_and_tail_chunks() {
@@ -135,5 +237,18 @@ mod tests {
         let chunks = split_telegram_text_with_continuation("abc", 9);
 
         assert_eq!(chunks, vec!["abc"]);
+    }
+
+    #[test]
+    fn truncate_middle_uses_char_boundaries() {
+        assert_eq!(truncate_middle_chars("a你b好cdef", 7), "a ... f");
+    }
+
+    #[test]
+    fn whitespace_prefix_summary_collapses_and_truncates() {
+        assert_eq!(
+            whitespace_prefix_summary("  alpha\n beta gamma", 12),
+            "alpha beta g..."
+        );
     }
 }
