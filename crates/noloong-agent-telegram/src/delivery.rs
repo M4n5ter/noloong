@@ -11,6 +11,25 @@ use noloong_agent_core::AgentMessage;
 use std::sync::Arc;
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelegramMessageTarget {
+    pub chat_id: i64,
+    pub message_thread_id: Option<i64>,
+}
+
+impl TelegramMessageTarget {
+    pub fn new(chat_id: i64, message_thread_id: Option<i64>) -> Self {
+        Self {
+            chat_id,
+            message_thread_id,
+        }
+    }
+
+    pub fn chat(chat_id: i64) -> Self {
+        Self::new(chat_id, None)
+    }
+}
+
 #[derive(Clone)]
 pub struct TelegramDelivery {
     api: Arc<dyn TelegramApi>,
@@ -27,16 +46,16 @@ impl TelegramDelivery {
 
     pub async fn send_agent_message(
         &self,
-        chat_id: i64,
+        target: TelegramMessageTarget,
         message: &AgentMessage,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
-        self.send_text(chat_id, &render_agent_message_text(message), None)
+        self.send_text(target, &render_agent_message_text(message), None)
             .await
     }
 
     pub async fn send_text(
         &self,
-        chat_id: i64,
+        target: TelegramMessageTarget,
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
@@ -44,7 +63,7 @@ impl TelegramDelivery {
         let mut sent = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             sent.push(
-                self.send_one_text(chat_id, &chunk, reply_markup.clone())
+                self.send_one_text(target, &chunk, reply_markup.clone())
                     .await?,
             );
         }
@@ -53,7 +72,7 @@ impl TelegramDelivery {
 
     pub async fn edit_text(
         &self,
-        chat_id: i64,
+        target: TelegramMessageTarget,
         message_id: i64,
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
@@ -62,7 +81,7 @@ impl TelegramDelivery {
         match self
             .api
             .edit_message_text(TelegramEditMessageTextRequest {
-                chat_id,
+                chat_id: target.chat_id,
                 message_id,
                 text: rendered,
                 parse_mode: Some(TelegramParseMode::MarkdownV2),
@@ -72,13 +91,13 @@ impl TelegramDelivery {
         {
             Ok(message) => Ok(message),
             Err(error) if error.is_message_not_modified() => Ok(TelegramMessageHandle {
-                chat_id,
+                chat_id: target.chat_id,
                 message_id,
             }),
             Err(error) if error.is_parse_error() => self
                 .api
                 .edit_message_text(TelegramEditMessageTextRequest {
-                    chat_id,
+                    chat_id: target.chat_id,
                     message_id,
                     text: text.into(),
                     parse_mode: None,
@@ -92,7 +111,7 @@ impl TelegramDelivery {
 
     async fn send_one_text(
         &self,
-        chat_id: i64,
+        target: TelegramMessageTarget,
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
     ) -> TelegramDeliveryResult<TelegramMessageHandle> {
@@ -100,7 +119,8 @@ impl TelegramDelivery {
         match self
             .api
             .send_message(TelegramSendMessageRequest {
-                chat_id,
+                chat_id: target.chat_id,
+                message_thread_id: target.message_thread_id,
                 text: rendered,
                 parse_mode: Some(TelegramParseMode::MarkdownV2),
                 reply_markup: reply_markup.clone(),
@@ -111,7 +131,8 @@ impl TelegramDelivery {
             Err(error) if error.is_parse_error() => self
                 .api
                 .send_message(TelegramSendMessageRequest {
-                    chat_id,
+                    chat_id: target.chat_id,
+                    message_thread_id: target.message_thread_id,
                     text: text.into(),
                     parse_mode: None,
                     reply_markup,
@@ -133,7 +154,7 @@ pub enum TelegramDeliveryError {
 
 #[cfg(test)]
 mod tests {
-    use super::TelegramDelivery;
+    use super::{TelegramDelivery, TelegramMessageTarget};
     use crate::{
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
@@ -170,7 +191,10 @@ mod tests {
         let api = Arc::new(FakeTelegramApi::parse_error_once());
         let delivery = TelegramDelivery::new(api.clone(), 3900);
 
-        let sent = delivery.send_text(42, "*hello*", None).await.unwrap();
+        let sent = delivery
+            .send_text(TelegramMessageTarget::chat(42), "*hello*", None)
+            .await
+            .unwrap();
 
         assert_eq!(sent[0].message_id, 1);
         let calls = api
@@ -184,11 +208,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_text_preserves_thread_target() {
+        let api = Arc::new(FakeTelegramApi::parse_error_once());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+
+        delivery
+            .send_text(TelegramMessageTarget::new(42, Some(9)), "hello", None)
+            .await
+            .unwrap();
+
+        let calls = api
+            .sent_calls
+            .lock()
+            .expect("fake sent calls lock poisoned")
+            .clone();
+        assert_eq!(
+            calls.last().and_then(|call| call.message_thread_id),
+            Some(9)
+        );
+    }
+
+    #[tokio::test]
     async fn send_edit_fallbacks_treat_not_modified_as_success() {
         let api = Arc::new(FakeTelegramApi::message_not_modified());
         let delivery = TelegramDelivery::new(api, 3900);
 
-        let edited = delivery.edit_text(42, 9, "same", None).await.unwrap();
+        let edited = delivery
+            .edit_text(TelegramMessageTarget::chat(42), 9, "same", None)
+            .await
+            .unwrap();
 
         assert_eq!(edited.message_id, 9);
     }

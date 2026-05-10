@@ -12,9 +12,12 @@ use crate::{
         DEFAULT_TELEGRAM_ALLOWED_CHATS_ENV, DEFAULT_TELEGRAM_ALLOWED_USERS_ENV,
         DEFAULT_TELEGRAM_BOT_TOKEN_ENV, DEFAULT_TELEGRAM_BOT_USERNAME_ENV,
         DEFAULT_TELEGRAM_DISABLE_ENV_PROXY_ENV, DEFAULT_TELEGRAM_DISABLE_FALLBACK_IPS_ENV,
-        DEFAULT_TELEGRAM_FALLBACK_IPS_ENV, DEFAULT_TELEGRAM_LOCALE_ENV, DEFAULT_TELEGRAM_PROXY_ENV,
-        DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV, HostProfileConfig, env_or_value, parse_bool_env,
-        parse_csv_i64, parse_csv_u64,
+        DEFAULT_TELEGRAM_FALLBACK_IPS_ENV, DEFAULT_TELEGRAM_FILE_DOWNLOAD_DIR_ENV,
+        DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV, DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV,
+        DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV, DEFAULT_TELEGRAM_LOCALE_ENV,
+        DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV, DEFAULT_TELEGRAM_PROXY_ENV,
+        DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV, DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
+        HostProfileConfig, env_or_value, parse_bool_env, parse_csv_i64, parse_csv_u64,
     },
     host::build_registry,
 };
@@ -30,7 +33,8 @@ use noloong_agent::{
 use noloong_agent_telegram::{
     access::{TelegramAccessPolicy, TelegramChatKind, TelegramTextInput},
     bridge::TelegramBridge,
-    delivery::TelegramDelivery,
+    config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
+    delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, deliver_display_event},
     i18n::TelegramUiCatalog,
     network::{
@@ -38,8 +42,9 @@ use noloong_agent_telegram::{
         discover_fallback_addrs, network_resolution_mode,
     },
     polling::{
-        TelegramCallbackQuery, TelegramMessage, TelegramPollOutcome, TelegramPoller,
-        TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
+        FileTelegramOffsetStore, TelegramCallbackQuery, TelegramMessage, TelegramPollOutcome,
+        TelegramPoller, TelegramPollingError, TelegramUpdate, TelegramUpdateHandler,
+        TelegramUpdateHandlerFuture,
     },
     session::TelegramSessionKey,
     telegram_api::{ReqwestTelegramApi, TelegramApi},
@@ -239,11 +244,10 @@ async fn run_telegram_bridge_with_config(
     hydrate_telegram_fallback_addrs(&mut config.network).await?;
     log_telegram_network_mode(&config.network);
     let http_client = build_telegram_http_client(&config.network)?;
-    let api = Arc::new(ReqwestTelegramApi::new(
-        http_client,
-        &config.bot_token,
-        &config.network,
-    )) as Arc<dyn TelegramApi>;
+    let api = Arc::new(
+        ReqwestTelegramApi::new(http_client, &config.bot_token, &config.network)
+            .with_max_download_bytes(config.file_policy.max_download_bytes),
+    ) as Arc<dyn TelegramApi>;
     let delivery = TelegramDelivery::new(Arc::clone(&api), config.max_outbound_chars);
     let catalog = TelegramUiCatalog::new(config.locale);
     let display_states = Arc::new(Mutex::new(
@@ -266,7 +270,16 @@ async fn run_telegram_bridge_with_config(
         catalog,
         bot_username: config.bot_username.clone(),
     });
-    let poller = TelegramPoller::new(Arc::clone(&handler.api), handler);
+    let offset_checkpoint_path = config
+        .offset_checkpoint_path
+        .clone()
+        .or_else(|| default_telegram_offset_checkpoint_path(&config.bot_token));
+    let mut poller = TelegramPoller::new(Arc::clone(&handler.api), handler)
+        .with_startup_update_policy(config.startup_update_policy);
+    if let Some(path) = offset_checkpoint_path {
+        poller = poller.with_offset_store(Arc::new(FileTelegramOffsetStore::new(path)));
+    }
+    poller.initialize().await.map_err(CliError::Polling)?;
     log::info!("telegram bridge initialized; polling started");
 
     tokio::select! {
@@ -349,7 +362,7 @@ async fn run_display_delivery(
         deliver_display_event(
             &mut state,
             &delivery,
-            key.chat_id,
+            TelegramMessageTarget::new(key.chat_id, key.thread_id),
             display,
             show_tool_status,
             edit_throttle,
@@ -441,7 +454,7 @@ impl BridgeUpdateHandler {
             .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
         self.delivery
             .edit_text(
-                target.message.chat_id,
+                TelegramMessageTarget::chat(target.message.chat_id),
                 target.message.message_id,
                 &self.catalog.approval_resolved(&outcome),
                 None,
@@ -535,6 +548,36 @@ fn telegram_config_from_values(
         access.require_mention_in_groups,
     );
     let locale = telegram_locale(options.locale, env_source(DEFAULT_TELEGRAM_LOCALE_ENV))?;
+    let default_file_policy = TelegramFilePolicy::default();
+    let file_policy = TelegramFilePolicy {
+        inline_max_bytes: parse_config_usize(
+            options.file_inline_max_bytes,
+            env_source(DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV),
+            default_file_policy.inline_max_bytes,
+            DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV,
+        )?,
+        max_download_bytes: parse_config_usize(
+            options.file_max_download_bytes,
+            env_source(DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV),
+            default_file_policy.max_download_bytes,
+            DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV,
+        )?,
+        download_dir: options.file_download_dir.clone().or_else(|| {
+            non_empty_option(env_source(DEFAULT_TELEGRAM_FILE_DOWNLOAD_DIR_ENV)).map(PathBuf::from)
+        }),
+        retention_seconds: parse_config_optional_u64(
+            options.file_retention_seconds,
+            env_source(DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV),
+            DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV,
+        )?,
+    };
+    let startup_update_policy = telegram_startup_update_policy(
+        options.startup_update_policy,
+        env_source(DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV),
+    )?;
+    let offset_checkpoint_path = options.offset_checkpoint_path.clone().or_else(|| {
+        non_empty_option(env_source(DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV)).map(PathBuf::from)
+    });
     let network = TelegramNetworkConfig {
         proxy_url: non_empty_option(env_source(DEFAULT_TELEGRAM_PROXY_ENV)),
         fallback_ips: env_source(DEFAULT_TELEGRAM_FALLBACK_IPS_ENV)
@@ -578,6 +621,9 @@ fn telegram_config_from_values(
         max_outbound_chars: 3900,
         access,
         network,
+        file_policy,
+        startup_update_policy,
+        offset_checkpoint_path,
         show_tool_status: true,
         locale,
     };
@@ -641,6 +687,86 @@ fn parse_locale_arg(value: &str) -> Result<Locale, String> {
     Locale::parse(value).ok_or_else(|| format!("invalid locale: {value}"))
 }
 
+fn parse_telegram_startup_update_policy_arg(
+    value: &str,
+) -> Result<TelegramStartupUpdatePolicy, String> {
+    value
+        .parse::<TelegramStartupUpdatePolicy>()
+        .map_err(|error| error.to_string())
+}
+
+fn telegram_startup_update_policy(
+    cli_policy: Option<TelegramStartupUpdatePolicy>,
+    env_policy: Option<String>,
+) -> Result<TelegramStartupUpdatePolicy, CliError> {
+    if let Some(policy) = cli_policy {
+        return Ok(policy);
+    }
+    let Some(value) = env_policy.filter(|value| !value.trim().is_empty()) else {
+        return Ok(TelegramStartupUpdatePolicy::default());
+    };
+    value
+        .parse::<TelegramStartupUpdatePolicy>()
+        .map_err(|error| {
+            config::CliConfigError::ParseConfig(format!(
+                "invalid {DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV}: {error}"
+            ))
+            .into()
+        })
+}
+
+fn parse_config_usize(
+    cli_value: Option<usize>,
+    env_value: Option<String>,
+    default_value: usize,
+    env_name: &str,
+) -> Result<usize, CliError> {
+    if let Some(value) = cli_value {
+        return Ok(value);
+    }
+    let Some(value) = env_value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(default_value);
+    };
+    value.trim().parse::<usize>().map_err(|error| {
+        config::CliConfigError::ParseConfig(format!("invalid {env_name}: {error}")).into()
+    })
+}
+
+fn parse_config_optional_u64(
+    cli_value: Option<u64>,
+    env_value: Option<String>,
+    env_name: &str,
+) -> Result<Option<u64>, CliError> {
+    if cli_value.is_some() {
+        return Ok(cli_value);
+    }
+    let Some(value) = env_value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    value.trim().parse::<u64>().map(Some).map_err(|error| {
+        config::CliConfigError::ParseConfig(format!("invalid {env_name}: {error}")).into()
+    })
+}
+
+fn default_telegram_offset_checkpoint_path(bot_token: &str) -> Option<PathBuf> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    Some(
+        home.join(".agents")
+            .join("noloong")
+            .join("telegram")
+            .join(format!("{}.offset.json", stable_fingerprint(bot_token))),
+    )
+}
+
+fn stable_fingerprint(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn generate_token() -> Result<String, CliError> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| CliError::Random(error.to_string()))?;
@@ -667,6 +793,18 @@ struct TelegramBridgeOptions {
     allow_all: bool,
     #[arg(long = "telegram-locale", value_parser = parse_locale_arg)]
     locale: Option<Locale>,
+    #[arg(long = "telegram-file-inline-max-bytes")]
+    file_inline_max_bytes: Option<usize>,
+    #[arg(long = "telegram-file-max-download-bytes")]
+    file_max_download_bytes: Option<usize>,
+    #[arg(long = "telegram-file-download-dir")]
+    file_download_dir: Option<PathBuf>,
+    #[arg(long = "telegram-file-retention-seconds")]
+    file_retention_seconds: Option<u64>,
+    #[arg(long = "telegram-startup-update-policy", value_parser = parse_telegram_startup_update_policy_arg)]
+    startup_update_policy: Option<TelegramStartupUpdatePolicy>,
+    #[arg(long = "telegram-offset-checkpoint")]
+    offset_checkpoint_path: Option<PathBuf>,
     #[arg(long = "profile-id")]
     profile_id: Option<String>,
 }

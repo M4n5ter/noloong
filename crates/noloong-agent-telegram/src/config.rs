@@ -1,7 +1,7 @@
 use crate::{access::TelegramAccessPolicy, network::TelegramNetworkConfig};
 use noloong_agent::Locale;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +27,12 @@ pub struct TelegramBridgeConfig {
     pub access: TelegramAccessPolicy,
     #[serde(default)]
     pub network: TelegramNetworkConfig,
+    #[serde(default)]
+    pub file_policy: TelegramFilePolicy,
+    #[serde(default)]
+    pub startup_update_policy: TelegramStartupUpdatePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_checkpoint_path: Option<PathBuf>,
     #[serde(default = "default_show_tool_status")]
     pub show_tool_status: bool,
     #[serde(default = "default_locale")]
@@ -60,10 +66,79 @@ impl TelegramBridgeConfig {
         if self.interaction_ws_url.trim().is_empty() {
             return Err(TelegramConfigError::MissingInteractionUrl);
         }
+        self.file_policy.validate()?;
         self.access.validate()?;
         Ok(())
     }
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramFilePolicy {
+    #[serde(default = "default_inline_max_bytes")]
+    pub inline_max_bytes: usize,
+    #[serde(default = "default_max_download_bytes")]
+    pub max_download_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_seconds: Option<u64>,
+}
+
+impl Default for TelegramFilePolicy {
+    fn default() -> Self {
+        Self {
+            inline_max_bytes: default_inline_max_bytes(),
+            max_download_bytes: default_max_download_bytes(),
+            download_dir: None,
+            retention_seconds: None,
+        }
+    }
+}
+
+impl TelegramFilePolicy {
+    fn validate(&self) -> Result<(), TelegramConfigError> {
+        if self.inline_max_bytes > self.max_download_bytes {
+            return Err(TelegramConfigError::InvalidFilePolicy(
+                "inlineMaxBytes must be less than or equal to maxDownloadBytes".into(),
+            ));
+        }
+        if self
+            .download_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(TelegramConfigError::InvalidFilePolicy(
+                "downloadDir must not be empty when configured".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramStartupUpdatePolicy {
+    ProcessPending,
+    #[default]
+    SkipPendingWithoutCheckpoint,
+}
+
+impl FromStr for TelegramStartupUpdatePolicy {
+    type Err = TelegramStartupUpdatePolicyParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "process_pending" => Ok(Self::ProcessPending),
+            "skip_pending_without_checkpoint" => Ok(Self::SkipPendingWithoutCheckpoint),
+            _ => Err(TelegramStartupUpdatePolicyParseError(value.into())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("invalid Telegram startup update policy: {0}")]
+pub struct TelegramStartupUpdatePolicyParseError(String);
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TelegramConfigError {
@@ -75,6 +150,8 @@ pub enum TelegramConfigError {
     MissingInteractionUrl,
     #[error("Telegram allowlist is required unless allowAll is explicitly enabled")]
     MissingAllowlist,
+    #[error("Telegram file policy is invalid: {0}")]
+    InvalidFilePolicy(String),
 }
 
 fn default_message_window_ms() -> u64 {
@@ -93,6 +170,14 @@ fn default_max_outbound_chars() -> usize {
     3900
 }
 
+fn default_inline_max_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_max_download_bytes() -> usize {
+    20 * 1024 * 1024
+}
+
 fn default_show_tool_status() -> bool {
     true
 }
@@ -103,7 +188,7 @@ fn default_locale() -> Locale {
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramBridgeConfig, TelegramConfigError};
+    use super::{TelegramBridgeConfig, TelegramConfigError, TelegramStartupUpdatePolicy};
     use crate::access::TelegramAccessPolicy;
 
     #[test]
@@ -120,6 +205,9 @@ mod tests {
             max_outbound_chars: 3900,
             access: TelegramAccessPolicy::default(),
             network: Default::default(),
+            file_policy: Default::default(),
+            startup_update_policy: Default::default(),
+            offset_checkpoint_path: None,
             show_tool_status: true,
             locale: noloong_agent::Locale::En,
         };
@@ -144,6 +232,9 @@ mod tests {
             max_outbound_chars: 3900,
             access: TelegramAccessPolicy::allow_all(),
             network: Default::default(),
+            file_policy: Default::default(),
+            startup_update_policy: Default::default(),
+            offset_checkpoint_path: None,
             show_tool_status: true,
             locale: noloong_agent::Locale::En,
         };
@@ -154,5 +245,22 @@ mod tests {
             config.validate().unwrap_err(),
             TelegramConfigError::MissingBotToken
         );
+    }
+
+    #[test]
+    fn startup_update_policy_parses_cli_values() {
+        assert_eq!(
+            "process-pending"
+                .parse::<TelegramStartupUpdatePolicy>()
+                .unwrap(),
+            TelegramStartupUpdatePolicy::ProcessPending
+        );
+        assert_eq!(
+            "skip_pending_without_checkpoint"
+                .parse::<TelegramStartupUpdatePolicy>()
+                .unwrap(),
+            TelegramStartupUpdatePolicy::SkipPendingWithoutCheckpoint
+        );
+        assert!("unknown".parse::<TelegramStartupUpdatePolicy>().is_err());
     }
 }

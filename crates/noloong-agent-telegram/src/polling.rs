@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+};
 
+use crate::config::TelegramStartupUpdatePolicy;
 use crate::telegram_api::{TelegramApi, TelegramApiError};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,10 +75,94 @@ pub trait TelegramUpdateHandler: Send + Sync {
     fn handle_update<'a>(&'a self, update: TelegramUpdate) -> TelegramUpdateHandlerFuture<'a>;
 }
 
+pub type TelegramOffsetStoreFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, TelegramOffsetStoreError>> + Send + 'a>>;
+
+pub trait TelegramOffsetStore: Send + Sync {
+    fn load<'a>(&'a self) -> TelegramOffsetStoreFuture<'a, Option<i64>>;
+
+    fn save<'a>(&'a self, offset: i64) -> TelegramOffsetStoreFuture<'a, ()>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileTelegramOffsetStore {
+    path: PathBuf,
+}
+
+impl FileTelegramOffsetStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl TelegramOffsetStore for FileTelegramOffsetStore {
+    fn load<'a>(&'a self) -> TelegramOffsetStoreFuture<'a, Option<i64>> {
+        Box::pin(async move {
+            let text = match tokio::fs::read_to_string(&self.path).await {
+                Ok(text) => text,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(TelegramOffsetStoreError::read(&self.path, error)),
+            };
+            let checkpoint = serde_json::from_str::<TelegramOffsetCheckpoint>(&text)
+                .map_err(|error| TelegramOffsetStoreError::Decode(error.to_string()))?;
+            Ok(Some(checkpoint.offset))
+        })
+    }
+
+    fn save<'a>(&'a self, offset: i64) -> TelegramOffsetStoreFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(parent) = self.path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|error| TelegramOffsetStoreError::write(parent, error))?;
+            }
+            let text = serde_json::to_string(&TelegramOffsetCheckpoint { offset })
+                .map_err(|error| TelegramOffsetStoreError::Decode(error.to_string()))?;
+            tokio::fs::write(&self.path, text)
+                .await
+                .map_err(|error| TelegramOffsetStoreError::write(&self.path, error))
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TelegramOffsetCheckpoint {
+    offset: i64,
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TelegramOffsetStoreError {
+    #[error("telegram offset checkpoint read failed: {0}")]
+    Read(String),
+    #[error("telegram offset checkpoint write failed: {0}")]
+    Write(String),
+    #[error("telegram offset checkpoint decode failed: {0}")]
+    Decode(String),
+}
+
+impl TelegramOffsetStoreError {
+    fn read(path: &std::path::Path, error: std::io::Error) -> Self {
+        Self::Read(format!("{}: {error}", path.display()))
+    }
+
+    fn write(path: &std::path::Path, error: std::io::Error) -> Self {
+        Self::Write(format!("{}: {error}", path.display()))
+    }
+}
+
 #[derive(Clone)]
 pub struct TelegramPoller {
     api: Arc<dyn TelegramApi>,
     handler: Arc<dyn TelegramUpdateHandler>,
+    offset_store: Option<Arc<dyn TelegramOffsetStore>>,
+    startup_update_policy: TelegramStartupUpdatePolicy,
     offset: Option<i64>,
     conflict_retries: u8,
     network_retries: u8,
@@ -83,6 +174,8 @@ impl TelegramPoller {
         Self {
             api,
             handler,
+            offset_store: None,
+            startup_update_policy: TelegramStartupUpdatePolicy::default(),
             offset: None,
             conflict_retries: 0,
             network_retries: 0,
@@ -90,8 +183,34 @@ impl TelegramPoller {
         }
     }
 
+    pub fn with_offset_store(mut self, store: Arc<dyn TelegramOffsetStore>) -> Self {
+        self.offset_store = Some(store);
+        self
+    }
+
+    pub fn with_startup_update_policy(mut self, policy: TelegramStartupUpdatePolicy) -> Self {
+        self.startup_update_policy = policy;
+        self
+    }
+
     pub fn offset(&self) -> Option<i64> {
         self.offset
+    }
+
+    pub async fn initialize(&mut self) -> Result<(), TelegramPollingError> {
+        if self.offset.is_some() {
+            return Ok(());
+        }
+        if let Some(store) = &self.offset_store
+            && let Some(offset) = store.load().await?
+        {
+            self.offset = Some(offset);
+            return Ok(());
+        }
+        if self.startup_update_policy == TelegramStartupUpdatePolicy::SkipPendingWithoutCheckpoint {
+            self.skip_pending_updates().await?;
+        }
+        Ok(())
     }
 
     pub async fn poll_once(&mut self) -> Result<TelegramPollOutcome, TelegramPollingError> {
@@ -103,12 +222,17 @@ impl TelegramPoller {
             Ok(updates) => {
                 self.conflict_retries = 0;
                 self.network_retries = 0;
+                let mut latest_offset = None;
                 for update in updates {
                     let next_offset = update.update_id + 1;
                     if is_supported_update(&update) {
                         self.handler.handle_update(update).await?;
                     }
+                    latest_offset = Some(next_offset);
                     self.offset = Some(next_offset);
+                }
+                if let Some(offset) = latest_offset {
+                    self.save_offset(offset).await?;
                 }
                 Ok(TelegramPollOutcome::Polled)
             }
@@ -136,6 +260,22 @@ impl TelegramPoller {
             Err(error) => Err(TelegramPollingError::Api(error)),
         }
     }
+
+    async fn skip_pending_updates(&mut self) -> Result<(), TelegramPollingError> {
+        let updates = self.api.get_updates(None, 0).await?;
+        let Some(next_offset) = updates.iter().map(|update| update.update_id + 1).max() else {
+            return Ok(());
+        };
+        self.save_offset(next_offset).await
+    }
+
+    async fn save_offset(&mut self, offset: i64) -> Result<(), TelegramPollingError> {
+        if let Some(store) = &self.offset_store {
+            store.save(offset).await?;
+        }
+        self.offset = Some(offset);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +294,8 @@ pub enum TelegramPollingError {
     NetworkLimit(String),
     #[error("telegram update handler failed: {0}")]
     Handler(String),
+    #[error("telegram offset checkpoint failed: {0}")]
+    Offset(#[from] TelegramOffsetStoreError),
 }
 
 fn is_supported_update(update: &TelegramUpdate) -> bool {
@@ -173,10 +315,11 @@ fn network_backoff_seconds(retries: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TelegramPollOutcome, TelegramPoller, TelegramPollingError, TelegramUpdateHandler,
-        TelegramUpdateHandlerFuture,
+        TelegramOffsetStore, TelegramOffsetStoreFuture, TelegramPollOutcome, TelegramPoller,
+        TelegramPollingError, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     };
     use crate::{
+        config::TelegramStartupUpdatePolicy,
         polling::{TelegramChat, TelegramMessage, TelegramUpdate},
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
@@ -203,6 +346,83 @@ mod tests {
 
         assert_eq!(poller.offset(), Some(9));
         assert_eq!(handler.handled_ids(), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn polling_persists_offset_after_handled_updates() {
+        let api = Arc::new(FakeApi::with_updates(vec![text_update(7, "hello")]));
+        let handler = Arc::new(FakeHandler::default());
+        let store = Arc::new(FakeOffsetStore::default());
+        let mut poller = TelegramPoller::new(api, handler).with_offset_store(store.clone());
+
+        poller.poll_once().await.unwrap();
+
+        assert_eq!(store.offset(), Some(8));
+    }
+
+    #[tokio::test]
+    async fn polling_persists_offset_once_per_successful_batch() {
+        let api = Arc::new(FakeApi::with_updates(vec![
+            text_update(7, "hello"),
+            unsupported_update(8),
+        ]));
+        let handler = Arc::new(FakeHandler::default());
+        let store = Arc::new(FakeOffsetStore::default());
+        let mut poller = TelegramPoller::new(api, handler).with_offset_store(store.clone());
+
+        poller.poll_once().await.unwrap();
+
+        assert_eq!(store.offset(), Some(9));
+        assert_eq!(store.save_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn polling_does_not_advance_offset_when_handler_fails() {
+        let api = Arc::new(FakeApi::with_updates(vec![text_update(7, "hello")]));
+        let handler = Arc::new(FailingHandler);
+        let store = Arc::new(FakeOffsetStore::default());
+        let mut poller = TelegramPoller::new(api, handler).with_offset_store(store.clone());
+
+        assert!(matches!(
+            poller.poll_once().await.unwrap_err(),
+            TelegramPollingError::Handler(_)
+        ));
+        assert_eq!(poller.offset(), None);
+        assert_eq!(store.offset(), None);
+    }
+
+    #[tokio::test]
+    async fn startup_skip_pending_uses_checkpoint_when_missing() {
+        let api = Arc::new(FakeApi::with_updates(vec![
+            text_update(7, "old"),
+            text_update(8, "older"),
+        ]));
+        let handler = Arc::new(FakeHandler::default());
+        let store = Arc::new(FakeOffsetStore::default());
+        let mut poller = TelegramPoller::new(api.clone(), handler)
+            .with_offset_store(store.clone())
+            .with_startup_update_policy(TelegramStartupUpdatePolicy::SkipPendingWithoutCheckpoint);
+
+        poller.initialize().await.unwrap();
+
+        assert_eq!(poller.offset(), Some(9));
+        assert_eq!(store.offset(), Some(9));
+        assert_eq!(api.requested_offsets(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn startup_uses_existing_checkpoint_before_skip_policy() {
+        let api = Arc::new(FakeApi::with_updates(vec![text_update(7, "old")]));
+        let handler = Arc::new(FakeHandler::default());
+        let store = Arc::new(FakeOffsetStore::with_offset(12));
+        let mut poller = TelegramPoller::new(api.clone(), handler)
+            .with_offset_store(store)
+            .with_startup_update_policy(TelegramStartupUpdatePolicy::SkipPendingWithoutCheckpoint);
+
+        poller.initialize().await.unwrap();
+
+        assert_eq!(poller.offset(), Some(12));
+        assert_eq!(api.requested_offsets(), Vec::<Option<i64>>::new());
     }
 
     #[test]
@@ -338,9 +558,18 @@ mod tests {
         }
     }
 
+    struct FailingHandler;
+
+    impl TelegramUpdateHandler for FailingHandler {
+        fn handle_update<'a>(&'a self, _update: TelegramUpdate) -> TelegramUpdateHandlerFuture<'a> {
+            Box::pin(async { Err(TelegramPollingError::Handler("boom".into())) })
+        }
+    }
+
     struct FakeApi {
         updates: Mutex<VecDeque<Vec<TelegramUpdate>>>,
         errors: Mutex<VecDeque<TelegramApiError>>,
+        requested_offsets: Mutex<Vec<Option<i64>>>,
     }
 
     impl FakeApi {
@@ -348,6 +577,7 @@ mod tests {
             Self {
                 updates: Mutex::new(VecDeque::from([updates])),
                 errors: Mutex::new(VecDeque::new()),
+                requested_offsets: Mutex::new(Vec::new()),
             }
         }
 
@@ -355,18 +585,30 @@ mod tests {
             Self {
                 updates: Mutex::new(VecDeque::new()),
                 errors: Mutex::new(errors.into()),
+                requested_offsets: Mutex::new(Vec::new()),
             }
+        }
+
+        fn requested_offsets(&self) -> Vec<Option<i64>> {
+            self.requested_offsets
+                .lock()
+                .expect("fake requested offsets lock poisoned")
+                .clone()
         }
     }
 
     impl TelegramApi for FakeApi {
         fn get_updates<'a>(
             &'a self,
-            _offset: Option<i64>,
+            offset: Option<i64>,
             _timeout_seconds: u64,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<TelegramUpdate>, TelegramApiError>> + Send + 'a>>
         {
             Box::pin(async move {
+                self.requested_offsets
+                    .lock()
+                    .expect("fake requested offsets lock poisoned")
+                    .push(offset);
                 if let Some(error) = self
                     .errors
                     .lock()
@@ -418,6 +660,43 @@ mod tests {
             _text: Option<&'a str>,
         ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeOffsetStore {
+        offset: Mutex<Option<i64>>,
+        saves: Mutex<usize>,
+    }
+
+    impl FakeOffsetStore {
+        fn with_offset(offset: i64) -> Self {
+            Self {
+                offset: Mutex::new(Some(offset)),
+                saves: Mutex::new(0),
+            }
+        }
+
+        fn offset(&self) -> Option<i64> {
+            *self.offset.lock().expect("fake offset lock poisoned")
+        }
+
+        fn save_count(&self) -> usize {
+            *self.saves.lock().expect("fake saves lock poisoned")
+        }
+    }
+
+    impl TelegramOffsetStore for FakeOffsetStore {
+        fn load<'a>(&'a self) -> TelegramOffsetStoreFuture<'a, Option<i64>> {
+            Box::pin(async move { Ok(self.offset()) })
+        }
+
+        fn save<'a>(&'a self, offset: i64) -> TelegramOffsetStoreFuture<'a, ()> {
+            Box::pin(async move {
+                *self.offset.lock().expect("fake offset lock poisoned") = Some(offset);
+                *self.saves.lock().expect("fake saves lock poisoned") += 1;
+                Ok(())
+            })
         }
     }
 }

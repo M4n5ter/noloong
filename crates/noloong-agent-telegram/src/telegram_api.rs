@@ -1,8 +1,18 @@
 pub use crate::polling::TelegramUpdate;
 use crate::{network::TelegramNetworkConfig, polling::TelegramApiResponse};
-use reqwest::Client;
+use futures_util::StreamExt;
+use reqwest::{
+    Client,
+    multipart::{Form, Part},
+};
 use serde::{Deserialize, Serialize};
-use std::{error::Error as StdError, future::Future, pin::Pin};
+use serde_json::{Map, Value};
+use std::{
+    error::Error as StdError,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+};
 use thiserror::Error;
 
 pub type TelegramApiFuture<'a, T> =
@@ -15,6 +25,14 @@ pub trait TelegramApi: Send + Sync {
         timeout_seconds: u64,
     ) -> TelegramApiFuture<'a, Vec<TelegramUpdate>>;
 
+    fn get_file<'a>(&'a self, _file_id: &'a str) -> TelegramApiFuture<'a, TelegramFile> {
+        unsupported("getFile")
+    }
+
+    fn download_file<'a>(&'a self, _file_path: &'a str) -> TelegramApiFuture<'a, Vec<u8>> {
+        unsupported("downloadFile")
+    }
+
     fn send_message<'a>(
         &'a self,
         request: TelegramSendMessageRequest,
@@ -24,6 +42,55 @@ pub trait TelegramApi: Send + Sync {
         &'a self,
         request: TelegramEditMessageTextRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle>;
+
+    fn send_photo<'a>(
+        &'a self,
+        _request: TelegramSendPhotoRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        unsupported("sendPhoto")
+    }
+
+    fn send_document<'a>(
+        &'a self,
+        _request: TelegramSendDocumentRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        unsupported("sendDocument")
+    }
+
+    fn send_audio<'a>(
+        &'a self,
+        _request: TelegramSendAudioRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        unsupported("sendAudio")
+    }
+
+    fn send_voice<'a>(
+        &'a self,
+        _request: TelegramSendVoiceRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        unsupported("sendVoice")
+    }
+
+    fn send_video<'a>(
+        &'a self,
+        _request: TelegramSendVideoRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        unsupported("sendVideo")
+    }
+
+    fn send_chat_action<'a>(
+        &'a self,
+        _request: TelegramSendChatActionRequest,
+    ) -> TelegramApiFuture<'a, ()> {
+        unsupported("sendChatAction")
+    }
+
+    fn set_my_commands<'a>(
+        &'a self,
+        _request: TelegramSetMyCommandsRequest,
+    ) -> TelegramApiFuture<'a, ()> {
+        unsupported("setMyCommands")
+    }
 
     fn answer_callback_query<'a>(
         &'a self,
@@ -37,6 +104,7 @@ pub struct ReqwestTelegramApi {
     client: Client,
     base_url: String,
     token: String,
+    max_download_bytes: Option<usize>,
 }
 
 impl ReqwestTelegramApi {
@@ -48,7 +116,13 @@ impl ReqwestTelegramApi {
                 .clone()
                 .unwrap_or_else(|| "https://api.telegram.org".into()),
             token: token.into(),
+            max_download_bytes: None,
         }
+    }
+
+    pub fn with_max_download_bytes(mut self, max_download_bytes: usize) -> Self {
+        self.max_download_bytes = Some(max_download_bytes);
+        self
     }
 
     fn method_url(&self, method: &str) -> String {
@@ -57,6 +131,15 @@ impl ReqwestTelegramApi {
             self.base_url.trim_end_matches('/'),
             self.token,
             method
+        )
+    }
+
+    fn file_url(&self, file_path: &str) -> String {
+        format!(
+            "{}/file/bot{}/{}",
+            self.base_url.trim_end_matches('/'),
+            self.token,
+            file_path.trim_start_matches('/')
         )
     }
 
@@ -69,6 +152,79 @@ impl ReqwestTelegramApi {
         }
         let reason = details.join(": ").replace(&self.token, "<redacted>");
         TelegramApiError::Network(format!("{method} request failed: {reason}"))
+    }
+
+    async fn send_json<T>(
+        &self,
+        method: &str,
+        body: &T,
+    ) -> Result<reqwest::Response, TelegramApiError>
+    where
+        T: Serialize + ?Sized,
+    {
+        self.client
+            .post(self.method_url(method))
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| self.network_error(method, error))
+    }
+
+    async fn send_media(
+        &self,
+        method: &str,
+        file_field: &'static str,
+        request: TelegramSendMediaRequest,
+    ) -> Result<TelegramMessageHandle, TelegramApiError> {
+        let response = if let TelegramInputFile::FileId(file_id) = &request.input {
+            let body = media_json_body(file_field, file_id, &request)?;
+            self.send_json(method, &body).await?
+        } else {
+            let form = media_multipart_form(file_field, request).await?;
+            self.client
+                .post(self.method_url(method))
+                .multipart(form)
+                .send()
+                .await
+                .map_err(|error| self.network_error(method, error))?
+        };
+        parse_sent_message(response).await
+    }
+
+    async fn read_bounded_body(
+        &self,
+        method: &str,
+        response: reqwest::Response,
+    ) -> Result<Vec<u8>, TelegramApiError> {
+        let status = response.status();
+        let max_bytes = self.max_download_bytes;
+        if !status.is_success() {
+            return parse_file_error_response(status.as_u16(), response).await;
+        }
+        if let Some(limit) = max_bytes
+            && let Some(content_length) = response.content_length()
+            && content_length > limit as u64
+        {
+            return Err(TelegramApiError::FileTooLarge {
+                limit,
+                actual: Some(content_length),
+            });
+        }
+        let mut data = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| self.network_error(method, error))?;
+            if let Some(limit) = max_bytes
+                && data.len().saturating_add(chunk.len()) > limit
+            {
+                return Err(TelegramApiError::FileTooLarge {
+                    limit,
+                    actual: None,
+                });
+            }
+            data.extend_from_slice(&chunk);
+        }
+        Ok(data)
     }
 }
 
@@ -86,14 +242,29 @@ impl TelegramApi for ReqwestTelegramApi {
             if let Some(offset) = offset {
                 body["offset"] = serde_json::json!(offset);
             }
+            let response = self.send_json("getUpdates", &body).await?;
+            parse_telegram_response(response).await
+        })
+    }
+
+    fn get_file<'a>(&'a self, file_id: &'a str) -> TelegramApiFuture<'a, TelegramFile> {
+        Box::pin(async move {
+            let response = self
+                .send_json("getFile", &serde_json::json!({ "file_id": file_id }))
+                .await?;
+            parse_telegram_response(response).await
+        })
+    }
+
+    fn download_file<'a>(&'a self, file_path: &'a str) -> TelegramApiFuture<'a, Vec<u8>> {
+        Box::pin(async move {
             let response = self
                 .client
-                .post(self.method_url("getUpdates"))
-                .json(&body)
+                .get(self.file_url(file_path))
                 .send()
                 .await
-                .map_err(|error| self.network_error("getUpdates", error))?;
-            parse_telegram_response(response).await
+                .map_err(|error| self.network_error("downloadFile", error))?;
+            self.read_bounded_body("downloadFile", response).await
         })
     }
 
@@ -102,18 +273,8 @@ impl TelegramApi for ReqwestTelegramApi {
         request: TelegramSendMessageRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
         Box::pin(async move {
-            let response = self
-                .client
-                .post(self.method_url("sendMessage"))
-                .json(&request)
-                .send()
-                .await
-                .map_err(|error| self.network_error("sendMessage", error))?;
-            let message = parse_telegram_response::<TelegramSentMessage>(response).await?;
-            Ok(TelegramMessageHandle {
-                chat_id: message.chat.id,
-                message_id: message.message_id,
-            })
+            let response = self.send_json("sendMessage", &request).await?;
+            parse_sent_message(response).await
         })
     }
 
@@ -122,18 +283,78 @@ impl TelegramApi for ReqwestTelegramApi {
         request: TelegramEditMessageTextRequest,
     ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
         Box::pin(async move {
-            let response = self
-                .client
-                .post(self.method_url("editMessageText"))
-                .json(&request)
-                .send()
+            let response = self.send_json("editMessageText", &request).await?;
+            parse_sent_message(response).await
+        })
+    }
+
+    fn send_photo<'a>(
+        &'a self,
+        request: TelegramSendPhotoRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        Box::pin(async move {
+            self.send_media("sendPhoto", "photo", request.into_media_request())
                 .await
-                .map_err(|error| self.network_error("editMessageText", error))?;
-            let message = parse_telegram_response::<TelegramSentMessage>(response).await?;
-            Ok(TelegramMessageHandle {
-                chat_id: message.chat.id,
-                message_id: message.message_id,
-            })
+        })
+    }
+
+    fn send_document<'a>(
+        &'a self,
+        request: TelegramSendDocumentRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        Box::pin(async move {
+            self.send_media("sendDocument", "document", request.into_media_request())
+                .await
+        })
+    }
+
+    fn send_audio<'a>(
+        &'a self,
+        request: TelegramSendAudioRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        Box::pin(async move {
+            self.send_media("sendAudio", "audio", request.into_media_request())
+                .await
+        })
+    }
+
+    fn send_voice<'a>(
+        &'a self,
+        request: TelegramSendVoiceRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        Box::pin(async move {
+            self.send_media("sendVoice", "voice", request.into_media_request())
+                .await
+        })
+    }
+
+    fn send_video<'a>(
+        &'a self,
+        request: TelegramSendVideoRequest,
+    ) -> TelegramApiFuture<'a, TelegramMessageHandle> {
+        Box::pin(async move {
+            self.send_media("sendVideo", "video", request.into_media_request())
+                .await
+        })
+    }
+
+    fn send_chat_action<'a>(
+        &'a self,
+        request: TelegramSendChatActionRequest,
+    ) -> TelegramApiFuture<'a, ()> {
+        Box::pin(async move {
+            let response = self.send_json("sendChatAction", &request).await?;
+            parse_telegram_response::<bool>(response).await.map(|_| ())
+        })
+    }
+
+    fn set_my_commands<'a>(
+        &'a self,
+        request: TelegramSetMyCommandsRequest,
+    ) -> TelegramApiFuture<'a, ()> {
+        Box::pin(async move {
+            let response = self.send_json("setMyCommands", &request).await?;
+            parse_telegram_response::<bool>(response).await.map(|_| ())
         })
     }
 
@@ -144,15 +365,14 @@ impl TelegramApi for ReqwestTelegramApi {
     ) -> TelegramApiFuture<'a, ()> {
         Box::pin(async move {
             let response = self
-                .client
-                .post(self.method_url("answerCallbackQuery"))
-                .json(&serde_json::json!({
-                    "callback_query_id": callback_query_id,
-                    "text": text,
-                }))
-                .send()
-                .await
-                .map_err(|error| self.network_error("answerCallbackQuery", error))?;
+                .send_json(
+                    "answerCallbackQuery",
+                    &serde_json::json!({
+                        "callback_query_id": callback_query_id,
+                        "text": text,
+                    }),
+                )
+                .await?;
             parse_telegram_response::<bool>(response).await.map(|_| ())
         })
     }
@@ -162,6 +382,8 @@ impl TelegramApi for ReqwestTelegramApi {
 #[serde(rename_all = "snake_case")]
 pub struct TelegramSendMessageRequest {
     pub chat_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parse_mode: Option<TelegramParseMode>,
@@ -182,9 +404,206 @@ pub struct TelegramEditMessageTextRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramFile {
+    pub file_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_unique_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TelegramInputFile {
+    FileId(String),
+    Bytes {
+        filename: String,
+        data: Vec<u8>,
+        mime_type: Option<String>,
+    },
+    Path {
+        path: PathBuf,
+        filename: Option<String>,
+        mime_type: Option<String>,
+    },
+}
+
+impl TelegramInputFile {
+    pub fn file_id(file_id: impl Into<String>) -> Self {
+        Self::FileId(file_id.into())
+    }
+
+    pub fn bytes(filename: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes {
+            filename: filename.into(),
+            data: data.into(),
+            mime_type: None,
+        }
+    }
+
+    pub fn path(path: impl Into<PathBuf>) -> Self {
+        Self::Path {
+            path: path.into(),
+            filename: None,
+            mime_type: None,
+        }
+    }
+
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        let mime_type = Some(mime_type.into());
+        match &mut self {
+            Self::FileId(_) => {}
+            Self::Bytes {
+                mime_type: current, ..
+            }
+            | Self::Path {
+                mime_type: current, ..
+            } => *current = mime_type,
+        }
+        self
+    }
+
+    pub fn with_filename(mut self, filename: impl Into<String>) -> Self {
+        if let Self::Path {
+            filename: current, ..
+        } = &mut self
+        {
+            *current = Some(filename.into());
+        }
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramSendPhotoRequest {
+    pub chat_id: i64,
+    pub photo: TelegramInputFile,
+    pub options: TelegramMediaMessageOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramSendDocumentRequest {
+    pub chat_id: i64,
+    pub document: TelegramInputFile,
+    pub options: TelegramMediaMessageOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramSendAudioRequest {
+    pub chat_id: i64,
+    pub audio: TelegramInputFile,
+    pub options: TelegramMediaMessageOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramSendVoiceRequest {
+    pub chat_id: i64,
+    pub voice: TelegramInputFile,
+    pub options: TelegramMediaMessageOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramSendVideoRequest {
+    pub chat_id: i64,
+    pub video: TelegramInputFile,
+    pub options: TelegramMediaMessageOptions,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TelegramMediaMessageOptions {
+    pub message_thread_id: Option<i64>,
+    pub caption: Option<String>,
+    pub parse_mode: Option<TelegramParseMode>,
+    pub reply_markup: Option<TelegramInlineKeyboardMarkup>,
+}
+
+macro_rules! impl_media_request {
+    ($request:ty, $field:ident) => {
+        impl $request {
+            fn into_media_request(self) -> TelegramSendMediaRequest {
+                TelegramSendMediaRequest {
+                    chat_id: self.chat_id,
+                    message_thread_id: self.options.message_thread_id,
+                    input: self.$field,
+                    caption: self.options.caption,
+                    parse_mode: self.options.parse_mode,
+                    reply_markup: self.options.reply_markup,
+                }
+            }
+        }
+    };
+}
+
+impl_media_request!(TelegramSendPhotoRequest, photo);
+impl_media_request!(TelegramSendDocumentRequest, document);
+impl_media_request!(TelegramSendAudioRequest, audio);
+impl_media_request!(TelegramSendVoiceRequest, voice);
+impl_media_request!(TelegramSendVideoRequest, video);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TelegramSendMediaRequest {
+    chat_id: i64,
+    message_thread_id: Option<i64>,
+    input: TelegramInputFile,
+    caption: Option<String>,
+    parse_mode: Option<TelegramParseMode>,
+    reply_markup: Option<TelegramInlineKeyboardMarkup>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramSendChatActionRequest {
+    pub chat_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
+    pub action: TelegramChatAction,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramChatAction {
+    Typing,
+    UploadPhoto,
+    RecordVideo,
+    UploadVideo,
+    RecordVoice,
+    UploadVoice,
+    UploadDocument,
+    ChooseSticker,
+    FindLocation,
+    RecordVideoNote,
+    UploadVideoNote,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramSetMyCommandsRequest {
+    pub commands: Vec<TelegramBotCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramBotCommand {
+    pub command: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TelegramParseMode {
     #[serde(rename = "MarkdownV2")]
     MarkdownV2,
+}
+
+impl TelegramParseMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::MarkdownV2 => "MarkdownV2",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +634,12 @@ pub enum TelegramApiError {
     Api { code: i64, description: String },
     #[error("telegram response decode failed: {0}")]
     Decode(String),
+    #[error("telegram local file failed: {0}")]
+    File(String),
+    #[error("telegram file is too large: limit {limit} bytes, actual {actual:?} bytes")]
+    FileTooLarge { limit: usize, actual: Option<u64> },
+    #[error("telegram api method is unsupported by this client: {0}")]
+    Unsupported(String),
 }
 
 impl TelegramApiError {
@@ -249,6 +674,16 @@ struct TelegramErrorResponse {
     description: String,
 }
 
+async fn parse_sent_message(
+    response: reqwest::Response,
+) -> Result<TelegramMessageHandle, TelegramApiError> {
+    let message = parse_telegram_response::<TelegramSentMessage>(response).await?;
+    Ok(TelegramMessageHandle {
+        chat_id: message.chat.id,
+        message_id: message.message_id,
+    })
+}
+
 async fn parse_telegram_response<T>(response: reqwest::Response) -> Result<T, TelegramApiError>
 where
     T: for<'de> Deserialize<'de>,
@@ -271,12 +706,141 @@ where
     Ok(body.result)
 }
 
+async fn parse_file_error_response<T>(
+    status_code: u16,
+    response: reqwest::Response,
+) -> Result<T, TelegramApiError> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| TelegramApiError::Network(error.to_string()))?;
+    match serde_json::from_slice::<TelegramErrorResponse>(&bytes) {
+        Ok(error) => Err(TelegramApiError::Api {
+            code: error.error_code,
+            description: error.description,
+        }),
+        Err(_) => Err(TelegramApiError::Api {
+            code: i64::from(status_code),
+            description: String::from_utf8_lossy(&bytes).into_owned(),
+        }),
+    }
+}
+
+fn unsupported<'a, T>(method: &'static str) -> TelegramApiFuture<'a, T> {
+    Box::pin(async move { Err(TelegramApiError::Unsupported(method.into())) })
+}
+
+fn media_json_body(
+    file_field: &'static str,
+    file_id: &str,
+    request: &TelegramSendMediaRequest,
+) -> Result<Value, TelegramApiError> {
+    let mut body = Map::new();
+    body.insert("chat_id".into(), request.chat_id.into());
+    insert_optional_i64(&mut body, "message_thread_id", request.message_thread_id);
+    body.insert(file_field.into(), file_id.into());
+    insert_optional_string(&mut body, "caption", request.caption.clone());
+    if let Some(parse_mode) = &request.parse_mode {
+        body.insert("parse_mode".into(), parse_mode.as_str().into());
+    }
+    if let Some(reply_markup) = &request.reply_markup {
+        body.insert("reply_markup".into(), serialize_value(reply_markup)?);
+    }
+    Ok(Value::Object(body))
+}
+
+async fn media_multipart_form(
+    file_field: &'static str,
+    request: TelegramSendMediaRequest,
+) -> Result<Form, TelegramApiError> {
+    let mut form = Form::new().text("chat_id", request.chat_id.to_string());
+    if let Some(message_thread_id) = request.message_thread_id {
+        form = form.text("message_thread_id", message_thread_id.to_string());
+    }
+    if let Some(caption) = request.caption {
+        form = form.text("caption", caption);
+    }
+    if let Some(parse_mode) = request.parse_mode {
+        form = form.text("parse_mode", parse_mode.as_str());
+    }
+    if let Some(reply_markup) = request.reply_markup {
+        form = form.text("reply_markup", serialize_string(&reply_markup)?);
+    }
+    Ok(form.part(file_field, request.input.into_part().await?))
+}
+
+impl TelegramInputFile {
+    async fn into_part(self) -> Result<Part, TelegramApiError> {
+        match self {
+            Self::FileId(file_id) => Ok(Part::text(file_id)),
+            Self::Bytes {
+                filename,
+                data,
+                mime_type,
+            } => with_optional_mime(Part::bytes(data).file_name(filename), mime_type),
+            Self::Path {
+                path,
+                filename,
+                mime_type,
+            } => {
+                let mut part = Part::file(&path)
+                    .await
+                    .map_err(|error| TelegramApiError::File(file_error(&path, error)))?;
+                if let Some(filename) = filename {
+                    part = part.file_name(filename);
+                }
+                with_optional_mime(part, mime_type)
+            }
+        }
+    }
+}
+
+fn with_optional_mime(part: Part, mime_type: Option<String>) -> Result<Part, TelegramApiError> {
+    match mime_type {
+        Some(mime_type) => part
+            .mime_str(&mime_type)
+            .map_err(|error| TelegramApiError::File(error.to_string())),
+        None => Ok(part),
+    }
+}
+
+fn file_error(path: &Path, error: std::io::Error) -> String {
+    format!("{}: {error}", path.display())
+}
+
+fn serialize_value<T>(value: &T) -> Result<Value, TelegramApiError>
+where
+    T: Serialize,
+{
+    serde_json::to_value(value).map_err(|error| TelegramApiError::Decode(error.to_string()))
+}
+
+fn serialize_string<T>(value: &T) -> Result<String, TelegramApiError>
+where
+    T: Serialize,
+{
+    serde_json::to_string(value).map_err(|error| TelegramApiError::Decode(error.to_string()))
+}
+
+fn insert_optional_i64(body: &mut Map<String, Value>, key: &'static str, value: Option<i64>) {
+    if let Some(value) = value {
+        body.insert(key.into(), value.into());
+    }
+}
+
+fn insert_optional_string(body: &mut Map<String, Value>, key: &'static str, value: Option<String>) {
+    if let Some(value) = value {
+        body.insert(key.into(), value.into());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        TelegramApiResponse, TelegramEditMessageTextRequest, TelegramInlineKeyboardButton,
-        TelegramInlineKeyboardMarkup, TelegramParseMode, TelegramSendMessageRequest,
-        TelegramSentMessage,
+        TelegramApiResponse, TelegramChatAction, TelegramEditMessageTextRequest,
+        TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramInputFile,
+        TelegramParseMode, TelegramSendChatActionRequest, TelegramSendMediaRequest,
+        TelegramSendMessageRequest, TelegramSentMessage, media_json_body,
     };
     use serde_json::json;
 
@@ -284,6 +848,7 @@ mod tests {
     fn send_message_request_serializes_bot_api_snake_case() {
         let request = TelegramSendMessageRequest {
             chat_id: 42,
+            message_thread_id: Some(5),
             text: "hello".into(),
             parse_mode: Some(TelegramParseMode::MarkdownV2),
             reply_markup: Some(TelegramInlineKeyboardMarkup {
@@ -300,6 +865,7 @@ mod tests {
             value,
             json!({
                 "chat_id": 42,
+                "message_thread_id": 5,
                 "text": "hello",
                 "parse_mode": "MarkdownV2",
                 "reply_markup": {
@@ -330,6 +896,47 @@ mod tests {
                 "chat_id": 42,
                 "message_id": 7,
                 "text": "hello",
+                "parse_mode": "MarkdownV2"
+            })
+        );
+    }
+
+    #[test]
+    fn chat_action_request_serializes_bot_api_action() {
+        let request = TelegramSendChatActionRequest {
+            chat_id: 42,
+            message_thread_id: Some(9),
+            action: TelegramChatAction::UploadDocument,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "chat_id": 42,
+                "message_thread_id": 9,
+                "action": "upload_document"
+            })
+        );
+    }
+
+    #[test]
+    fn media_file_id_request_serializes_without_multipart() {
+        let request = TelegramSendMediaRequest {
+            chat_id: 42,
+            message_thread_id: Some(9),
+            input: TelegramInputFile::file_id("file-1"),
+            caption: Some("report".into()),
+            parse_mode: Some(TelegramParseMode::MarkdownV2),
+            reply_markup: None,
+        };
+
+        assert_eq!(
+            media_json_body("document", "file-1", &request).unwrap(),
+            json!({
+                "chat_id": 42,
+                "message_thread_id": 9,
+                "document": "file-1",
+                "caption": "report",
                 "parse_mode": "MarkdownV2"
             })
         );

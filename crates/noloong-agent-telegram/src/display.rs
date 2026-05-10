@@ -1,7 +1,7 @@
 use crate::{
     approval::{TelegramApprovalSelection, TelegramApprovalStore, render_approval_request},
     bridge::InteractionDisplayNotification,
-    delivery::{TelegramDelivery, TelegramDeliveryResult},
+    delivery::{TelegramDelivery, TelegramDeliveryResult, TelegramMessageTarget},
     i18n::TelegramUiCatalog,
 };
 use noloong_agent::interaction::DisplayEvent;
@@ -42,7 +42,7 @@ struct DisplayMessageState {
 pub async fn deliver_display_event(
     state: &mut TelegramDisplayState,
     delivery: &TelegramDelivery,
-    chat_id: i64,
+    target: TelegramMessageTarget,
     notification: InteractionDisplayNotification,
     show_tool_status: bool,
     edit_throttle: Duration,
@@ -58,7 +58,7 @@ pub async fn deliver_display_event(
             match action {
                 DisplayPreviewAction::Send(text) => {
                     let Some(sent) = delivery
-                        .send_text(chat_id, &text, None)
+                        .send_text(target, &text, None)
                         .await?
                         .into_iter()
                         .next()
@@ -71,7 +71,7 @@ pub async fn deliver_display_event(
                     }
                 }
                 DisplayPreviewAction::Edit { message_id, text } => {
-                    delivery.edit_text(chat_id, message_id, &text, None).await?;
+                    delivery.edit_text(target, message_id, &text, None).await?;
                 }
                 DisplayPreviewAction::Skip => {}
             }
@@ -88,21 +88,21 @@ pub async fn deliver_display_event(
                 .and_then(|message| message.preview_message_id);
             if let Some(message_id) = preview_message_id {
                 if delivery
-                    .edit_text(chat_id, message_id, &text, None)
+                    .edit_text(target, message_id, &text, None)
                     .await
                     .is_err()
                 {
-                    delivery.send_text(chat_id, &text, None).await?;
+                    delivery.send_text(target, &text, None).await?;
                 }
             } else {
-                delivery.send_text(chat_id, &text, None).await?;
+                delivery.send_text(target, &text, None).await?;
             }
         }
         DisplayEvent::ApprovalRequested { approval } => {
             let text = render_approval_request(&approval, catalog);
             let buttons = state.approvals.allocate_buttons();
             let Some(sent) = delivery
-                .send_text(chat_id, &text, Some(buttons.markup(catalog)))
+                .send_text(target, &text, Some(buttons.markup(catalog)))
                 .await?
                 .into_iter()
                 .next()
@@ -118,17 +118,17 @@ pub async fn deliver_display_event(
         }
         DisplayEvent::ToolStarted { tool_name, .. } if show_tool_status => {
             delivery
-                .send_text(chat_id, &catalog.tool_started(&tool_name), None)
+                .send_text(target, &catalog.tool_started(&tool_name), None)
                 .await?;
         }
         DisplayEvent::ToolCompleted { tool_call_id, .. } if show_tool_status => {
             delivery
-                .send_text(chat_id, &catalog.tool_completed(&tool_call_id), None)
+                .send_text(target, &catalog.tool_completed(&tool_call_id), None)
                 .await?;
         }
         DisplayEvent::RunFailed { error, .. } => {
             delivery
-                .send_text(chat_id, &catalog.run_failed(&error), None)
+                .send_text(target, &catalog.run_failed(&error), None)
                 .await?;
         }
         DisplayEvent::RunPaused { .. }
@@ -181,7 +181,7 @@ mod tests {
     use super::{TelegramDisplayState, deliver_display_event};
     use crate::{
         bridge::InteractionDisplayNotification,
-        delivery::TelegramDelivery,
+        delivery::{TelegramDelivery, TelegramMessageTarget},
         i18n::TelegramUiCatalog,
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramEditMessageTextRequest, TelegramMessageHandle,
@@ -210,7 +210,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::AssistantMessageDelta {
                 display_message_id: "m1".into(),
                 text: "hello".into(),
@@ -224,7 +224,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::AssistantMessageDelta {
                 display_message_id: "m1".into(),
                 text: " world".into(),
@@ -254,7 +254,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::AssistantMessageDelta {
                 display_message_id: "m1".into(),
                 text: "hello".into(),
@@ -268,7 +268,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::AssistantMessageDelta {
                 display_message_id: "m1".into(),
                 text: " world".into(),
@@ -293,7 +293,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::AssistantMessageDelta {
                 display_message_id: "m1".into(),
                 text: "draft".into(),
@@ -307,7 +307,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::AssistantMessageFinal {
                 display_message_id: "m1".into(),
                 message: AgentMessage::assistant(
@@ -340,7 +340,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::ApprovalRequested {
                 approval: ToolApprovalRequest {
                     approval_id: "approval-1".into(),
@@ -385,7 +385,7 @@ mod tests {
         deliver_display_event(
             &mut state,
             &delivery,
-            42,
+            target(),
             notification(DisplayEvent::ToolStarted {
                 tool_call_id: "tool-1".into(),
                 tool_name: "host_exec".into(),
@@ -406,6 +406,10 @@ mod tests {
             subscription_id: "subscription-1".into(),
             event,
         }
+    }
+
+    fn target() -> TelegramMessageTarget {
+        TelegramMessageTarget::chat(42)
     }
 
     #[derive(Default)]
