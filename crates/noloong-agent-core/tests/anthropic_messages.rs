@@ -13,7 +13,7 @@ pub mod support;
 
 use support::{
     CapturedRequest, DOTTED_TEST_TOOL_NAME, HangingServer, MockResponse, MockServer,
-    dotted_tool_spec, fast_one_retry_reconnect, is_provider_safe_tool_name,
+    dotted_tool_spec, fast_one_retry_reconnect, is_provider_safe_tool_name, unique_temp_dir,
 };
 
 #[test]
@@ -381,6 +381,51 @@ async fn payload_maps_inline_and_url_documents() -> Result<()> {
         body.json["messages"][0]["content"][1]["source"]["url"],
         "https://example.test/doc.pdf"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_materializes_local_image_and_document_uris() -> Result<()> {
+    let dir = unique_temp_dir("anthropic-local-media");
+    tokio::fs::create_dir_all(&dir).await?;
+    let image_path = dir.join("image.png");
+    let doc_path = dir.join("doc.pdf");
+    tokio::fs::write(&image_path, b"image").await?;
+    tokio::fs::write(&doc_path, b"doc").await?;
+
+    let mut image = MediaBlock::uri(MediaKind::Image, format!("file://{}", image_path.display()));
+    image.mime_type = Some("image/png".into());
+    let mut document = MediaBlock::uri(MediaKind::File, format!("file://{}", doc_path.display()));
+    document.mime_type = Some("application/pdf".into());
+
+    let body = captured_request_body(
+        request_with_user_content(vec![
+            ContentBlock::Media { media: image },
+            ContentBlock::Media { media: document },
+        ]),
+        AnthropicMessagesProviderConfig::new("anthropic", "claude-test").without_api_key(),
+        text_response("ok"),
+    )
+    .await?;
+
+    assert_eq!(
+        body.json["messages"][0]["content"][0]["source"]["type"],
+        "base64"
+    );
+    assert_eq!(
+        body.json["messages"][0]["content"][0]["source"]["data"],
+        "aW1hZ2U="
+    );
+    assert_eq!(body.json["messages"][0]["content"][1]["title"], "doc.pdf");
+    assert_eq!(
+        body.json["messages"][0]["content"][1]["source"]["data"],
+        "ZG9j"
+    );
+    assert_eq!(
+        body.json["messages"][0]["content"][1]["source"]["media_type"],
+        "application/pdf"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

@@ -83,13 +83,31 @@ The JSONC variant, `examples/profile-configs/telegram-openrouter-free.jsonc`, in
     "inlineMaxBytes": 262144,
     "maxDownloadBytes": 20971520,
     "downloadDir": ".noloong/telegram-files",
-    "retentionSeconds": 604800
+    "retentionSeconds": 604800,
+    "unsupportedMediaFallback": {
+      "audio": {
+        "mode": "native_for_mime_types",
+        "mimeTypes": ["audio/mpeg", "audio/wav", "audio/x-wav"]
+      },
+      "voice": { "mode": "unsupported" },
+      "video": { "mode": "native" }
+    }
   },
   "startupUpdatePolicy": "skip_pending_without_checkpoint"
 }
 ```
 
-This is only the file/startup policy subset of `TelegramBridgeConfig`; a complete bridge config also needs the bot token, interaction URL, access policy, network settings, and UX timings. For `noloong telegram` and `noloong telegram-bridge`, configure the same values with `TELEGRAM_FILE_INLINE_MAX_BYTES`, `TELEGRAM_FILE_MAX_DOWNLOAD_BYTES`, `TELEGRAM_FILE_DOWNLOAD_DIR`, `TELEGRAM_FILE_RETENTION_SECONDS`, and `TELEGRAM_STARTUP_UPDATE_POLICY`, or with the equivalent `--telegram-file-*` and `--telegram-startup-update-policy` flags.
+This is only the file/startup policy subset of `TelegramBridgeConfig`; a complete bridge config also needs the bot token, interaction URL, access policy, network settings, and UX timings. For `noloong telegram` and `noloong telegram-bridge`, configure the same values with `TELEGRAM_FILE_INLINE_MAX_BYTES`, `TELEGRAM_FILE_MAX_DOWNLOAD_BYTES`, `TELEGRAM_FILE_DOWNLOAD_DIR`, `TELEGRAM_FILE_RETENTION_SECONDS`, `TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE`, and `TELEGRAM_STARTUP_UPDATE_POLICY`, or with the equivalent `--telegram-file-*`, `--telegram-unsupported-media-fallback-to-file`, and `--telegram-startup-update-policy` flags.
+
+`unsupportedMediaFallback` is provider capability gating, not a blind MIME rewrite. Supported modes are:
+
+- `native`: submit the Telegram attachment as its native media kind.
+- `file`: force-submit it as `MediaKind::File`.
+- `unsupported`: reject before agent submission with a localized user-visible notice.
+- `native_for_mime_types`: submit as native media only when the MIME type is listed; otherwise reject before agent submission.
+- `file_for_mime_types`: submit as `MediaKind::File` only when the MIME type is listed; otherwise reject before agent submission.
+
+The embedded `noloong telegram` command derives a conservative default from the selected provider. For example, ChatGPT/Responses can accept some regular file MIME types through `input_file.file_data`, but it does not accept `audio/ogg` as a regular file. In that case Telegram reports the unsupported attachment instead of surfacing a provider 400 response.
 
 Supported provider types:
 
@@ -97,6 +115,8 @@ Supported provider types:
 - `responses`
 - `anthropic_messages`
 - `chatgpt_responses`
+
+`responses` and `chatgpt_responses` profiles expose `allowFileDataUrlInput` for callers that intentionally pass inline file data to the provider. Telegram keeps non-photo files path-first, and the built-in provider adapter materializes local `file://` inputs at request time. Enable this option when Telegram should submit regular files through those providers.
 
 Supported registry stores:
 
@@ -125,6 +145,7 @@ Bridge environment variables:
 - `TELEGRAM_FILE_MAX_DOWNLOAD_BYTES`
 - `TELEGRAM_FILE_DOWNLOAD_DIR`
 - `TELEGRAM_FILE_RETENTION_SECONDS`
+- `TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE`
 - `TELEGRAM_STARTUP_UPDATE_POLICY`
 - `TELEGRAM_OFFSET_CHECKPOINT`
 - `NOLOONG_INTERACTION_URL`
@@ -172,8 +193,9 @@ Telegram commands are registered through the Bot API command menu on startup. Th
 
 The bridge uses a hybrid file policy:
 
-- Text and small Telegram media are converted to inline `MediaBlock` data with Telegram metadata preserved.
-- Large Telegram files are downloaded to the configured `downloadDir` and passed to the agent as `file://` media URIs.
+- Text and small Telegram photos are converted to inline `MediaBlock` image data with Telegram metadata preserved.
+- Telegram documents, audio, voice, video, and oversized photos are downloaded to the configured `downloadDir` and passed to the agent as `file://` media URIs. Provider adapters or extensions can then decide whether to upload, transcribe, parse, inline, or reject the file for a specific model.
+- When the active built-in provider cannot accept a Telegram audio, voice, or video attachment as native media, `noloong telegram` automatically falls back to `MediaKind::File` and sends a localized notice before submitting the prompt. `telegram-bridge` can request the same behavior with `TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE=audio,voice,video` or `all`.
 - Assistant image, document, audio, voice, and video blocks are sent with native Telegram media APIs when local bytes or files are available.
 - Provider-only media that cannot be uploaded is rendered as a readable fallback card.
 - Long process output is truncated for chat readability and can be sent as a Telegram document.

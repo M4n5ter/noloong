@@ -8,16 +8,18 @@ mod test_support;
 
 use crate::{
     config::{
-        DEFAULT_INTERACTION_TOKEN_ENV, DEFAULT_INTERACTION_URL_ENV, DEFAULT_PROFILE_CONFIG_ENV,
-        DEFAULT_TELEGRAM_ALLOWED_CHATS_ENV, DEFAULT_TELEGRAM_ALLOWED_USERS_ENV,
-        DEFAULT_TELEGRAM_BOT_TOKEN_ENV, DEFAULT_TELEGRAM_BOT_USERNAME_ENV,
-        DEFAULT_TELEGRAM_DISABLE_ENV_PROXY_ENV, DEFAULT_TELEGRAM_DISABLE_FALLBACK_IPS_ENV,
-        DEFAULT_TELEGRAM_FALLBACK_IPS_ENV, DEFAULT_TELEGRAM_FILE_DOWNLOAD_DIR_ENV,
-        DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV, DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV,
-        DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV, DEFAULT_TELEGRAM_LOCALE_ENV,
-        DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV, DEFAULT_TELEGRAM_PROXY_ENV,
-        DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV, DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
-        HostProfileConfig, env_or_value, parse_bool_env, parse_csv_i64, parse_csv_u64,
+        BuiltInProviderConfig, DEFAULT_INTERACTION_TOKEN_ENV, DEFAULT_INTERACTION_URL_ENV,
+        DEFAULT_PROFILE_CONFIG_ENV, DEFAULT_TELEGRAM_ALLOWED_CHATS_ENV,
+        DEFAULT_TELEGRAM_ALLOWED_USERS_ENV, DEFAULT_TELEGRAM_BOT_TOKEN_ENV,
+        DEFAULT_TELEGRAM_BOT_USERNAME_ENV, DEFAULT_TELEGRAM_DISABLE_ENV_PROXY_ENV,
+        DEFAULT_TELEGRAM_DISABLE_FALLBACK_IPS_ENV, DEFAULT_TELEGRAM_FALLBACK_IPS_ENV,
+        DEFAULT_TELEGRAM_FILE_DOWNLOAD_DIR_ENV, DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV,
+        DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV, DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV,
+        DEFAULT_TELEGRAM_LOCALE_ENV, DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV,
+        DEFAULT_TELEGRAM_PROXY_ENV, DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV,
+        DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
+        DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV, HostProfileConfig, env_or_value,
+        parse_bool_env, parse_csv_i64, parse_csv_u64,
     },
     host::build_registry,
 };
@@ -33,14 +35,17 @@ use noloong_agent::{
 };
 use noloong_agent_core::{QueueMode, ToolApprovalRequest, ToolPermissionOutcome};
 use noloong_agent_telegram::{
-    access::TelegramAccessPolicy,
+    access::{TelegramAccessPolicy, TelegramTextInput},
     approval::render_pending_approval_requests,
-    bridge::TelegramBridge,
+    bridge::{TelegramBridge, TelegramBridgeError},
     commands::{
         TelegramCockpitCommand, render_command_help, render_unknown_command_help,
         telegram_command_menu_request,
     },
-    config::{TelegramFilePolicy, TelegramStartupUpdatePolicy},
+    config::{
+        TelegramFilePolicy, TelegramNativeMediaHandling, TelegramStartupUpdatePolicy,
+        TelegramUnsupportedMediaFallbackPolicy,
+    },
     delivery::{TelegramDelivery, TelegramMessageTarget},
     display::{TelegramDisplayState, cleanup_display_messages, deliver_display_event},
     i18n::{
@@ -87,6 +92,33 @@ use tokio::{net::TcpListener, sync::Mutex};
 type SharedDisplayState = Arc<Mutex<TelegramDisplayState>>;
 type SharedDisplayStates = Arc<Mutex<BTreeMap<TelegramSessionKey, SharedDisplayState>>>;
 type SharedSessionActions = Arc<Mutex<TelegramSessionActionStore>>;
+
+const RESPONSES_FILE_DATA_MIME_TYPES: &[&str] = &[
+    "application/msword",
+    "application/json",
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/typescript",
+    "application/x-sh",
+    "text/css",
+    "text/html",
+    "text/javascript",
+    "text/markdown",
+    "text/plain",
+    "text/x-c",
+    "text/x-c++",
+    "text/x-csharp",
+    "text/x-golang",
+    "text/x-java",
+    "text/x-php",
+    "text/x-python",
+    "text/x-ruby",
+    "text/x-script.python",
+    "text/x-tex",
+];
+const CHAT_COMPLETIONS_NATIVE_AUDIO_MIME_TYPES: &[&str] =
+    &["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"];
 
 #[tokio::main]
 async fn main() {
@@ -244,8 +276,17 @@ async fn run_telegram(options: TelegramOptions) -> Result<(), CliError> {
     let mut bridge_options = options.bridge;
     bridge_options.interaction_url = Some(format!("ws://{address}/jsonrpc/ws"));
     bridge_options.interaction_token = Some(token);
+    let has_explicit_media_fallback = has_explicit_telegram_media_fallback(&bridge_options);
+    let mut bridge_config = telegram_config_from_values(&bridge_options, process_env)?;
+    if !has_explicit_media_fallback {
+        apply_profile_media_fallback_policy(
+            &mut bridge_config.file_policy,
+            &profile_config,
+            bridge_config.profile_id.as_deref(),
+        );
+    }
     tokio::select! {
-        result = run_telegram_bridge(bridge_options) => result,
+        result = run_telegram_bridge_with_config(bridge_config) => result,
         result = server => {
             result.map_err(|error| CliError::Task(error.to_string()))?
                 .map_err(CliError::Interaction)
@@ -450,12 +491,7 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
                             let Some(input) = message.into_text_input() else {
                                 return Ok(());
                             };
-                            self.bridge
-                                .handle_text_message(input, self.bot_username.as_deref())
-                                .await
-                                .map_err(|error| {
-                                    TelegramPollingError::Handler(error.to_string())
-                                })?;
+                            self.handle_text_input_message(input).await?;
                         } else {
                             self.handle_media_message(message).await?;
                         }
@@ -474,6 +510,49 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
 }
 
 impl BridgeUpdateHandler {
+    async fn handle_text_input_message(
+        &self,
+        input: TelegramTextInput,
+    ) -> Result<(), TelegramPollingError> {
+        let target = TelegramMessageTarget::new(input.chat_id, input.thread_id);
+        match self
+            .bridge
+            .handle_text_message(input, self.bot_username.as_deref())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => self.handle_agent_submission_error(target, error).await,
+        }
+    }
+
+    async fn handle_agent_submission_error(
+        &self,
+        target: TelegramMessageTarget,
+        error: TelegramBridgeError,
+    ) -> Result<(), TelegramPollingError> {
+        match error {
+            TelegramBridgeError::NotAddressed | TelegramBridgeError::EmptyMessage => Ok(()),
+            TelegramBridgeError::RunFailureDisplayed { source } => {
+                log::debug!("agent run failure already rendered through display events: {source}");
+                Ok(())
+            }
+            TelegramBridgeError::Unauthorized => Err(TelegramPollingError::Handler(
+                TelegramBridgeError::Unauthorized.to_string(),
+            )),
+            error => {
+                self.delivery
+                    .send_text(
+                        target,
+                        &self.catalog.input_submission_failed(&error.to_string()),
+                        None,
+                    )
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                Ok(())
+            }
+        }
+    }
+
     async fn handle_command(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
         if !self
             .bridge
@@ -1271,25 +1350,40 @@ impl BridgeUpdateHandler {
         self.bridge
             .preflight_inbound_message(&message, self.bot_username.as_deref())
             .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
-        let media = match self.media_resolver.resolve_all(&message.attachments).await {
-            Ok(media) => media,
+        let resolved = match self
+            .media_resolver
+            .resolve_all_with_notices(&message.attachments)
+            .await
+        {
+            Ok(resolved) => resolved,
             Err(error) => {
                 self.delivery
-                    .send_text(
-                        target,
-                        &self.catalog.media_input_failed(&error.to_string()),
-                        None,
-                    )
+                    .send_text(target, &self.catalog.media_resolution_failed(&error), None)
                     .await
                     .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
                 return Ok(());
             }
         };
-        self.bridge
-            .handle_inbound_message(message, media, self.bot_username.as_deref())
+        if !resolved.notices.is_empty() {
+            self.delivery
+                .send_text(
+                    target,
+                    &self
+                        .catalog
+                        .unsupported_media_fallback_notices(&resolved.notices),
+                    None,
+                )
+                .await
+                .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+        }
+        match self
+            .bridge
+            .handle_inbound_message(message, resolved.media, self.bot_username.as_deref())
             .await
-            .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(error) => self.handle_agent_submission_error(target, error).await,
+        }
     }
 
     async fn handle_callback(
@@ -1768,6 +1862,148 @@ fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliErr
     Ok(config)
 }
 
+fn has_explicit_telegram_media_fallback(options: &TelegramBridgeOptions) -> bool {
+    options
+        .unsupported_media_fallback_to_file
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || process_env(DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV)
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn apply_profile_media_fallback_policy(
+    file_policy: &mut TelegramFilePolicy,
+    profile_config: &HostProfileConfig,
+    selected_profile_id: Option<&str>,
+) {
+    if !file_policy.unsupported_media_fallback.is_native() {
+        return;
+    }
+    file_policy.unsupported_media_fallback =
+        profile_media_fallback_policy(profile_config, selected_profile_id);
+}
+
+fn profile_media_fallback_policy(
+    profile_config: &HostProfileConfig,
+    selected_profile_id: Option<&str>,
+) -> TelegramUnsupportedMediaFallbackPolicy {
+    let profile_id = selected_profile_id
+        .or(profile_config.default_profile_id.as_deref())
+        .unwrap_or_else(|| profile_config.profiles[0].profile_id.as_str());
+    let Some(profile) = profile_config
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == profile_id)
+    else {
+        return TelegramUnsupportedMediaFallbackPolicy::default();
+    };
+    provider_media_fallback_policy(&profile.provider)
+}
+
+fn provider_media_fallback_policy(
+    provider: &BuiltInProviderConfig,
+) -> TelegramUnsupportedMediaFallbackPolicy {
+    match provider {
+        BuiltInProviderConfig::Responses {
+            allow_file_data_url_input,
+            ..
+        }
+        | BuiltInProviderConfig::ChatgptResponses {
+            allow_file_data_url_input,
+            ..
+        } => {
+            if *allow_file_data_url_input {
+                let file_input = TelegramNativeMediaHandling::file_for_mime_types(
+                    RESPONSES_FILE_DATA_MIME_TYPES,
+                );
+                TelegramUnsupportedMediaFallbackPolicy {
+                    audio: file_input.clone(),
+                    voice: file_input.clone(),
+                    video: file_input,
+                }
+            } else {
+                TelegramUnsupportedMediaFallbackPolicy {
+                    audio: TelegramNativeMediaHandling::Unsupported,
+                    voice: TelegramNativeMediaHandling::Unsupported,
+                    video: TelegramNativeMediaHandling::Unsupported,
+                }
+            }
+        }
+        BuiltInProviderConfig::AnthropicMessages { .. } => TelegramUnsupportedMediaFallbackPolicy {
+            audio: TelegramNativeMediaHandling::Unsupported,
+            voice: TelegramNativeMediaHandling::Unsupported,
+            video: TelegramNativeMediaHandling::Unsupported,
+        },
+        BuiltInProviderConfig::ChatCompletions { .. } => {
+            let supported_audio = TelegramNativeMediaHandling::native_for_mime_types(
+                CHAT_COMPLETIONS_NATIVE_AUDIO_MIME_TYPES,
+            );
+            TelegramUnsupportedMediaFallbackPolicy {
+                audio: supported_audio.clone(),
+                voice: supported_audio,
+                video: TelegramNativeMediaHandling::Native,
+            }
+        }
+    }
+}
+
+fn telegram_unsupported_media_fallback_policy(
+    cli_value: Option<String>,
+    env_value: Option<String>,
+) -> Result<TelegramUnsupportedMediaFallbackPolicy, CliError> {
+    let Some(value) = cli_value
+        .or(env_value)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(TelegramUnsupportedMediaFallbackPolicy::default());
+    };
+    let mut policy = TelegramUnsupportedMediaFallbackPolicy::default();
+    let mut saw_none = false;
+    let mut saw_media = false;
+    for token in value
+        .split(',')
+        .map(|token| token.trim().to_ascii_lowercase().replace('-', "_"))
+        .filter(|token| !token.is_empty())
+    {
+        match token.as_str() {
+            "all" => {
+                saw_media = true;
+                policy = TelegramUnsupportedMediaFallbackPolicy::file_for_audio_voice_video();
+            }
+            "audio" => {
+                saw_media = true;
+                policy.audio = TelegramNativeMediaHandling::File;
+            }
+            "voice" => {
+                saw_media = true;
+                policy.voice = TelegramNativeMediaHandling::File;
+            }
+            "video" => {
+                saw_media = true;
+                policy.video = TelegramNativeMediaHandling::File;
+            }
+            "none" | "native" => saw_none = true,
+            _ => {
+                return Err(config::CliConfigError::ParseConfig(format!(
+                    "invalid {DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV}: {token}"
+                ))
+                .into());
+            }
+        }
+    }
+    if saw_none && saw_media {
+        return Err(config::CliConfigError::ParseConfig(format!(
+            "{DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV} cannot combine none/native with media kinds"
+        ))
+        .into());
+    }
+    Ok(if saw_none {
+        TelegramUnsupportedMediaFallbackPolicy::default()
+    } else {
+        policy
+    })
+}
+
 fn telegram_config_from_values(
     options: &TelegramBridgeOptions,
     env_source: impl Fn(&str) -> Option<String>,
@@ -1829,6 +2065,10 @@ fn telegram_config_from_values(
             options.file_retention_seconds,
             env_source(DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV),
             DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV,
+        )?,
+        unsupported_media_fallback: telegram_unsupported_media_fallback_policy(
+            options.unsupported_media_fallback_to_file.clone(),
+            env_source(DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV),
         )?,
     };
     let startup_update_policy = telegram_startup_update_policy(
@@ -2061,6 +2301,8 @@ struct TelegramBridgeOptions {
     file_download_dir: Option<PathBuf>,
     #[arg(long = "telegram-file-retention-seconds")]
     file_retention_seconds: Option<u64>,
+    #[arg(long = "telegram-unsupported-media-fallback-to-file")]
+    unsupported_media_fallback_to_file: Option<String>,
     #[arg(long = "telegram-startup-update-policy", value_parser = parse_telegram_startup_update_policy_arg)]
     startup_update_policy: Option<TelegramStartupUpdatePolicy>,
     #[arg(long = "telegram-offset-checkpoint")]
@@ -2229,9 +2471,11 @@ mod tests {
     use super::{
         BridgeUpdateHandler, BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand,
         CliError, ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
+        apply_profile_media_fallback_policy, profile_media_fallback_policy,
         register_telegram_commands, run_profile_config_schema, telegram_config_from_values,
         validate_interaction_bind,
     };
+    use crate::config::HostProfileConfig;
     use crate::schema::profile_config_schema_json;
     use crate::test_support::{remove_temp_file, write_temp_file};
     use clap::Parser;
@@ -2239,8 +2483,8 @@ mod tests {
         AgentManifest, JobSnapshot, JobStatus, Locale, ManifestPatch, ManifestPatchProposal,
         OutputChunk, ProcessOutput, ProcessOutputStream, SystemPromptAddition, WaitOutcome,
         interaction::{
-            InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
-            InteractionWsNotification,
+            InteractionClientError, InteractionProfileDescriptor, InteractionSessionDescriptor,
+            InteractionSessionStatus, InteractionWsNotification,
         },
     };
     use noloong_agent_core::{
@@ -2248,8 +2492,8 @@ mod tests {
     };
     use noloong_agent_telegram::{
         access::{TelegramChatKind, TelegramTextInput},
-        bridge::{TelegramInteractionClient, TelegramInteractionFuture},
-        config::TelegramFilePolicy,
+        bridge::{TelegramBridgeError, TelegramInteractionClient, TelegramInteractionFuture},
+        config::{TelegramFilePolicy, TelegramNativeMediaDecision, TelegramNativeMediaHandling},
         delivery::{TelegramDelivery, TelegramMessageTarget},
         display::{TelegramDisplayState, deliver_display_event},
         i18n::TelegramUiCatalog,
@@ -2581,6 +2825,99 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.network.proxy_url, None);
+    }
+
+    #[test]
+    fn telegram_config_parses_manual_unsupported_media_fallback() {
+        let env = BTreeMap::from([
+            ("NOLOONG_INTERACTION_URL", "ws://127.0.0.1:8787/jsonrpc/ws"),
+            ("TELEGRAM_BOT_TOKEN", "token"),
+            ("TELEGRAM_ALLOWED_USERS", "123456789"),
+            ("TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE", "audio,video"),
+        ]);
+
+        let config = telegram_config_from_values(&TelegramBridgeOptions::default(), |name| {
+            env.get(name).map(|value| value.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            config.file_policy.unsupported_media_fallback.audio,
+            TelegramNativeMediaHandling::File
+        );
+        assert_eq!(
+            config.file_policy.unsupported_media_fallback.voice,
+            TelegramNativeMediaHandling::Native
+        );
+        assert_eq!(
+            config.file_policy.unsupported_media_fallback.video,
+            TelegramNativeMediaHandling::File
+        );
+    }
+
+    #[test]
+    fn telegram_embedded_mode_derives_media_fallback_from_profile_provider() {
+        let config = serde_json::from_value::<HostProfileConfig>(json!({
+            "defaultProfileId": "chatgpt",
+            "profiles": [
+                {
+                    "profileId": "chatgpt",
+                    "displayName": "ChatGPT",
+                    "provider": {
+                        "type": "chatgpt_responses",
+                        "model": "gpt-5.4-mini",
+                        "allowFileDataUrlInput": true
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+        let mut file_policy = TelegramFilePolicy::default();
+
+        apply_profile_media_fallback_policy(&mut file_policy, &config, None);
+
+        let fallback = file_policy.unsupported_media_fallback;
+        assert_eq!(
+            fallback.audio.decision_for_mime_type("application/pdf"),
+            TelegramNativeMediaDecision::File
+        );
+        assert_eq!(
+            fallback.audio.decision_for_mime_type("audio/ogg"),
+            TelegramNativeMediaDecision::Unsupported
+        );
+        assert_eq!(
+            fallback.video.decision_for_mime_type("video/mp4"),
+            TelegramNativeMediaDecision::Unsupported
+        );
+    }
+
+    #[test]
+    fn telegram_chat_completions_fallback_keeps_supported_audio_native() {
+        let config = serde_json::from_value::<HostProfileConfig>(json!({
+            "profiles": [
+                {
+                    "profileId": "chat",
+                    "displayName": "Chat",
+                    "provider": {
+                        "type": "chat_completions",
+                        "model": "openrouter/free"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let policy = profile_media_fallback_policy(&config, None);
+
+        assert_eq!(
+            policy.audio.decision_for_mime_type("audio/mpeg"),
+            TelegramNativeMediaDecision::Native
+        );
+        assert_eq!(
+            policy.audio.decision_for_mime_type("audio/ogg"),
+            TelegramNativeMediaDecision::Unsupported
+        );
+        assert_eq!(policy.video, TelegramNativeMediaHandling::Native);
     }
 
     #[tokio::test]
@@ -3209,6 +3546,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn telegram_submission_setup_failure_is_reported_without_polling_failure() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture
+            .interaction
+            .fail_method("session/create", "session store rejected create");
+
+        fixture
+            .handler
+            .handle_text_input_message(telegram_text_input("hello"))
+            .await
+            .unwrap();
+
+        assert!(fixture.api.sent_texts().iter().any(|text| {
+            text.contains("Message could not be submitted to the agent")
+                && text.contains("session store rejected create")
+        }));
+    }
+
+    #[tokio::test]
+    async fn telegram_prompt_jsonrpc_failure_is_left_to_display_delivery() {
+        let fixture = TelegramCallbackFixture::new().await;
+        fixture
+            .interaction
+            .fail_method("agent/prompt", "provider rejected media");
+
+        fixture
+            .handler
+            .handle_text_input_message(telegram_text_input("hello"))
+            .await
+            .unwrap();
+
+        assert!(
+            !fixture
+                .api
+                .sent_texts()
+                .iter()
+                .any(|text| text.contains("Message could not be submitted to the agent"))
+        );
+    }
+
     struct TelegramCallbackFixture {
         handler: BridgeUpdateHandler,
         api: Arc<FakeTelegramApi>,
@@ -3481,6 +3859,7 @@ mod tests {
         process_outputs: StdMutex<BTreeMap<String, ProcessOutput>>,
         manifest_proposals: StdMutex<Vec<ManifestPatchProposal>>,
         approved_manifest_proposals: StdMutex<Vec<ManifestPatchProposal>>,
+        failures: StdMutex<BTreeMap<String, String>>,
     }
 
     impl FakeInteraction {
@@ -3546,6 +3925,13 @@ mod tests {
         fn set_manifest_proposals(&self, proposals: Vec<ManifestPatchProposal>) {
             *self.manifest_proposals.lock().unwrap() = proposals;
         }
+
+        fn fail_method(&self, method: &str, message: &str) {
+            self.failures
+                .lock()
+                .unwrap()
+                .insert(method.into(), message.into());
+        }
     }
 
     impl TelegramInteractionClient for FakeInteraction {
@@ -3559,6 +3945,15 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((method.into(), params.clone()));
+                if let Some(message) = self.failures.lock().unwrap().get(method).cloned() {
+                    return Err(TelegramBridgeError::Interaction(
+                        InteractionClientError::JsonRpc {
+                            code: -32603,
+                            message,
+                            data: None,
+                        },
+                    ));
+                }
                 match method {
                     "approval/list" => {
                         let approvals = self.approval_list.lock().unwrap().clone();

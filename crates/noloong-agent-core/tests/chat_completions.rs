@@ -13,7 +13,7 @@ pub mod support;
 
 use support::{
     DOTTED_TEST_TOOL_NAME, HangingServer, MockResponse, MockServer, TestAuthProvider,
-    dotted_tool_spec, fast_one_retry_reconnect, is_provider_safe_tool_name,
+    dotted_tool_spec, fast_one_retry_reconnect, is_provider_safe_tool_name, unique_temp_dir,
 };
 
 #[test]
@@ -471,6 +471,54 @@ async fn payload_file_uri_rejected() -> Result<()> {
             .to_string()
             .contains("file input does not support URI")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_materializes_local_image_file_and_video_uris() -> Result<()> {
+    let dir = unique_temp_dir("chat-local-media");
+    tokio::fs::create_dir_all(&dir).await?;
+    let image_path = dir.join("image.png");
+    let file_path = dir.join("note.txt");
+    let video_path = dir.join("clip.mp4");
+    tokio::fs::write(&image_path, b"image").await?;
+    tokio::fs::write(&file_path, b"file").await?;
+    tokio::fs::write(&video_path, b"video").await?;
+
+    let mut image = MediaBlock::uri(MediaKind::Image, format!("file://{}", image_path.display()));
+    image.mime_type = Some("image/png".into());
+    let mut file = MediaBlock::uri(MediaKind::File, format!("file://{}", file_path.display()));
+    file.mime_type = Some("text/plain".into());
+    let mut video = MediaBlock::uri(MediaKind::Video, format!("file://{}", video_path.display()));
+    video.mime_type = Some("video/mp4".into());
+
+    let body = captured_request_body(
+        request_with_user_content(vec![
+            ContentBlock::Media { media: image },
+            ContentBlock::Media { media: file },
+            ContentBlock::Media { media: video },
+        ]),
+        ChatCompletionsProviderConfig::new("test-chat", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(
+        body["messages"][0]["content"][0]["image_url"]["url"],
+        "data:image/png;base64,aW1hZ2U="
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1]["file"]["file_data"],
+        "ZmlsZQ=="
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1]["file"]["filename"],
+        "note.txt"
+    );
+    assert_eq!(
+        body["messages"][0]["content"][2]["video_url"]["url"],
+        "data:video/mp4;base64,dmlkZW8="
+    );
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

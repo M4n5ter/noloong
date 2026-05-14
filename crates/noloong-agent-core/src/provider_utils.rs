@@ -1,10 +1,14 @@
 use crate::{
     AgentCoreError, CancellationToken, EventSinkFuture, HttpAuthContext, HttpAuthHeader,
-    HttpAuthProvider, HttpAuthRefreshContext, HttpAuthRefreshResult, ModelProvider, ModelRequest,
-    ModelStreamEvent, ModelStreamSink, Result,
+    HttpAuthProvider, HttpAuthRefreshContext, HttpAuthRefreshResult, MediaBlock, MediaEncoding,
+    MediaSource, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink, Result,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
-use std::{collections::BTreeMap, env, sync::Arc};
+use base64::{Engine as _, engine::general_purpose};
+use reqwest::{
+    Url,
+    header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue},
+};
+use std::{collections::BTreeMap, env, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +146,118 @@ pub(crate) fn resolve_api_key(
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum LocalFileUriMediaMaterialization {
+    Inline,
+    Leave,
+    Reject(&'static str),
+}
+
+pub(crate) async fn materialize_local_file_uri_media_in_request<F>(
+    mut request: ModelRequest,
+    policy: F,
+) -> Result<ModelRequest>
+where
+    F: Fn(&MediaBlock) -> LocalFileUriMediaMaterialization + Copy + Send + Sync,
+{
+    for message in &mut request.messages {
+        materialize_local_file_uri_media_in_content(&mut message.content, policy).await?;
+    }
+    Ok(request)
+}
+
+fn materialize_local_file_uri_media_in_content<'a, F>(
+    content: &'a mut [crate::ContentBlock],
+    policy: F,
+) -> crate::providers::BoxFuture<'a, ()>
+where
+    F: Fn(&MediaBlock) -> LocalFileUriMediaMaterialization + Copy + Send + Sync + 'a,
+{
+    Box::pin(async move {
+        for block in content {
+            match block {
+                crate::ContentBlock::Media { media } => {
+                    materialize_local_file_uri_media(media, policy).await?;
+                }
+                crate::ContentBlock::ToolResult { content, .. } => {
+                    materialize_local_file_uri_media_in_content(content, policy).await?;
+                }
+                crate::ContentBlock::Thinking { .. }
+                | crate::ContentBlock::Text { .. }
+                | crate::ContentBlock::Json { .. }
+                | crate::ContentBlock::ToolCall { .. }
+                | crate::ContentBlock::ProviderPayload { .. } => {}
+            }
+        }
+        Ok(())
+    })
+}
+
+async fn materialize_local_file_uri_media<F>(media: &mut MediaBlock, policy: F) -> Result<()>
+where
+    F: Fn(&MediaBlock) -> LocalFileUriMediaMaterialization,
+{
+    if local_file_uri_path(media)?.is_none() {
+        return Ok(());
+    }
+    match policy(media) {
+        LocalFileUriMediaMaterialization::Inline => {
+            inline_local_file_uri_media(media).await?;
+        }
+        LocalFileUriMediaMaterialization::Leave => {}
+        LocalFileUriMediaMaterialization::Reject(message) => {
+            return Err(AgentCoreError::Provider(message.into()));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn inline_local_file_uri_media(media: &mut MediaBlock) -> Result<bool> {
+    let Some(path) = local_file_uri_path(media)? else {
+        return Ok(false);
+    };
+    let data = tokio::fs::read(&path).await.map_err(|source| {
+        AgentCoreError::Provider(format!(
+            "failed to read local media file {}: {source}",
+            path.display()
+        ))
+    })?;
+    if media.name.is_none() {
+        media.name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned);
+    }
+    media.source = MediaSource::Inline {
+        data: general_purpose::STANDARD.encode(data),
+        encoding: MediaEncoding::Base64,
+    };
+    Ok(true)
+}
+
+pub(crate) fn local_file_uri_path(media: &MediaBlock) -> Result<Option<PathBuf>> {
+    let MediaSource::Uri { uri } = &media.source else {
+        return Ok(None);
+    };
+    let url = match Url::parse(uri) {
+        Ok(url) => url,
+        Err(source) if uri.trim_start().starts_with("file:") => {
+            return Err(AgentCoreError::Provider(format!(
+                "local file URI cannot be parsed: {uri}: {source}"
+            )));
+        }
+        Err(_) => return Ok(None),
+    };
+    if url.scheme() != "file" {
+        return Ok(None);
+    }
+    url.to_file_path().map(Some).map_err(|()| {
+        AgentCoreError::Provider(format!(
+            "local file URI cannot be converted to a path: {uri}"
+        ))
+    })
+}
+
 pub(crate) fn replay_scope_match(
     version: u64,
     kind: &str,
@@ -158,4 +274,30 @@ pub(crate) fn replay_scope_match(
         return ReplayScopeMatch::Ignore;
     }
     ReplayScopeMatch::Match
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_file_uri_path;
+    use crate::{MediaBlock, MediaKind};
+
+    #[test]
+    fn malformed_file_uri_reports_provider_error() {
+        let media = MediaBlock::uri(MediaKind::File, " file://[::1");
+
+        let error = local_file_uri_path(&media).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("local file URI cannot be parsed")
+        );
+    }
+
+    #[test]
+    fn non_file_invalid_uri_is_ignored_by_local_materialization() {
+        let media = MediaBlock::uri(MediaKind::File, "not a url");
+
+        assert!(local_file_uri_path(&media).unwrap().is_none());
+    }
 }

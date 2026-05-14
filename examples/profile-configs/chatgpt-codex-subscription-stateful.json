@@ -12,6 +12,7 @@
         "type": "chatgpt_responses",
         "model": "gpt-5.4-mini",
         "stateMode": "stateful",
+        "allowFileDataUrlInput": true,
         "reasoning": {
           "effort": "medium",
           "summary": "auto",

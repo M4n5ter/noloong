@@ -31,6 +31,8 @@ pub const DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV: &str = "TELEGRAM_FILE_INLI
 pub const DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV: &str = "TELEGRAM_FILE_MAX_DOWNLOAD_BYTES";
 pub const DEFAULT_TELEGRAM_FILE_DOWNLOAD_DIR_ENV: &str = "TELEGRAM_FILE_DOWNLOAD_DIR";
 pub const DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV: &str = "TELEGRAM_FILE_RETENTION_SECONDS";
+pub const DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV: &str =
+    "TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE";
 pub const DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV: &str = "TELEGRAM_STARTUP_UPDATE_POLICY";
 pub const DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV: &str = "TELEGRAM_OFFSET_CHECKPOINT";
 pub const DEFAULT_CHATGPT_TOKEN_FILE_ENV: &str = "NOLOONG_CHATGPT_TOKEN_FILE";
@@ -169,6 +171,8 @@ pub enum BuiltInProviderConfig {
         state_mode: ResponsesStateMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<ResponsesProviderReasoningConfig>,
+        #[serde(default)]
+        allow_file_data_url_input: bool,
     },
     AnthropicMessages {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +201,8 @@ pub enum BuiltInProviderConfig {
         state_mode: ResponsesStateMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<ResponsesProviderReasoningConfig>,
+        #[serde(default)]
+        allow_file_data_url_input: bool,
     },
 }
 
@@ -741,6 +747,31 @@ mod tests {
     }
 
     #[test]
+    fn profile_config_loads_responses_file_data_url_opt_in() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {
+                    "type": "responses",
+                    "model": "gpt-5.4-mini",
+                    "allowFileDataUrlInput": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::Responses {
+            allow_file_data_url_input,
+            ..
+        } = config.provider
+        else {
+            panic!("expected Responses provider");
+        };
+        assert!(allow_file_data_url_input);
+    }
+
+    #[test]
     fn profile_config_rejects_stateless_reasoning_without_encrypted_replay() {
         let config = serde_json::from_str::<HostProfileConfig>(
             r#"{
@@ -1013,6 +1044,33 @@ mod tests {
         };
         assert_eq!(auth, &ChatGptAuthConfig::default());
         assert_eq!(config.profiles[0].compaction, ProfileCompactionConfig::Auto);
+    }
+
+    #[test]
+    fn profile_config_loads_chatgpt_responses_file_data_url_opt_in() {
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {
+                        "type": "chatgpt_responses",
+                        "model": "gpt-5.4-mini",
+                        "allowFileDataUrlInput": true
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let BuiltInProviderConfig::ChatgptResponses {
+            allow_file_data_url_input,
+            ..
+        } = &config.profiles[0].provider
+        else {
+            panic!("expected ChatGPT responses provider");
+        };
+        assert!(*allow_file_data_url_input);
     }
 
     #[test]

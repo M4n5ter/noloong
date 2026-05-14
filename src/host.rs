@@ -263,12 +263,16 @@ fn build_provider(
             max_output_tokens,
             state_mode,
             reasoning,
+            allow_file_data_url_input,
         } => {
             let mut provider = ResponsesApiProviderConfig::new(
                 provider_id.clone().unwrap_or_else(|| profile_id.into()),
                 model,
             )
             .with_state_mode(*state_mode);
+            if *allow_file_data_url_input {
+                provider = provider.allow_file_data_url_input(true);
+            }
             if let Some(base_url) = base_url {
                 provider = provider.base_url(base_url);
             }
@@ -329,15 +333,19 @@ fn build_provider(
             auth,
             state_mode,
             reasoning,
+            allow_file_data_url_input,
         } => {
             let provider_id = provider_id.clone().unwrap_or_else(|| profile_id.into());
             let auth_provider = build_chatgpt_auth_provider(auth)?;
-            let provider_config = noloong_openai::provider::chatgpt_responses_provider_config(
+            let mut provider_config = noloong_openai::provider::chatgpt_responses_provider_config(
                 provider_id.clone(),
                 model,
                 Arc::clone(&auth_provider),
             )
             .with_state_mode(*state_mode);
+            if *allow_file_data_url_input {
+                provider_config = provider_config.allow_file_data_url_input(true);
+            }
             let provider_config =
                 apply_responses_reasoning(provider_config, reasoning.as_ref(), *state_mode)?;
             let provider = ResponsesApiProvider::new(provider_config)?;

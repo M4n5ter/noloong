@@ -1,5 +1,6 @@
 use crate::{
     commands::TelegramCockpitCommand,
+    media::{TelegramMediaFallbackKind, TelegramMediaFallbackNotice, TelegramMediaResolutionError},
     queue::{
         TelegramQueueKind, TelegramQueueSnapshot, TelegramQueueSummaryLabels,
         TelegramQueuedMessageIntent,
@@ -905,10 +906,58 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn media_resolution_failed(self, error: &TelegramMediaResolutionError) -> String {
+        self.media_input_failed(&self.media_resolution_error(error))
+    }
+
+    pub fn unsupported_media_fallback_notices(
+        self,
+        notices: &[TelegramMediaFallbackNotice],
+    ) -> String {
+        notices
+            .iter()
+            .map(|notice| self.unsupported_media_fallback_notice(notice))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn unsupported_media_fallback_notice(self, notice: &TelegramMediaFallbackNotice) -> String {
+        let kind = self.media_fallback_kind(notice.original_kind);
+        match self.locale {
+            Locale::En => format!(
+                "This model/provider cannot process {kind} attachments in native media mode ({}; {}). Submitted it as a regular file instead.",
+                notice.file_name, notice.mime_type
+            ),
+            Locale::Zh => format!(
+                "当前模型/接口暂不支持以原生媒体方式处理{kind}（{}；{}），已按普通文件提交。",
+                notice.file_name, notice.mime_type
+            ),
+        }
+    }
+
+    pub fn input_submission_failed(self, error: &str) -> String {
+        let error = whitespace_prefix_summary(error, 700);
+        match self.locale {
+            Locale::En => format!("Message could not be submitted to the agent: {error}"),
+            Locale::Zh => format!("消息未能提交给智能体：{error}"),
+        }
+    }
+
     fn manifest_no_enabled_tools(self) -> &'static str {
         match self.locale {
             Locale::En => "none",
             Locale::Zh => "无",
+        }
+    }
+
+    fn media_fallback_kind(self, kind: TelegramMediaFallbackKind) -> &'static str {
+        match (self.locale, kind) {
+            (Locale::En, TelegramMediaFallbackKind::Audio) => "audio",
+            (Locale::En, TelegramMediaFallbackKind::Voice) => "voice",
+            (Locale::En, TelegramMediaFallbackKind::Video) => "video",
+            (Locale::Zh, TelegramMediaFallbackKind::Audio) => "音频",
+            (Locale::Zh, TelegramMediaFallbackKind::Voice) => "语音",
+            (Locale::Zh, TelegramMediaFallbackKind::Video) => "视频",
         }
     }
 
@@ -1039,6 +1088,107 @@ impl TelegramUiCatalog {
             },
         }
     }
+
+    fn media_resolution_error(self, error: &TelegramMediaResolutionError) -> String {
+        match error {
+            TelegramMediaResolutionError::FileTooLarge {
+                file_id,
+                limit,
+                actual,
+            } => match self.locale {
+                Locale::En => format!(
+                    "file `{file_id}` is too large (limit: {limit} bytes, actual: {})",
+                    self.media_file_size_label(*actual)
+                ),
+                Locale::Zh => format!(
+                    "文件 `{file_id}` 过大（限制：{limit} 字节，实际：{}）",
+                    self.media_file_size_label(*actual)
+                ),
+            },
+            TelegramMediaResolutionError::MissingMime { file_id, kind } => match self.locale {
+                Locale::En => format!(
+                    "file `{file_id}` is missing or has an unknown MIME type for {}",
+                    self.media_input_kind_label(kind)
+                ),
+                Locale::Zh => format!(
+                    "文件 `{file_id}` 缺少或无法识别 {} 的 MIME 类型",
+                    self.media_input_kind_label(kind)
+                ),
+            },
+            TelegramMediaResolutionError::MissingTelegramFilePath { file_id } => {
+                match self.locale {
+                    Locale::En => {
+                        format!("Telegram did not return a downloadable path for file `{file_id}`")
+                    }
+                    Locale::Zh => format!("Telegram 没有返回文件 `{file_id}` 的可下载路径"),
+                }
+            }
+            TelegramMediaResolutionError::UnsupportedNativeMedia {
+                kind,
+                file_name,
+                mime_type,
+            } => match self.locale {
+                Locale::En => format!(
+                    "this model/provider cannot process {} attachments in native media mode ({}; {}) and cannot submit them as regular files",
+                    self.media_fallback_kind(*kind),
+                    file_name,
+                    mime_type
+                ),
+                Locale::Zh => format!(
+                    "当前模型/接口暂不支持以原生媒体方式处理{}（{}；{}），且不能作为普通文件提交",
+                    self.media_fallback_kind(*kind),
+                    file_name,
+                    mime_type
+                ),
+            },
+            TelegramMediaResolutionError::Api { file_id, source } => match self.locale {
+                Locale::En => format!("Telegram media API failed for file `{file_id}`: {source}"),
+                Locale::Zh => format!("Telegram 媒体 API 处理文件 `{file_id}` 失败：{source}"),
+            },
+            TelegramMediaResolutionError::Io { path, source } => match self.locale {
+                Locale::En => format!(
+                    "could not prepare local download path `{}`: {source}",
+                    path.display()
+                ),
+                Locale::Zh => {
+                    format!("无法准备本地下载路径 `{}`：{source}", path.display())
+                }
+            },
+            TelegramMediaResolutionError::InvalidFileUri { path } => match self.locale {
+                Locale::En => format!(
+                    "local download path cannot be represented as a file URI: `{}`",
+                    path.display()
+                ),
+                Locale::Zh => format!("本地下载路径无法表示为 file URI：`{}`", path.display()),
+            },
+        }
+    }
+
+    fn media_file_size_label(self, actual: Option<u64>) -> String {
+        match (self.locale, actual) {
+            (Locale::En, Some(actual)) => format!("{actual} bytes"),
+            (Locale::Zh, Some(actual)) => format!("{actual} 字节"),
+            (Locale::En, None) => "unknown".into(),
+            (Locale::Zh, None) => "未知".into(),
+        }
+    }
+
+    fn media_input_kind_label(self, kind: &str) -> &'static str {
+        match (self.locale, kind) {
+            (Locale::En, "photo") => "photo",
+            (Locale::En, "document") => "document",
+            (Locale::En, "audio") => "audio",
+            (Locale::En, "voice") => "voice",
+            (Locale::En, "video") => "video",
+            (Locale::Zh, "photo") => "图片",
+            (Locale::Zh, "document") => "文件",
+            (Locale::Zh, "audio") => "音频",
+            (Locale::Zh, "voice") => "语音",
+            (Locale::Zh, "video") => "视频",
+            (Locale::En, _) => "media",
+            (Locale::Zh, _) => "媒体",
+        }
+    }
 }
 
 impl Default for TelegramUiCatalog {
@@ -1051,8 +1201,12 @@ impl Default for TelegramUiCatalog {
 mod tests {
     use super::TelegramUiCatalog;
     use crate::commands::TelegramCockpitCommand;
+    use crate::media::{
+        TelegramMediaFallbackKind, TelegramMediaFallbackNotice, TelegramMediaResolutionError,
+    };
     use noloong_agent::Locale;
     use noloong_agent_core::ToolPermissionOutcome;
+    use std::path::PathBuf;
 
     #[test]
     fn ui_catalog_localizes_approval_buttons() {
@@ -1079,6 +1233,58 @@ mod tests {
         assert_eq!(
             catalog.command_description(TelegramCockpitCommand::Approvals),
             "列出待处理审批"
+        );
+    }
+
+    #[test]
+    fn ui_catalog_localizes_media_resolution_errors() {
+        let catalog = TelegramUiCatalog::new(Locale::Zh);
+
+        assert_eq!(
+            catalog.media_resolution_failed(&TelegramMediaResolutionError::FileTooLarge {
+                file_id: "file-1".into(),
+                limit: 1024,
+                actual: Some(2048),
+            }),
+            "媒体输入失败：文件 `file-1` 过大（限制：1024 字节，实际：2048 字节）"
+        );
+        assert_eq!(
+            catalog.media_resolution_failed(&TelegramMediaResolutionError::MissingMime {
+                file_id: "file-2".into(),
+                kind: "document",
+            }),
+            "媒体输入失败：文件 `file-2` 缺少或无法识别 文件 的 MIME 类型"
+        );
+        assert_eq!(
+            catalog.media_resolution_failed(&TelegramMediaResolutionError::Io {
+                path: PathBuf::from("/tmp/noloong-telegram"),
+                source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+            }),
+            "媒体输入失败：无法准备本地下载路径 `/tmp/noloong-telegram`：denied"
+        );
+        assert_eq!(
+            catalog.media_resolution_failed(
+                &TelegramMediaResolutionError::UnsupportedNativeMedia {
+                    kind: TelegramMediaFallbackKind::Audio,
+                    file_name: "smoke.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                }
+            ),
+            "媒体输入失败：当前模型/接口暂不支持以原生媒体方式处理音频（smoke.ogg；audio/ogg），且不能作为普通文件提交"
+        );
+    }
+
+    #[test]
+    fn ui_catalog_localizes_media_fallback_notice() {
+        let catalog = TelegramUiCatalog::new(Locale::Zh);
+
+        assert_eq!(
+            catalog.unsupported_media_fallback_notice(&TelegramMediaFallbackNotice {
+                original_kind: TelegramMediaFallbackKind::Audio,
+                file_name: "smoke.ogg".into(),
+                mime_type: "audio/ogg".into(),
+            }),
+            "当前模型/接口暂不支持以原生媒体方式处理音频（smoke.ogg；audio/ogg），已按普通文件提交。"
         );
     }
 }

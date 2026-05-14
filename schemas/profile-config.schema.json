@@ -195,6 +195,10 @@
         },
         {
           "properties": {
+            "allowFileDataUrlInput": {
+              "default": false,
+              "type": "boolean"
+            },
             "apiKeyEnv": {
               "type": [
                 "string",
@@ -327,6 +331,10 @@
         },
         {
           "properties": {
+            "allowFileDataUrlInput": {
+              "default": false,
+              "type": "boolean"
+            },
             "auth": {
               "$ref": "#/$defs/ChatGptAuthConfig"
             },

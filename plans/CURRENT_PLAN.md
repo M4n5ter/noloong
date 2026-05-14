@@ -48,7 +48,7 @@
 - [x] `TelegramBridgeConfig` 增加 `file_policy`：inline 上限、最大下载大小、下载目录、保留时长。
 - [x] `TelegramBridgeConfig` 增加 `startup_update_policy`，默认 `skip_pending_without_checkpoint`。
 - [x] CLI/env 能配置下载目录、大小上限、是否跳过 pending updates。
-- [ ] 下载目录创建失败、文件过大、未知 MIME 返回可本地化错误。
+- [x] 下载目录创建失败、文件过大、未知 MIME 返回可本地化错误。
 
 **Verification:**
 - [x] `cargo test -p noloong-agent-telegram config`
@@ -86,9 +86,9 @@
 
 ### Checkpoint: Bot API Foundation
 
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo test -p noloong-agent-telegram`
-- [ ] `cargo test -p noloong --bin noloong`
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-agent-telegram`
+- [x] `cargo test -p noloong --bin noloong`
 
 ### Phase 2: Multi-modal Input
 
@@ -123,6 +123,7 @@
 - [x] 小文件按 MIME/kind 生成 inline base64 media。
 - [x] 大文件写入受控目录，并生成 `MediaSource::Uri { uri: "file://..." }`。
 - [x] 图片映射 `MediaKind::Image`，语音/音频映射 `Audio`，视频映射 `Video`，其它 document 映射 `File`。
+- [x] 当前 provider 不支持原生音频/语音/视频输入时，Telegram 先发送本地化提醒；若接口支持普通文件输入则降级为文件提交，否则在进入 provider 前本地化拒绝。
 - [x] 超过最大下载大小时生成明确用户可见错误，不创建 agent prompt。
 
 **Verification:**
@@ -163,9 +164,9 @@
 
 ### Checkpoint: Multi-modal Input
 
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo test -p noloong-agent-telegram input bridge`
-- [ ] Manual smoke：私聊发送图片、文档、语音、视频，Agent 能看到对应 media block。
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-agent-telegram input bridge`
+- [x] Manual smoke：私聊发送图片、文档、语音、视频，Agent 能看到对应 media block。
 
 ### Phase 3: Telegram-native Output and Display
 
@@ -243,9 +244,9 @@
 
 ### Checkpoint: Native Output
 
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo test -p noloong-agent-telegram`
-- [ ] Manual smoke：模型输出文本、图片/文件、审批请求，Telegram UI 可读且按钮状态正确。
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-agent-telegram`
+- [x] Manual smoke：模型输出文本、图片/文件、审批请求，Telegram UI 可读且按钮状态正确。
 
 ### Phase 4: Agent Cockpit Commands
 
@@ -375,9 +376,9 @@
 
 ### Checkpoint: Cockpit Commands
 
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo test -p noloong-agent-telegram`
-- [ ] Manual smoke：`/status`、`/new`、`/sessions`、`/queue`、`/processes`、`/manifest`、`/subagent` 都能在私聊中完成一条真实路径。
+- [x] `cargo fmt --all --check`
+- [x] `cargo test -p noloong-agent-telegram`
+- [x] Manual smoke：`/status`、`/new`、`/sessions`、`/queue`、`/processes`、`/manifest`、`/subagent` 都能在私聊中完成一条真实路径。
 
 ### Phase 5: Polish, Docs, and Live Verification
 
@@ -435,14 +436,21 @@
 - [x] format check 通过。
 - [x] clippy 无 warning。
 - [x] workspace tests 通过。
-- [ ] Telegram live smoke 通过：文本、图片、文档、语音、视频、审批按钮、process card、文件回传。
+- [x] Telegram live smoke 通过：文本、图片、文档、语音、视频、审批按钮、process card、文件回传。
 - [x] ChatGPT subscription profile 与 OpenRouter free profile 都至少完成一次私聊 prompt。
 
 **Verification:**
 - [x] `cargo fmt --all --check`
 - [x] `cargo clippy --workspace --all-targets --all-features`
 - [x] `cargo test --workspace`
-- [ ] Manual Telegram live smoke with test bot credentials.
+- [x] Manual Telegram live smoke with test bot credentials.
+  - 2026-05-12: OpenRouter free private text prompt passed (`openrouter text smoke ok`).
+  - 2026-05-12: ChatGPT subscription private text prompt passed after subscription refresh (`chatgpt subscription text smoke ok`).
+  - 2026-05-12: ChatGPT subscription `audio/ogg` unsupported-media smoke passed. Telegram delivered the audio update, and the bridge rendered a localized unsupported-media notice before provider submission; no provider 400 or polling failure occurred.
+  - 2026-05-14: ChatGPT subscription profile (`examples/profile-configs/chatgpt-codex-subscription.json`) private cockpit smoke passed in Telegram Desktop: `/status`, `/new`, `/sessions`, `/queue`, `/processes`, `/manifest`, and `/subagent researcher ...` all completed a real path with Chinese UI text and no console-side bridge error.
+  - 2026-05-14: Telegram image and document media smoke passed. `smoke-image.png` with caption reached the agent as image input and produced a final model reply; `README.md` was downloaded to `target/telegram-smoke-downloads/.../README.md`, materialized for the Responses file path, and the approval flow resumed after `/approve`.
+  - 2026-05-14: Telegram audio/video unsupported-media smoke passed with the ChatGPT subscription Responses policy. `smoke-video.mp4` arrived as `video/mp4` media/document and `smoke-audio.ogg` arrived as `audio/ogg`; both rendered localized unsupported-media notices before provider submission, with no provider 400.
+  - 2026-05-14: Telegram process and file-return smoke passed. A host command approval card for `host.exec.start` was rendered and resolved via `/approve`; `/processes` listed `host-job-1`, `host-job-2`, and `host-job-3`; `/process host-job-2` returned long output as `process-host-job-2.txt` Telegram document with read/wait/terminate buttons.
 
 **Dependencies:** Task 16
 

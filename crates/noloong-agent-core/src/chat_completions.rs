@@ -1,6 +1,7 @@
 use crate::provider_utils::{
-    ReplayScopeMatch, emit_model_stream_event, headers_from_map, refresh_auth_provider,
-    replay_scope_match, resolve_auth_headers,
+    LocalFileUriMediaMaterialization, ReplayScopeMatch, emit_model_stream_event, headers_from_map,
+    materialize_local_file_uri_media_in_request, refresh_auth_provider, replay_scope_match,
+    resolve_auth_headers,
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
@@ -367,6 +368,14 @@ impl ModelProvider for ChatCompletionsProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
+            let request =
+                materialize_local_file_uri_media_in_request(request, |media| match &media.kind {
+                    MediaKind::Image | MediaKind::Audio | MediaKind::File | MediaKind::Video => {
+                        LocalFileUriMediaMaterialization::Inline
+                    }
+                    MediaKind::Custom(_) => LocalFileUriMediaMaterialization::Leave,
+                })
+                .await?;
             let tool_names = ProviderToolNameCodec::new(&request.tools);
             let payload = build_chat_payload(&self.config, &tool_names, &request)?;
             let stream_id = format!("chat-completions-{}-{}", request.run_id, request.turn_id);

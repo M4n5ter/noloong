@@ -16,6 +16,7 @@ sqlite-store = [
 ]
 
 [dependencies]
+base64.workspace = true
 bytes.workspace = true
 memchr.workspace = true
 reqwest.workspace = true

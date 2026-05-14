@@ -16,7 +16,7 @@ pub mod support;
 
 use support::{
     DOTTED_TEST_TOOL_NAME, HangingServer, LiveEchoTool, MockResponse, MockServer, TestAuthProvider,
-    ValueEchoTool, fast_one_retry_reconnect, is_provider_safe_tool_name,
+    ValueEchoTool, fast_one_retry_reconnect, is_provider_safe_tool_name, unique_temp_dir,
 };
 
 fn reasoning_item(id: Option<&str>, encrypted_content: Option<&str>) -> Value {
@@ -840,11 +840,11 @@ async fn payload_maps_file_url_file_id_and_opt_in_data_url() -> Result<()> {
     let mut inline = MediaBlock::inline_base64(MediaKind::File, "ZmlsZQ==");
     inline.mime_type = Some("application/pdf".into());
     inline.name = Some("doc.pdf".into());
+    let mut uri = MediaBlock::uri(MediaKind::File, "https://example.test/doc.pdf");
+    uri.name = Some("doc.pdf".into());
     let body = captured_request_body(
         request_with_user_content(vec![
-            ContentBlock::Media {
-                media: MediaBlock::uri(MediaKind::File, "https://example.test/doc.pdf"),
-            },
+            ContentBlock::Media { media: uri },
             ContentBlock::Media {
                 media: MediaBlock::provider(MediaKind::File, "test-responses", "file-doc"),
             },
@@ -860,12 +860,82 @@ async fn payload_maps_file_url_file_id_and_opt_in_data_url() -> Result<()> {
         body["input"][0]["content"][0]["file_url"],
         "https://example.test/doc.pdf"
     );
+    assert!(body["input"][0]["content"][0].get("filename").is_none());
     assert_eq!(body["input"][0]["content"][1]["file_id"], "file-doc");
     assert_eq!(
         body["input"][0]["content"][2]["file_data"],
         "data:application/pdf;base64,ZmlsZQ=="
     );
     assert_eq!(body["input"][0]["content"][2]["filename"], "doc.pdf");
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_materializes_local_file_uri_as_opt_in_file_data() -> Result<()> {
+    let dir = unique_temp_dir("responses-local-media");
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join("local.txt");
+    tokio::fs::write(&path, b"file").await?;
+    let mut media = MediaBlock::uri(MediaKind::File, format!("file://{}", path.display()));
+    media.mime_type = Some("text/plain".into());
+    media.name = Some("local.txt".into());
+
+    let server = MockServer::spawn(200, "text/event-stream", EMPTY_COMPLETED_STREAM).await?;
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url(server.url())
+            .without_api_key()
+            .allow_file_data_url_input(true),
+    )?;
+    provider
+        .stream_model(
+            request_with_user_content(vec![ContentBlock::Media { media }]),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let body = server.request_json();
+    assert_eq!(body["input"][0]["content"][0]["type"], "input_file");
+    assert_eq!(
+        body["input"][0]["content"][0]["file_data"],
+        "data:text/plain;base64,ZmlsZQ=="
+    );
+    assert_eq!(body["input"][0]["content"][0]["filename"], "local.txt");
+    assert!(body["input"][0]["content"][0].get("file_url").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_rejects_local_file_uri_without_file_data_opt_in() -> Result<()> {
+    let dir = unique_temp_dir("responses-local-media-blocked");
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join("blocked.txt");
+    tokio::fs::write(&path, b"file").await?;
+    let mut media = MediaBlock::uri(MediaKind::File, format!("file://{}", path.display()));
+    media.mime_type = Some("text/plain".into());
+
+    let provider = ResponsesApiProvider::new(
+        ResponsesApiProviderConfig::new("test-responses", "test-model")
+            .base_url("http://127.0.0.1:9")
+            .without_api_key(),
+    )?;
+    let error = provider
+        .stream_model(
+            request_with_user_content(vec![ContentBlock::Media { media }]),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("local file media requires allow_file_data_url_input")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

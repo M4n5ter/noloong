@@ -1,6 +1,6 @@
 use crate::provider_utils::{
-    ReplayScopeMatch, emit_model_stream_event, headers_from_map, replay_scope_match,
-    resolve_api_key,
+    LocalFileUriMediaMaterialization, ReplayScopeMatch, emit_model_stream_event, headers_from_map,
+    materialize_local_file_uri_media_in_request, replay_scope_match, resolve_api_key,
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
@@ -280,6 +280,14 @@ impl ModelProvider for AnthropicMessagesProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
+            let request =
+                materialize_local_file_uri_media_in_request(request, |media| match &media.kind {
+                    MediaKind::Image | MediaKind::File => LocalFileUriMediaMaterialization::Inline,
+                    MediaKind::Audio | MediaKind::Video | MediaKind::Custom(_) => {
+                        LocalFileUriMediaMaterialization::Leave
+                    }
+                })
+                .await?;
             let tool_names = ProviderToolNameCodec::new(&request.tools);
             let payload = build_anthropic_payload(&self.config, &tool_names, &request)?;
             let headers = headers_from_config(&self.config)?;

@@ -83,6 +83,11 @@ pub struct TelegramFilePolicy {
     pub download_dir: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_seconds: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "TelegramUnsupportedMediaFallbackPolicy::is_native"
+    )]
+    pub unsupported_media_fallback: TelegramUnsupportedMediaFallbackPolicy,
 }
 
 impl Default for TelegramFilePolicy {
@@ -92,6 +97,7 @@ impl Default for TelegramFilePolicy {
             max_download_bytes: default_max_download_bytes(),
             download_dir: None,
             retention_seconds: None,
+            unsupported_media_fallback: TelegramUnsupportedMediaFallbackPolicy::default(),
         }
     }
 }
@@ -112,8 +118,138 @@ impl TelegramFilePolicy {
                 "downloadDir must not be empty when configured".into(),
             ));
         }
+        self.unsupported_media_fallback.validate()?;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramUnsupportedMediaFallbackPolicy {
+    #[serde(default)]
+    pub audio: TelegramNativeMediaHandling,
+    #[serde(default)]
+    pub voice: TelegramNativeMediaHandling,
+    #[serde(default)]
+    pub video: TelegramNativeMediaHandling,
+}
+
+impl TelegramUnsupportedMediaFallbackPolicy {
+    pub fn file_for_audio_voice_video() -> Self {
+        Self {
+            audio: TelegramNativeMediaHandling::File,
+            voice: TelegramNativeMediaHandling::File,
+            video: TelegramNativeMediaHandling::File,
+        }
+    }
+
+    pub fn is_native(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn validate(&self) -> Result<(), TelegramConfigError> {
+        self.audio.validate("audio")?;
+        self.voice.validate("voice")?;
+        self.video.validate("video")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TelegramNativeMediaDecision {
+    Native,
+    File,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "mode",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum TelegramNativeMediaHandling {
+    #[default]
+    Native,
+    File,
+    Unsupported,
+    NativeForMimeTypes {
+        mime_types: Vec<String>,
+    },
+    FileForMimeTypes {
+        mime_types: Vec<String>,
+    },
+}
+
+impl TelegramNativeMediaHandling {
+    pub fn native_for_mime_types(mime_types: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self::NativeForMimeTypes {
+            mime_types: mime_types
+                .into_iter()
+                .map(|mime_type| mime_type.as_ref().to_owned())
+                .collect(),
+        }
+    }
+
+    pub fn file_for_mime_types(mime_types: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self::FileForMimeTypes {
+            mime_types: mime_types
+                .into_iter()
+                .map(|mime_type| mime_type.as_ref().to_owned())
+                .collect(),
+        }
+    }
+
+    pub fn decision_for_mime_type(&self, mime_type: &str) -> TelegramNativeMediaDecision {
+        match self {
+            Self::Native => TelegramNativeMediaDecision::Native,
+            Self::File => TelegramNativeMediaDecision::File,
+            Self::Unsupported => TelegramNativeMediaDecision::Unsupported,
+            Self::NativeForMimeTypes { mime_types } => {
+                if mime_type_matches(mime_types, mime_type) {
+                    TelegramNativeMediaDecision::Native
+                } else {
+                    TelegramNativeMediaDecision::Unsupported
+                }
+            }
+            Self::FileForMimeTypes { mime_types } => {
+                if mime_type_matches(mime_types, mime_type) {
+                    TelegramNativeMediaDecision::File
+                } else {
+                    TelegramNativeMediaDecision::Unsupported
+                }
+            }
+        }
+    }
+
+    pub fn should_fallback_to_file(&self, mime_type: &str) -> bool {
+        self.decision_for_mime_type(mime_type) == TelegramNativeMediaDecision::File
+    }
+
+    fn validate(&self, field: &str) -> Result<(), TelegramConfigError> {
+        let mime_types = match self {
+            Self::Native | Self::File | Self::Unsupported => return Ok(()),
+            Self::NativeForMimeTypes { mime_types } | Self::FileForMimeTypes { mime_types } => {
+                mime_types
+            }
+        };
+        if mime_types.is_empty()
+            || mime_types
+                .iter()
+                .any(|mime_type| mime_type.trim().is_empty())
+        {
+            return Err(TelegramConfigError::InvalidFilePolicy(format!(
+                "unsupportedMediaFallback.{field}.mimeTypes must not be empty for MIME-filtered modes"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn mime_type_matches(mime_types: &[String], mime_type: &str) -> bool {
+    let mime_type = mime_type.trim();
+    mime_types
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(mime_type))
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,7 +324,10 @@ fn default_locale() -> Locale {
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramBridgeConfig, TelegramConfigError, TelegramStartupUpdatePolicy};
+    use super::{
+        TelegramBridgeConfig, TelegramConfigError, TelegramNativeMediaDecision,
+        TelegramNativeMediaHandling, TelegramStartupUpdatePolicy,
+    };
     use crate::access::TelegramAccessPolicy;
 
     #[test]
@@ -262,5 +401,36 @@ mod tests {
             TelegramStartupUpdatePolicy::SkipPendingWithoutCheckpoint
         );
         assert!("unknown".parse::<TelegramStartupUpdatePolicy>().is_err());
+    }
+
+    #[test]
+    fn native_media_handling_decides_by_mode_and_mime_type() {
+        assert_eq!(
+            TelegramNativeMediaHandling::Native.decision_for_mime_type("audio/ogg"),
+            TelegramNativeMediaDecision::Native
+        );
+        assert_eq!(
+            TelegramNativeMediaHandling::File.decision_for_mime_type("audio/ogg"),
+            TelegramNativeMediaDecision::File
+        );
+        assert_eq!(
+            TelegramNativeMediaHandling::Unsupported.decision_for_mime_type("audio/ogg"),
+            TelegramNativeMediaDecision::Unsupported
+        );
+        assert_eq!(
+            TelegramNativeMediaHandling::native_for_mime_types(["audio/mpeg"])
+                .decision_for_mime_type(" audio/MPEG "),
+            TelegramNativeMediaDecision::Native
+        );
+        assert_eq!(
+            TelegramNativeMediaHandling::native_for_mime_types(["audio/mpeg"])
+                .decision_for_mime_type("audio/ogg"),
+            TelegramNativeMediaDecision::Unsupported
+        );
+        assert_eq!(
+            TelegramNativeMediaHandling::file_for_mime_types(["application/pdf"])
+                .decision_for_mime_type("application/pdf"),
+            TelegramNativeMediaDecision::File
+        );
     }
 }

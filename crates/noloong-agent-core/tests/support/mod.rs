@@ -11,6 +11,7 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -46,6 +47,17 @@ pub fn workspace_root() -> PathBuf {
         .nth(2)
         .expect("crate is inside crates/noloong-agent-core")
         .to_path_buf()
+}
+
+pub fn unique_temp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "noloong-agent-core-{name}-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
 pub fn fast_one_retry_reconnect() -> SseReconnectConfig {

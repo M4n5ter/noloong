@@ -100,6 +100,11 @@ pub enum TelegramBridgeError {
     Config(#[from] TelegramConfigError),
     #[error("interaction request failed: {0}")]
     Interaction(#[from] InteractionClientError),
+    #[error("agent run failure was rendered through display events: {source}")]
+    RunFailureDisplayed {
+        #[source]
+        source: InteractionClientError,
+    },
     #[error("interaction response decode failed: {0}")]
     Decode(String),
     #[error("telegram message is not allowed")]
@@ -112,6 +117,15 @@ pub enum TelegramBridgeError {
     NoProfiles,
     #[error("session was not found after creation: {0}")]
     MissingSession(String),
+}
+
+fn mark_displayed_run_failure(error: TelegramBridgeError) -> TelegramBridgeError {
+    match error {
+        TelegramBridgeError::Interaction(source @ InteractionClientError::JsonRpc { .. }) => {
+            TelegramBridgeError::RunFailureDisplayed { source }
+        }
+        error => error,
+    }
 }
 
 pub struct TelegramBridge {
@@ -290,22 +304,37 @@ impl TelegramBridge {
             | InteractionSessionStatus::Aborted
             | InteractionSessionStatus::Failed => METHOD_AGENT_PROMPT,
         };
-        let params = if method == METHOD_AGENT_PROMPT {
-            json!({
-                "sessionId": session.session_id,
-                "input": {"type": "message", "message": message},
-            })
+        let descriptor = if method == METHOD_AGENT_PROMPT {
+            self.request_agent_prompt(&session.session_id, message)
+                .await?
         } else {
-            json!({
-                "sessionId": session.session_id,
-                "message": message,
-            })
+            self.request_as::<InteractionSessionDescriptor>(
+                method,
+                json!({
+                    "sessionId": session.session_id,
+                    "message": message,
+                }),
+            )
+            .await?
         };
-        let descriptor = self
-            .request_as::<InteractionSessionDescriptor>(method, params)
-            .await?;
         self.record_session_status(key, descriptor.status.clone());
         Ok(descriptor)
+    }
+
+    async fn request_agent_prompt(
+        &self,
+        session_id: &str,
+        message: AgentMessage,
+    ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
+        self.request_as::<InteractionSessionDescriptor>(
+            METHOD_AGENT_PROMPT,
+            json!({
+                "sessionId": session_id,
+                "input": {"type": "message", "message": message},
+            }),
+        )
+        .await
+        .map_err(mark_displayed_run_failure)
     }
 
     pub async fn resolve_approval(
@@ -568,13 +597,7 @@ impl TelegramBridge {
             }],
         );
         let descriptor = self
-            .request_as::<InteractionSessionDescriptor>(
-                METHOD_AGENT_PROMPT,
-                json!({
-                    "sessionId": subagent_session_id.as_str(),
-                    "input": {"type": "message", "message": message},
-                }),
-            )
+            .request_agent_prompt(&subagent_session_id, message)
             .await?;
         if descriptor.session_id != subagent_session_id {
             self.record_display_route(key, descriptor.session_id.clone());

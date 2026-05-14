@@ -1,6 +1,7 @@
 use crate::provider_utils::{
-    ReplayScopeMatch, emit_model_stream_event, headers_from_map, refresh_auth_provider,
-    replay_scope_match, resolve_auth_headers,
+    LocalFileUriMediaMaterialization, ReplayScopeMatch, emit_model_stream_event, headers_from_map,
+    materialize_local_file_uri_media_in_request, refresh_auth_provider, replay_scope_match,
+    resolve_auth_headers,
 };
 use crate::sse::{SseFrameResult, SseReconnectConfig, SseStreamOptions, run_sse_model_stream};
 use crate::tool_arguments::parse_tool_arguments;
@@ -539,6 +540,22 @@ impl ModelProvider for ResponsesApiProvider {
     ) -> crate::providers::BoxFuture<'a, Vec<ModelStreamEvent>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
+            let allow_file_data_url_input = self.config.allow_file_data_url_input;
+            let request = materialize_local_file_uri_media_in_request(request, move |media| {
+                match &media.kind {
+                    MediaKind::Image => LocalFileUriMediaMaterialization::Inline,
+                    MediaKind::File if allow_file_data_url_input => {
+                        LocalFileUriMediaMaterialization::Inline
+                    }
+                    MediaKind::File => LocalFileUriMediaMaterialization::Reject(
+                        "local file media requires allow_file_data_url_input(true) for responses api",
+                    ),
+                    MediaKind::Audio | MediaKind::Video | MediaKind::Custom(_) => {
+                        LocalFileUriMediaMaterialization::Leave
+                    }
+                }
+            })
+            .await?;
             let render_config = ResponsesApiRequestRenderConfig::from(&self.config);
             let tool_names = ProviderToolNameCodec::new(&request.tools);
             let payload = render_responses_api_request_with_tool_names(
@@ -1160,15 +1177,15 @@ fn file_to_responses_part(
                 "file_data".into(),
                 Value::String(data_url(media, data, "file")?),
             );
+            if let Some(name) = &media.name {
+                part.insert("filename".into(), Value::String(name.clone()));
+            }
         }
         MediaSource::Inline { .. } => {
             return Err(AgentCoreError::Provider(
                 "inline file media must use base64 encoding".into(),
             ));
         }
-    }
-    if let Some(name) = &media.name {
-        part.insert("filename".into(), Value::String(name.clone()));
     }
     Ok(Value::Object(part))
 }

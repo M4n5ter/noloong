@@ -1,5 +1,5 @@
 use crate::{
-    config::TelegramFilePolicy,
+    config::{TelegramFilePolicy, TelegramNativeMediaDecision, TelegramNativeMediaHandling},
     input::{TelegramAttachment, TelegramAttachmentKind},
     telegram_api::{TelegramApi, TelegramApiError, TelegramFile},
 };
@@ -30,6 +30,36 @@ pub struct TelegramAttachmentResolver {
     policy: TelegramFilePolicy,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TelegramResolvedMedia {
+    pub media: Vec<MediaBlock>,
+    pub notices: Vec<TelegramMediaFallbackNotice>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramMediaFallbackNotice {
+    pub original_kind: TelegramMediaFallbackKind,
+    pub file_name: String,
+    pub mime_type: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TelegramMediaFallbackKind {
+    Audio,
+    Voice,
+    Video,
+}
+
+impl TelegramMediaFallbackKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Voice => "voice",
+            Self::Video => "video",
+        }
+    }
+}
+
 impl TelegramAttachmentResolver {
     pub fn new(api: Arc<dyn TelegramApi>, policy: TelegramFilePolicy) -> Self {
         Self { api, policy }
@@ -39,17 +69,39 @@ impl TelegramAttachmentResolver {
         &self,
         attachments: &[TelegramAttachment],
     ) -> Result<Vec<MediaBlock>, TelegramMediaResolutionError> {
+        Ok(self.resolve_all_with_notices(attachments).await?.media)
+    }
+
+    pub async fn resolve_all_with_notices(
+        &self,
+        attachments: &[TelegramAttachment],
+    ) -> Result<TelegramResolvedMedia, TelegramMediaResolutionError> {
         let mut blocks = Vec::with_capacity(attachments.len());
+        let mut notices = Vec::new();
         for attachment in attachments {
-            blocks.push(self.resolve_one(attachment).await?);
+            let resolved = self.resolve_one_with_notice(attachment).await?;
+            if let Some(notice) = resolved.notice {
+                notices.push(notice);
+            }
+            blocks.push(resolved.media);
         }
-        Ok(blocks)
+        Ok(TelegramResolvedMedia {
+            media: blocks,
+            notices,
+        })
     }
 
     pub async fn resolve_one(
         &self,
         attachment: &TelegramAttachment,
     ) -> Result<MediaBlock, TelegramMediaResolutionError> {
+        Ok(self.resolve_one_with_notice(attachment).await?.media)
+    }
+
+    async fn resolve_one_with_notice(
+        &self,
+        attachment: &TelegramAttachment,
+    ) -> Result<ResolvedTelegramAttachment, TelegramMediaResolutionError> {
         let telegram_file =
             self.api
                 .get_file(&attachment.file.file_id)
@@ -69,9 +121,18 @@ impl TelegramAttachmentResolver {
                 file_id: attachment.file.file_id.clone(),
             }
         })?;
-        let media_kind = media_kind(attachment.kind);
-        let mut block = if should_inline(known_file_size(attachment, &telegram_file), &self.policy)
-        {
+        let file_name = display_name(attachment, file_path);
+        let fallback_kind = fallback_kind(attachment.kind, &mime_type);
+        let notice = fallback_notice(fallback_kind, &file_name, &mime_type, &self.policy)?;
+        let media_kind = notice.as_ref().map_or_else(
+            || media_kind(attachment.kind, fallback_kind),
+            |_| MediaKind::File,
+        );
+        let mut block = if should_inline(
+            attachment,
+            known_file_size(attachment, &telegram_file),
+            &self.policy,
+        ) {
             let bytes = self
                 .api
                 .download_file(file_path)
@@ -102,13 +163,26 @@ impl TelegramAttachmentResolver {
             MediaBlock::uri(media_kind, file_uri(&path)?)
         };
         block.mime_type = Some(mime_type);
-        block.name = Some(display_name(attachment, file_path));
+        block.name = Some(file_name);
         block.replay_descriptor = Some(telegram_replay_descriptor(attachment));
         block.metadata.insert(
             "telegram".into(),
             telegram_metadata(attachment, &telegram_file),
         );
-        Ok(block)
+        if let Some(notice) = &notice {
+            block.metadata.insert(
+                "telegramMediaFallback".into(),
+                json!({
+                    "reason": "unsupported_native_media",
+                    "originalKind": notice.original_kind.as_str(),
+                    "mimeType": notice.mime_type,
+                }),
+            );
+        }
+        Ok(ResolvedTelegramAttachment {
+            media: block,
+            notice,
+        })
     }
 
     async fn large_file_path(
@@ -134,6 +208,11 @@ impl TelegramAttachmentResolver {
     }
 }
 
+struct ResolvedTelegramAttachment {
+    media: MediaBlock,
+    notice: Option<TelegramMediaFallbackNotice>,
+}
+
 #[derive(Debug, Error)]
 pub enum TelegramMediaResolutionError {
     #[error("telegram file {file_id} is too large: limit {limit} bytes, actual {actual:?} bytes")]
@@ -146,6 +225,14 @@ pub enum TelegramMediaResolutionError {
     MissingMime { file_id: String, kind: &'static str },
     #[error("telegram file {file_id} did not include a file path")]
     MissingTelegramFilePath { file_id: String },
+    #[error(
+        "telegram {kind:?} media {file_name} with MIME type {mime_type} is unsupported by the active provider"
+    )]
+    UnsupportedNativeMedia {
+        kind: TelegramMediaFallbackKind,
+        file_name: String,
+        mime_type: String,
+    },
     #[error("telegram media API failed for {file_id}: {source}")]
     Api {
         file_id: String,
@@ -175,8 +262,13 @@ fn known_file_size(attachment: &TelegramAttachment, telegram_file: &TelegramFile
     attachment.file.file_size.or(telegram_file.file_size)
 }
 
-fn should_inline(file_size: Option<u64>, policy: &TelegramFilePolicy) -> bool {
-    file_size.is_none_or(|file_size| file_size <= policy.inline_max_bytes as u64)
+fn should_inline(
+    attachment: &TelegramAttachment,
+    file_size: Option<u64>,
+    policy: &TelegramFilePolicy,
+) -> bool {
+    matches!(attachment.kind, TelegramAttachmentKind::Photo { .. })
+        && file_size.is_none_or(|file_size| file_size <= policy.inline_max_bytes as u64)
 }
 
 fn reject_oversized(
@@ -237,7 +329,19 @@ fn attachment_mime_type(
     }
 }
 
-fn media_kind(kind: TelegramAttachmentKind) -> MediaKind {
+fn media_kind(
+    kind: TelegramAttachmentKind,
+    fallback_kind: Option<TelegramMediaFallbackKind>,
+) -> MediaKind {
+    if matches!(kind, TelegramAttachmentKind::Document) {
+        match fallback_kind {
+            Some(TelegramMediaFallbackKind::Audio | TelegramMediaFallbackKind::Voice) => {
+                return MediaKind::Audio;
+            }
+            Some(TelegramMediaFallbackKind::Video) => return MediaKind::Video,
+            None => {}
+        }
+    }
     match kind {
         TelegramAttachmentKind::Photo { .. } => MediaKind::Image,
         TelegramAttachmentKind::Document => MediaKind::File,
@@ -245,6 +349,74 @@ fn media_kind(kind: TelegramAttachmentKind) -> MediaKind {
             MediaKind::Audio
         }
         TelegramAttachmentKind::Video { .. } => MediaKind::Video,
+    }
+}
+
+fn fallback_notice(
+    fallback_kind: Option<TelegramMediaFallbackKind>,
+    file_name: &str,
+    mime_type: &str,
+    policy: &TelegramFilePolicy,
+) -> Result<Option<TelegramMediaFallbackNotice>, TelegramMediaResolutionError> {
+    let Some(original_kind) = fallback_kind else {
+        return Ok(None);
+    };
+    let handling = fallback_handling(original_kind, policy);
+    match handling.decision_for_mime_type(mime_type) {
+        TelegramNativeMediaDecision::Native => Ok(None),
+        TelegramNativeMediaDecision::File => Ok(Some(TelegramMediaFallbackNotice {
+            original_kind,
+            file_name: file_name.to_owned(),
+            mime_type: mime_type.to_owned(),
+        })),
+        TelegramNativeMediaDecision::Unsupported => {
+            Err(TelegramMediaResolutionError::UnsupportedNativeMedia {
+                kind: original_kind,
+                file_name: file_name.to_owned(),
+                mime_type: mime_type.to_owned(),
+            })
+        }
+    }
+}
+
+fn fallback_kind(
+    kind: TelegramAttachmentKind,
+    mime_type: &str,
+) -> Option<TelegramMediaFallbackKind> {
+    match kind {
+        TelegramAttachmentKind::Audio { .. } => Some(TelegramMediaFallbackKind::Audio),
+        TelegramAttachmentKind::Voice { .. } => Some(TelegramMediaFallbackKind::Voice),
+        TelegramAttachmentKind::Video { .. } => Some(TelegramMediaFallbackKind::Video),
+        TelegramAttachmentKind::Document => fallback_kind_from_mime_type(mime_type),
+        TelegramAttachmentKind::Photo { .. } => None,
+    }
+}
+
+fn fallback_kind_from_mime_type(mime_type: &str) -> Option<TelegramMediaFallbackKind> {
+    let mime_type = mime_type.trim();
+    if mime_type
+        .get(.."audio/".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("audio/"))
+    {
+        return Some(TelegramMediaFallbackKind::Audio);
+    }
+    if mime_type
+        .get(.."video/".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("video/"))
+    {
+        return Some(TelegramMediaFallbackKind::Video);
+    }
+    None
+}
+
+fn fallback_handling(
+    kind: TelegramMediaFallbackKind,
+    policy: &TelegramFilePolicy,
+) -> &TelegramNativeMediaHandling {
+    match kind {
+        TelegramMediaFallbackKind::Audio => &policy.unsupported_media_fallback.audio,
+        TelegramMediaFallbackKind::Voice => &policy.unsupported_media_fallback.voice,
+        TelegramMediaFallbackKind::Video => &policy.unsupported_media_fallback.video,
     }
 }
 
@@ -362,9 +534,13 @@ fn telegram_identity(attachment: &TelegramAttachment) -> Map<String, Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramAttachmentResolver, TelegramMediaResolutionError};
+    use super::{
+        TelegramAttachmentResolver, TelegramMediaFallbackKind, TelegramMediaResolutionError,
+    };
     use crate::{
-        config::TelegramFilePolicy,
+        config::{
+            TelegramFilePolicy, TelegramNativeMediaHandling, TelegramUnsupportedMediaFallbackPolicy,
+        },
         input::{TelegramAttachment, TelegramAttachmentFile, TelegramAttachmentKind},
         polling::TelegramUpdate,
         telegram_api::{
@@ -449,6 +625,243 @@ mod tests {
             b"abcdef"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn resolver_keeps_small_document_as_file_uri() {
+        let dir = unique_test_dir("small-document");
+        let _ = std::fs::remove_dir_all(&dir);
+        let api = Arc::new(FakeApi::default());
+        api.add_file(
+            "doc-id",
+            TelegramFile {
+                file_id: "doc-id".into(),
+                file_unique_id: Some("doc-unique".into()),
+                file_size: Some(3),
+                file_path: Some("documents/smoke.txt".into()),
+            },
+        );
+        api.add_download("documents/smoke.txt", b"abc".to_vec());
+        let resolver = resolver(api, 16, 1024, Some(dir.clone()));
+
+        let block = resolver
+            .resolve_one(&document_attachment(
+                "doc-id",
+                "doc-unique",
+                Some("smoke.txt"),
+                Some("text/plain"),
+                Some(3),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(block.kind, MediaKind::File);
+        assert!(matches!(block.source, MediaSource::Uri { ref uri } if uri.starts_with("file://")));
+        assert_eq!(
+            std::fs::read(dir.join("doc-unique").join("smoke.txt")).unwrap(),
+            b"abc"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn resolver_infers_document_video_mime_for_native_media_gate() {
+        let dir = unique_test_dir("document-video-native");
+        let _ = std::fs::remove_dir_all(&dir);
+        let api = Arc::new(FakeApi::default());
+        api.add_file(
+            "video-doc-id",
+            TelegramFile {
+                file_id: "video-doc-id".into(),
+                file_unique_id: Some("video-doc-unique".into()),
+                file_size: Some(6),
+                file_path: Some("documents/smoke-video.mp4".into()),
+            },
+        );
+        api.add_download("documents/smoke-video.mp4", b"abcdef".to_vec());
+        let resolver = resolver(api, 16, 1024, Some(dir.clone()));
+
+        let block = resolver
+            .resolve_one(&document_attachment(
+                "video-doc-id",
+                "video-doc-unique",
+                Some("smoke-video.mp4"),
+                Some("video/mp4"),
+                Some(6),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(block.kind, MediaKind::Video);
+        assert_eq!(block.mime_type.as_deref(), Some("video/mp4"));
+        assert!(matches!(block.source, MediaSource::Uri { ref uri } if uri.starts_with("file://")));
+        assert_eq!(
+            std::fs::read(dir.join("video-doc-unique").join("smoke-video.mp4")).unwrap(),
+            b"abcdef"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_document_video_mime_when_video_policy_rejects() {
+        let api = Arc::new(FakeApi::default());
+        api.add_file(
+            "video-doc-id",
+            TelegramFile {
+                file_id: "video-doc-id".into(),
+                file_unique_id: Some("video-doc-unique".into()),
+                file_size: Some(6),
+                file_path: Some("documents/smoke-video.mp4".into()),
+            },
+        );
+        let resolver = TelegramAttachmentResolver::new(
+            api.clone(),
+            TelegramFilePolicy {
+                inline_max_bytes: 16,
+                max_download_bytes: 1024,
+                download_dir: None,
+                retention_seconds: None,
+                unsupported_media_fallback: TelegramUnsupportedMediaFallbackPolicy {
+                    audio: TelegramNativeMediaHandling::Native,
+                    voice: TelegramNativeMediaHandling::Native,
+                    video: TelegramNativeMediaHandling::file_for_mime_types(["application/pdf"]),
+                },
+            },
+        );
+
+        let error = resolver
+            .resolve_one(&document_attachment(
+                "video-doc-id",
+                "video-doc-unique",
+                Some("smoke-video.mp4"),
+                Some("video/mp4"),
+                Some(6),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TelegramMediaResolutionError::UnsupportedNativeMedia {
+                kind: TelegramMediaFallbackKind::Video,
+                ref file_name,
+                ref mime_type,
+            } if file_name == "smoke-video.mp4" && mime_type == "video/mp4"
+        ));
+        assert!(api.requested_downloads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolver_falls_back_configured_audio_to_file_with_notice() {
+        let dir = unique_test_dir("fallback-audio");
+        let _ = std::fs::remove_dir_all(&dir);
+        let api = Arc::new(FakeApi::default());
+        api.add_file(
+            "audio-id",
+            TelegramFile {
+                file_id: "audio-id".into(),
+                file_unique_id: Some("audio-unique".into()),
+                file_size: Some(6),
+                file_path: Some("voice/smoke.ogg".into()),
+            },
+        );
+        api.add_download("voice/smoke.ogg", b"abcdef".to_vec());
+        let resolver = TelegramAttachmentResolver::new(
+            api,
+            TelegramFilePolicy {
+                inline_max_bytes: 16,
+                max_download_bytes: 1024,
+                download_dir: Some(dir.clone()),
+                retention_seconds: None,
+                unsupported_media_fallback: TelegramUnsupportedMediaFallbackPolicy {
+                    audio: TelegramNativeMediaHandling::File,
+                    voice: TelegramNativeMediaHandling::File,
+                    video: TelegramNativeMediaHandling::Native,
+                },
+            },
+        );
+
+        let resolved = resolver
+            .resolve_all_with_notices(&[audio_attachment(
+                "audio-id",
+                "audio-unique",
+                Some("smoke.ogg"),
+                Some("audio/ogg"),
+                Some(6),
+            )])
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.media.len(), 1);
+        assert_eq!(resolved.notices.len(), 1);
+        assert_eq!(
+            resolved.notices[0].original_kind,
+            TelegramMediaFallbackKind::Audio
+        );
+        assert_eq!(resolved.notices[0].file_name, "smoke.ogg");
+        assert_eq!(resolved.media[0].kind, MediaKind::File);
+        assert_eq!(
+            resolved.media[0].metadata["telegramMediaFallback"]["reason"],
+            "unsupported_native_media"
+        );
+        assert!(matches!(
+            resolved.media[0].source,
+            MediaSource::Uri { ref uri } if uri.starts_with("file://")
+        ));
+        assert_eq!(
+            std::fs::read(dir.join("audio-unique").join("smoke.ogg")).unwrap(),
+            b"abcdef"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_configured_unsupported_media_without_download() {
+        let api = Arc::new(FakeApi::default());
+        api.add_file(
+            "audio-id",
+            TelegramFile {
+                file_id: "audio-id".into(),
+                file_unique_id: Some("audio-unique".into()),
+                file_size: Some(6),
+                file_path: Some("voice/smoke.ogg".into()),
+            },
+        );
+        let resolver = TelegramAttachmentResolver::new(
+            api.clone(),
+            TelegramFilePolicy {
+                inline_max_bytes: 16,
+                max_download_bytes: 1024,
+                download_dir: None,
+                retention_seconds: None,
+                unsupported_media_fallback: TelegramUnsupportedMediaFallbackPolicy {
+                    audio: TelegramNativeMediaHandling::file_for_mime_types(["application/pdf"]),
+                    voice: TelegramNativeMediaHandling::Native,
+                    video: TelegramNativeMediaHandling::Native,
+                },
+            },
+        );
+
+        let error = resolver
+            .resolve_one(&audio_attachment(
+                "audio-id",
+                "audio-unique",
+                Some("smoke.ogg"),
+                Some("audio/ogg"),
+                Some(6),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TelegramMediaResolutionError::UnsupportedNativeMedia {
+                kind: TelegramMediaFallbackKind::Audio,
+                ref file_name,
+                ref mime_type,
+            } if file_name == "smoke.ogg" && mime_type == "audio/ogg"
+        ));
+        assert!(api.requested_downloads().is_empty());
     }
 
     #[tokio::test]
@@ -567,6 +980,7 @@ mod tests {
                 max_download_bytes,
                 download_dir,
                 retention_seconds: None,
+                unsupported_media_fallback: TelegramUnsupportedMediaFallbackPolicy::default(),
             },
         )
     }
@@ -601,6 +1015,25 @@ mod tests {
                 file_size,
             ),
             kind: TelegramAttachmentKind::Document,
+        }
+    }
+
+    fn audio_attachment(
+        file_id: &str,
+        file_unique_id: &str,
+        file_name: Option<&str>,
+        mime_type: Option<&str>,
+        file_size: Option<u64>,
+    ) -> TelegramAttachment {
+        TelegramAttachment {
+            file: TelegramAttachmentFile::new(
+                file_id,
+                file_unique_id,
+                file_name,
+                mime_type,
+                file_size,
+            ),
+            kind: TelegramAttachmentKind::Audio { duration: 1 },
         }
     }
 
