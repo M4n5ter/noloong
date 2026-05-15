@@ -152,9 +152,13 @@ pub(super) fn classify_built_in_tool(
     match tool_name {
         BuiltInToolName::HostExecRead
         | BuiltInToolName::HostExecWait
-        | BuiltInToolName::HostExecList => ApprovalClassification::allow(
+        | BuiltInToolName::HostExecList
+        | BuiltInToolName::SubagentSpawn
+        | BuiltInToolName::SubagentWait
+        | BuiltInToolName::SubagentResult
+        | BuiltInToolName::SubagentList => ApprovalClassification::allow(
             "built_in_tool",
-            "read-only host command lifecycle operation",
+            "allowed built-in host lifecycle operation",
             cache_key,
         ),
         BuiltInToolName::HostExecWrite | BuiltInToolName::HostExecTerminate => {

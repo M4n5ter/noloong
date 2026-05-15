@@ -12,7 +12,8 @@ use crate::{
     tools::{
         APPLY_PATCH_TOOL_NAME, HostExecListTool, HostExecReadTool, HostExecStartTool,
         HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
-        WRITE_FILE_TOOL_NAME,
+        SubagentController, SubagentListTool, SubagentResultTool, SubagentSpawnTool,
+        SubagentWaitTool, WRITE_FILE_TOOL_NAME,
     },
 };
 use noloong_agent_core::{
@@ -43,19 +44,40 @@ struct AgentSessionInner {
     process_manager: HostProcessManager,
     file_edit_manager: FileEditManager,
     proposal_store: ManifestProposalStore,
+    subagent_controller: Option<Arc<dyn SubagentController>>,
+    subagent_depth: usize,
+    max_subagent_depth: usize,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
     system_prompt_model_context: Mutex<Option<SystemPromptModelContext>>,
 }
 
-#[derive(Default)]
 pub struct AgentSessionBuilder {
     manifest: AgentManifest,
     environment: Option<HostEnvironment>,
     process_manager: Option<HostProcessManager>,
     proposal_store: ManifestProposalStore,
+    subagent_controller: Option<Arc<dyn SubagentController>>,
+    subagent_depth: usize,
+    max_subagent_depth: usize,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
+}
+
+impl Default for AgentSessionBuilder {
+    fn default() -> Self {
+        Self {
+            manifest: AgentManifest::default(),
+            environment: None,
+            process_manager: None,
+            proposal_store: ManifestProposalStore::default(),
+            subagent_controller: None,
+            subagent_depth: 0,
+            max_subagent_depth: 1,
+            tool_output_overflow_config: ToolOutputOverflowConfig::default(),
+            approval_cache: ApprovalCache::default(),
+        }
+    }
 }
 
 pub struct AgentSessionRuntimeBuilder {
@@ -206,41 +228,67 @@ impl AgentSession {
         manifest
             .enabled_tools
             .iter()
-            .map(|name| self.tool_for_name(*name, catalog))
+            .filter_map(|name| self.tool_for_name(*name, catalog))
             .collect()
     }
 
-    fn tool_for_name(&self, name: BuiltInToolName, catalog: &Catalog) -> Arc<dyn ToolProvider> {
+    fn tool_for_name(
+        &self,
+        name: BuiltInToolName,
+        catalog: &Catalog,
+    ) -> Option<Arc<dyn ToolProvider>> {
         match name {
-            BuiltInToolName::HostExecStart => Arc::new(HostExecStartTool::new(
+            BuiltInToolName::HostExecStart => Some(Arc::new(HostExecStartTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
-            )),
-            BuiltInToolName::HostExecRead => Arc::new(HostExecReadTool::new(
+            ))),
+            BuiltInToolName::HostExecRead => Some(Arc::new(HostExecReadTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
-            )),
-            BuiltInToolName::HostExecWait => Arc::new(HostExecWaitTool::new(
+            ))),
+            BuiltInToolName::HostExecWait => Some(Arc::new(HostExecWaitTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
-            )),
-            BuiltInToolName::HostExecWrite => Arc::new(HostExecWriteTool::new(
+            ))),
+            BuiltInToolName::HostExecWrite => Some(Arc::new(HostExecWriteTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
-            )),
-            BuiltInToolName::HostExecTerminate => Arc::new(HostExecTerminateTool::new(
+            ))),
+            BuiltInToolName::HostExecTerminate => Some(Arc::new(HostExecTerminateTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
-            )),
-            BuiltInToolName::HostExecList => Arc::new(HostExecListTool::new(
+            ))),
+            BuiltInToolName::HostExecList => Some(Arc::new(HostExecListTool::new(
                 self.inner.process_manager.clone(),
                 catalog.clone(),
-            )),
-            BuiltInToolName::ManifestProposePatch => Arc::new(ManifestPatchProposalTool::new(
-                self.inner.proposal_store.clone(),
-                catalog.clone(),
+            ))),
+            BuiltInToolName::SubagentSpawn => self.subagent_controller().map(|controller| {
+                Arc::new(SubagentSpawnTool::new(controller, catalog.clone()))
+                    as Arc<dyn ToolProvider>
+            }),
+            BuiltInToolName::SubagentWait => self.subagent_controller().map(|controller| {
+                Arc::new(SubagentWaitTool::new(controller, catalog.clone()))
+                    as Arc<dyn ToolProvider>
+            }),
+            BuiltInToolName::SubagentResult => self.subagent_controller().map(|controller| {
+                Arc::new(SubagentResultTool::new(controller, catalog.clone()))
+                    as Arc<dyn ToolProvider>
+            }),
+            BuiltInToolName::SubagentList => self.subagent_controller().map(|controller| {
+                Arc::new(SubagentListTool::new(controller, catalog.clone()))
+                    as Arc<dyn ToolProvider>
+            }),
+            BuiltInToolName::ManifestProposePatch => Some(Arc::new(
+                ManifestPatchProposalTool::new(self.inner.proposal_store.clone(), catalog.clone()),
             )),
         }
+    }
+
+    fn subagent_controller(&self) -> Option<Arc<dyn SubagentController>> {
+        if self.inner.subagent_depth >= self.inner.max_subagent_depth {
+            return None;
+        }
+        self.inner.subagent_controller.clone()
     }
 }
 
@@ -390,6 +438,21 @@ impl AgentSessionBuilder {
         self
     }
 
+    pub fn with_subagent_controller(mut self, controller: Arc<dyn SubagentController>) -> Self {
+        self.subagent_controller = Some(controller);
+        self
+    }
+
+    pub fn with_subagent_depth(mut self, depth: usize) -> Self {
+        self.subagent_depth = depth;
+        self
+    }
+
+    pub fn with_max_subagent_depth(mut self, max_depth: usize) -> Self {
+        self.max_subagent_depth = max_depth;
+        self
+    }
+
     pub fn with_tool_output_overflow_config(mut self, config: ToolOutputOverflowConfig) -> Self {
         self.tool_output_overflow_config = config;
         self
@@ -417,6 +480,9 @@ impl AgentSessionBuilder {
                 process_manager: self.process_manager.unwrap_or_default(),
                 file_edit_manager,
                 proposal_store: self.proposal_store,
+                subagent_controller: self.subagent_controller,
+                subagent_depth: self.subagent_depth,
+                max_subagent_depth: self.max_subagent_depth,
                 tool_output_overflow_config: self.tool_output_overflow_config,
                 approval_cache: self.approval_cache,
                 system_prompt_model_context: Mutex::new(None),

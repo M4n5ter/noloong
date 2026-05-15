@@ -7,9 +7,14 @@ use super::{
         current_unix_ms, duplicate_session_error, missing_session_error,
     },
 };
+use crate::tools::{
+    SubagentController, SubagentResult, SubagentSpawnRequest as ToolSubagentSpawnRequest,
+    SubagentSummary, SubagentWaitOutcome, final_assistant_output,
+};
 use crate::{AgentManifest, AgentSession, ManifestPatch};
 use noloong_agent_core::{
-    Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentMessage, AgentState, RunStatus,
+    Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentMessage, AgentState, BoxFuture,
+    CancellationToken, RunStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -21,6 +26,7 @@ use std::{
     },
 };
 use tokio::sync::{Notify, RwLock};
+use tokio::time::{Duration, Instant, sleep};
 
 const INTERRUPTED_RUNNING_SESSION_ERROR: &str =
     "agent session was interrupted while running and cannot be resumed automatically";
@@ -435,6 +441,11 @@ impl AgentSessionRegistry {
             })?;
         let session = AgentSession::builder()
             .with_manifest(record.manifest.clone())
+            .with_subagent_depth(subagent_depth_for_record(&record))
+            .with_subagent_controller(Arc::new(RegistrySubagentController {
+                registry: Arc::downgrade(&self.inner),
+                parent_session_id: record.session_id.clone(),
+            }))
             .build();
         let runtime = profile.build_runtime(&session, &record.manifest).await?;
         let agent = Agent::builder()
@@ -493,6 +504,191 @@ impl AgentSessionRegistry {
             session_id: session_id.to_owned(),
         })
     }
+}
+
+#[derive(Clone)]
+struct RegistrySubagentController {
+    registry: Weak<AgentSessionRegistryInner>,
+    parent_session_id: String,
+}
+
+impl SubagentController for RegistrySubagentController {
+    fn spawn_subagent<'a>(
+        &'a self,
+        request: ToolSubagentSpawnRequest,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, SubagentSummary> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let registry = self.registry()?;
+            let parent = registry
+                .get_descriptor(&self.parent_session_id)
+                .await
+                .map_err(to_core_error)?
+                .ok_or_else(|| {
+                    AgentCoreError::Provider(format!(
+                        "parent session not found: {}",
+                        self.parent_session_id
+                    ))
+                })?;
+            let prompt_id = format!("subagent-initial-{}", current_unix_ms());
+            let descriptor = registry
+                .spawn_subagent(SubagentSpawnRequest {
+                    parent_session_id: self.parent_session_id.clone(),
+                    profile_id: Some(parent.profile_id),
+                    manifest: Some(parent.manifest),
+                    manifest_patches: Vec::new(),
+                    role: request.role,
+                    metadata: request.metadata,
+                    initial_prompt: Some(AgentMessage::user(prompt_id, request.prompt)),
+                })
+                .await
+                .map_err(to_core_error)?;
+            Ok(summary_from_descriptor(&descriptor))
+        })
+    }
+
+    fn wait_subagents<'a>(
+        &'a self,
+        session_ids: Vec<String>,
+        timeout_ms: u64,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, SubagentWaitOutcome> {
+        Box::pin(async move {
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            loop {
+                cancellation.throw_if_cancelled()?;
+                let results = self.subagent_results(session_ids.iter()).await?;
+                if results.iter().all(|result| result.settled) {
+                    return Ok(SubagentWaitOutcome {
+                        timed_out: false,
+                        results,
+                    });
+                }
+                if Instant::now() >= deadline {
+                    return Ok(SubagentWaitOutcome {
+                        timed_out: true,
+                        results,
+                    });
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let delay = remaining.min(Duration::from_millis(50));
+                tokio::select! {
+                    _ = sleep(delay) => {}
+                    _ = cancellation.cancelled() => return Err(AgentCoreError::Aborted),
+                }
+            }
+        })
+    }
+
+    fn subagent_result<'a>(
+        &'a self,
+        session_id: String,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, SubagentResult> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            self.subagent_result_for(&session_id).await
+        })
+    }
+
+    fn list_subagents<'a>(
+        &'a self,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<SubagentSummary>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let registry = self.registry()?;
+            let descriptors = registry
+                .list(AgentSessionListFilter {
+                    parent_session_id: Some(self.parent_session_id.clone()),
+                    ..AgentSessionListFilter::default()
+                })
+                .await
+                .map_err(to_core_error)?;
+            Ok(descriptors
+                .iter()
+                .map(summary_from_descriptor)
+                .collect::<Vec<_>>())
+        })
+    }
+}
+
+impl RegistrySubagentController {
+    fn registry(&self) -> Result<AgentSessionRegistry, AgentCoreError> {
+        let inner = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| AgentCoreError::Provider("subagent registry is unavailable".into()))?;
+        Ok(AgentSessionRegistry { inner })
+    }
+
+    async fn subagent_results<'a>(
+        &self,
+        session_ids: impl IntoIterator<Item = &'a String>,
+    ) -> Result<Vec<SubagentResult>, AgentCoreError> {
+        let mut results = Vec::new();
+        for session_id in session_ids {
+            results.push(self.subagent_result_for(session_id).await?);
+        }
+        Ok(results)
+    }
+
+    async fn subagent_result_for(
+        &self,
+        session_id: &str,
+    ) -> Result<SubagentResult, AgentCoreError> {
+        let registry = self.registry()?;
+        let descriptor = registry
+            .get_descriptor(session_id)
+            .await
+            .map_err(to_core_error)?
+            .ok_or_else(|| subagent_access_error(session_id, &self.parent_session_id))?;
+        if descriptor.parent_session_id.as_deref() != Some(self.parent_session_id.as_str()) {
+            return Err(subagent_access_error(session_id, &self.parent_session_id));
+        }
+        let summary = summary_from_descriptor(&descriptor);
+        let settled = descriptor.status != InteractionSessionStatus::Running;
+        let final_output = final_assistant_output(&descriptor.state);
+        Ok(SubagentResult {
+            summary,
+            settled,
+            final_output,
+        })
+    }
+}
+
+fn summary_from_descriptor(descriptor: &InteractionSessionDescriptor) -> SubagentSummary {
+    SubagentSummary {
+        session_id: descriptor.session_id.clone(),
+        role: descriptor.role.clone(),
+        status: session_status_str(&descriptor.status).into(),
+    }
+}
+
+fn session_status_str(status: &InteractionSessionStatus) -> &'static str {
+    match status {
+        InteractionSessionStatus::Idle => "idle",
+        InteractionSessionStatus::Running => "running",
+        InteractionSessionStatus::Completed => "completed",
+        InteractionSessionStatus::Aborted => "aborted",
+        InteractionSessionStatus::Failed => "failed",
+        InteractionSessionStatus::Paused => "paused",
+    }
+}
+
+fn subagent_depth_for_record(record: &AgentSessionRecord) -> usize {
+    usize::from(record.parent_session_id.is_some())
+}
+
+fn subagent_access_error(session_id: &str, parent_session_id: &str) -> AgentCoreError {
+    AgentCoreError::Provider(format!(
+        "subagent `{session_id}` was not found as a direct child of `{parent_session_id}`"
+    ))
+}
+
+fn to_core_error(error: InteractionError) -> AgentCoreError {
+    AgentCoreError::Provider(error.to_string())
 }
 
 fn attach_snapshot_listener(registered: &Arc<RegisteredAgentSession>) {

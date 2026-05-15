@@ -115,6 +115,19 @@ Spawn a subagent session:
 {"jsonrpc":"2.0","id":7,"method":"subagent/spawn","params":{"parentSessionId":"root","role":"researcher","metadata":{"topic":"storage"},"initialPrompt":{"id":"subagent-task-1","role":"user","content":[{"type":"text","text":"Investigate the storage layer."}],"metadata":{}}}}
 ```
 
+Models can also create and coordinate subagents through built-in host tools when the active host injects a `SubagentController`. In the interaction registry implementation, root sessions receive `agent.subagent.spawn`, `agent.subagent.wait`, `agent.subagent.result`, and `agent.subagent.list`; direct child sessions do not receive them by default.
+
+Typical model-callable flow:
+
+```json
+{"tool":"agent.subagent.spawn","arguments":{"role":"reviewer","prompt":"Review the storage change."}}
+{"tool":"agent.subagent.spawn","arguments":{"role":"tester","prompt":"Exercise the CLI path."}}
+{"tool":"agent.subagent.wait","arguments":{"sessionIds":["session-1","session-2"],"timeoutMs":30000}}
+{"tool":"agent.subagent.result","arguments":{"sessionId":"session-1"}}
+```
+
+The final output returned by `wait` and `result` is the child session's last assistant message plus `finalText`, which concatenates text blocks while preserving the full message JSON. Access is limited to direct children of the current session.
+
 ## Agent Runs and Queues
 
 Prompt with text:

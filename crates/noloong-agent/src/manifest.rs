@@ -493,6 +493,10 @@ define_built_in_tool_names! {
     HostExecWrite => "host.exec.write",
     HostExecTerminate => "host.exec.terminate",
     HostExecList => "host.exec.list",
+    SubagentSpawn => "agent.subagent.spawn",
+    SubagentWait => "agent.subagent.wait",
+    SubagentResult => "agent.subagent.result",
+    SubagentList => "agent.subagent.list",
     ManifestProposePatch => "agent.manifest.propose_patch",
 }
 

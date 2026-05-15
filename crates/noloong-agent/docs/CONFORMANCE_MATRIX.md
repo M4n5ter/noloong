@@ -16,7 +16,7 @@ This matrix tracks the application-layer interaction control plane. The core ker
 | SQLite registry store | `registry-store-sqlite`, file/in-memory SQL snapshot backend | `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite` |
 | PostgreSQL registry store | `registry-store-postgres`, env-gated live SQL snapshot backend | `cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres` |
 | OpenDAL registry store | `registry-store-object`, single-writer object snapshot backend | `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object` |
-| Subagents | `subagent/spawn`, parent metadata, initial prompt, capability gate | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
+| Subagents | `subagent/spawn`, `agent.subagent.spawn/wait/result/list`, parent metadata, initial prompt, direct-child gate | `cargo test -p noloong-agent --test interaction_registry --test interaction_control --test subagent_tools` |
 | Agent run control | `agent/prompt`, `agent/continue`, `agent/abort`, `agent/wait_idle`, `agent/state` | `cargo test -p noloong-agent --test interaction_control` |
 | Queues | `agent/steer`, `agent/follow_up`, `queue/list`, `queue/edit`, `queue/clear`, `queue/set_mode` | `cargo test -p noloong-agent --test interaction_control` |
 | Raw events | `event/subscribe`, `event/unsubscribe`, `agent/event` notification | `cargo test -p noloong-agent --test interaction_control` |

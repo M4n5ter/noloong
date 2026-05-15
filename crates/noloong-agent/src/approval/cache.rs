@@ -78,7 +78,11 @@ pub(super) fn approval_cache_key_for_tool_call(tool_call: &ToolCall) -> Option<A
         BuiltInToolName::ManifestProposePatch => None,
         BuiltInToolName::HostExecRead
         | BuiltInToolName::HostExecWait
-        | BuiltInToolName::HostExecList => None,
+        | BuiltInToolName::HostExecList
+        | BuiltInToolName::SubagentSpawn
+        | BuiltInToolName::SubagentWait
+        | BuiltInToolName::SubagentResult
+        | BuiltInToolName::SubagentList => None,
     }
 }
 

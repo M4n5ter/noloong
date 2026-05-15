@@ -15,7 +15,7 @@ use noloong_agent_core::{
     AgentCoreError, AgentMessage, AgentRuntime, AgentState, BoxFuture, CancellationToken,
     EventStore, InMemoryEventStore, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
     QueueMode, RunStatus, StopReason, ToolApprovalRequest, ToolApprovalRequestSpec,
-    ToolApprovalResolution, ToolCall, ToolPermissionDecision, ToolPermissionOutcome,
+    ToolApprovalResolution, ToolCall, ToolPermissionDecision, ToolPermissionOutcome, ToolRequest,
 };
 use serde_json::Map;
 use serde_json::json;
@@ -835,6 +835,171 @@ async fn interaction_registry_filters_by_parent_profile_and_status() {
 }
 
 #[tokio::test]
+async fn interaction_registry_mounts_subagent_tools_for_root_only() {
+    let model = Arc::new(CapturingToolRequestModel::default());
+    let registry = AgentSessionRegistry::new(runtime_tool_profile("default", model.clone()))
+        .expect("registry should build");
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("parent".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+
+    registry
+        .get("parent")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .prompt("root")
+        .await
+        .unwrap();
+    registry
+        .spawn_subagent(SubagentSpawnRequest {
+            parent_session_id: "parent".into(),
+            initial_prompt: Some(AgentMessage::user("child-task", "child")),
+            ..SubagentSpawnRequest::default()
+        })
+        .await
+        .unwrap();
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert_tool_names_include(
+        &requests[0],
+        &[
+            BuiltInToolName::SubagentSpawn.as_str(),
+            BuiltInToolName::SubagentWait.as_str(),
+            BuiltInToolName::SubagentResult.as_str(),
+            BuiltInToolName::SubagentList.as_str(),
+        ],
+    );
+    assert_tool_names_exclude(
+        &requests[1],
+        &[
+            BuiltInToolName::SubagentSpawn.as_str(),
+            BuiltInToolName::SubagentWait.as_str(),
+            BuiltInToolName::SubagentResult.as_str(),
+            BuiltInToolName::SubagentList.as_str(),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn interaction_registry_subagent_tools_spawn_wait_and_read_final_output() {
+    let registry = AgentSessionRegistry::new(runtime_tool_profile(
+        "default",
+        Arc::new(SubagentWorkflowModel::default()),
+    ))
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("parent".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+
+    registry
+        .get("parent")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .prompt("delegate")
+        .await
+        .unwrap();
+
+    let child = registry
+        .get_descriptor("session-1")
+        .await
+        .unwrap()
+        .expect("child should exist");
+    assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
+    assert_eq!(child.role.as_deref(), Some("reviewer"));
+    assert_eq!(child.status, InteractionSessionStatus::Completed);
+    assert_eq!(
+        child.state.messages.last().unwrap().content[0],
+        noloong_agent_core::ContentBlock::Text {
+            text: "child final text".into()
+        }
+    );
+
+    let parent = registry
+        .get_descriptor("parent")
+        .await
+        .unwrap()
+        .expect("parent should exist");
+    assert_eq!(parent.status, InteractionSessionStatus::Completed);
+    assert_eq!(
+        parent.state.messages.last().unwrap().content[0],
+        noloong_agent_core::ContentBlock::Text {
+            text: "parent done".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn interaction_registry_subagent_result_rejects_non_child_sessions() {
+    let registry = AgentSessionRegistry::new(runtime_tool_profile("default", Arc::new(TextModel)))
+        .expect("registry should build");
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("parent-a".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("parent-b".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let child_b = registry
+        .spawn_subagent(SubagentSpawnRequest {
+            parent_session_id: "parent-b".into(),
+            ..SubagentSpawnRequest::default()
+        })
+        .await
+        .unwrap();
+    let parent_a = registry
+        .get("parent-a")
+        .await
+        .unwrap()
+        .expect("parent-a should exist");
+    let runtime = parent_a
+        .session()
+        .runtime_builder()
+        .with_model_provider(Arc::new(TextModel))
+        .build()
+        .unwrap();
+    let result_tool = runtime
+        .tool(BuiltInToolName::SubagentResult.as_str())
+        .expect("root session should mount subagent result tool");
+
+    let error = result_tool
+        .execute_tool(
+            ToolRequest {
+                run_id: "run-test".into(),
+                turn_id: 1,
+                tool_call_id: "tool-call-test".into(),
+                tool_name: BuiltInToolName::SubagentResult.as_str().into(),
+                arguments: json!({"sessionId": child_b.session_id}),
+                state: AgentState::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("cross-parent access should fail");
+
+    assert!(error.to_string().contains("direct child of `parent-a`"));
+}
+
+#[tokio::test]
 async fn interaction_registry_requires_force_to_delete_running_session() {
     let registry = AgentSessionRegistry::new(blocking_profile("blocking")).unwrap();
     registry
@@ -924,6 +1089,16 @@ fn blocking_profile(profile_id: &str) -> Arc<dyn AgentRuntimeProfile> {
     })
 }
 
+fn runtime_tool_profile(
+    profile_id: &str,
+    model: Arc<dyn ModelProvider>,
+) -> Arc<dyn AgentRuntimeProfile> {
+    Arc::new(RuntimeToolProfile {
+        descriptor: descriptor(profile_id),
+        model,
+    })
+}
+
 fn shared_event_store_profile(
     profile_id: &str,
     model: Arc<dyn ModelProvider>,
@@ -957,6 +1132,31 @@ struct SharedEventStoreProfile {
     descriptor: InteractionProfileDescriptor,
     model: Arc<dyn ModelProvider>,
     event_store: Arc<dyn EventStore>,
+}
+
+struct RuntimeToolProfile {
+    descriptor: InteractionProfileDescriptor,
+    model: Arc<dyn ModelProvider>,
+}
+
+impl AgentRuntimeProfile for RuntimeToolProfile {
+    fn descriptor(&self) -> InteractionProfileDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn build_runtime<'a>(
+        &'a self,
+        session: &'a AgentSession,
+        _manifest: &'a AgentManifest,
+    ) -> InteractionFuture<'a, AgentRuntime> {
+        Box::pin(async move {
+            session
+                .runtime_builder()
+                .with_model_provider(Arc::clone(&self.model))
+                .build()
+                .map_err(InteractionError::from)
+        })
+    }
 }
 
 impl AgentRuntimeProfile for SharedEventStoreProfile {
@@ -1147,6 +1347,164 @@ impl ModelProvider for ManyDeltaModel {
             }
             Ok(events)
         })
+    }
+}
+
+#[derive(Default)]
+struct CapturingToolRequestModel {
+    requests: Mutex<Vec<ModelRequest>>,
+}
+
+impl CapturingToolRequestModel {
+    fn requests(&self) -> Vec<ModelRequest> {
+        self.requests
+            .lock()
+            .expect("captured model requests lock poisoned")
+            .clone()
+    }
+}
+
+impl ModelProvider for CapturingToolRequestModel {
+    fn id(&self) -> &str {
+        "capturing-tool-request"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        request: ModelRequest,
+        stream: ModelStreamSink,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            self.requests
+                .lock()
+                .expect("captured model requests lock poisoned")
+                .push(request);
+            let events = vec![
+                ModelStreamEvent::Started {
+                    stream_id: "capturing-tool-request-stream".into(),
+                },
+                ModelStreamEvent::Finished {
+                    stop_reason: StopReason::Stop,
+                },
+            ];
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+#[derive(Default)]
+struct SubagentWorkflowModel {
+    parent_calls: AtomicU64,
+}
+
+impl ModelProvider for SubagentWorkflowModel {
+    fn id(&self) -> &str {
+        "subagent-workflow"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        request: ModelRequest,
+        stream: ModelStreamSink,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            cancellation.throw_if_cancelled()?;
+            let can_spawn = request
+                .tools
+                .iter()
+                .any(|tool| tool.name == BuiltInToolName::SubagentSpawn.as_str());
+            let events = if !can_spawn {
+                vec![
+                    ModelStreamEvent::Started {
+                        stream_id: "subagent-child-stream".into(),
+                    },
+                    ModelStreamEvent::TextDelta {
+                        text: "child final text".into(),
+                    },
+                    ModelStreamEvent::Finished {
+                        stop_reason: StopReason::Stop,
+                    },
+                ]
+            } else {
+                match self.parent_calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => vec![
+                        ModelStreamEvent::Started {
+                            stream_id: "subagent-parent-spawn-stream".into(),
+                        },
+                        ModelStreamEvent::ToolCall {
+                            tool_call: ToolCall {
+                                id: "subagent-spawn-test".into(),
+                                name: BuiltInToolName::SubagentSpawn.as_str().into(),
+                                arguments: json!({
+                                    "role": "reviewer",
+                                    "prompt": "review this"
+                                }),
+                            },
+                        },
+                        ModelStreamEvent::Finished {
+                            stop_reason: StopReason::ToolUse,
+                        },
+                    ],
+                    1 => vec![
+                        ModelStreamEvent::Started {
+                            stream_id: "subagent-parent-wait-stream".into(),
+                        },
+                        ModelStreamEvent::ToolCall {
+                            tool_call: ToolCall {
+                                id: "subagent-wait-test".into(),
+                                name: BuiltInToolName::SubagentWait.as_str().into(),
+                                arguments: json!({
+                                    "sessionIds": ["session-1"],
+                                    "timeoutMs": 1000
+                                }),
+                            },
+                        },
+                        ModelStreamEvent::Finished {
+                            stop_reason: StopReason::ToolUse,
+                        },
+                    ],
+                    _ => vec![
+                        ModelStreamEvent::Started {
+                            stream_id: "subagent-parent-final-stream".into(),
+                        },
+                        ModelStreamEvent::TextDelta {
+                            text: "parent done".into(),
+                        },
+                        ModelStreamEvent::Finished {
+                            stop_reason: StopReason::Stop,
+                        },
+                    ],
+                }
+            };
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+fn assert_tool_names_include(request: &ModelRequest, names: &[&str]) {
+    for name in names {
+        assert!(
+            request.tools.iter().any(|tool| tool.name == *name),
+            "expected model request to include tool {name}"
+        );
+    }
+}
+
+fn assert_tool_names_exclude(request: &ModelRequest, names: &[&str]) {
+    for name in names {
+        assert!(
+            request.tools.iter().all(|tool| tool.name != *name),
+            "expected model request to exclude tool {name}"
+        );
     }
 }
 

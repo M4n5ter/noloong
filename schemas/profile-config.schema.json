@@ -390,6 +390,10 @@
         "host.exec.write",
         "host.exec.terminate",
         "host.exec.list",
+        "agent.subagent.spawn",
+        "agent.subagent.wait",
+        "agent.subagent.result",
+        "agent.subagent.list",
         "agent.manifest.propose_patch"
       ],
       "type": "string"

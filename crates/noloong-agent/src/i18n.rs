@@ -18,10 +18,15 @@ pub enum MessageKey {
     HostExecWriteDescription,
     HostExecTerminateDescription,
     HostExecListDescription,
+    SubagentSpawnDescription,
+    SubagentWaitDescription,
+    SubagentResultDescription,
+    SubagentListDescription,
     FileWriteDescription,
     FileApplyPatchDescription,
     ManifestPatchDescription,
     HostCommandPermissionDescription,
+    SubagentPermissionDescription,
     FileEditPermissionDescription,
     ManifestPatchPermissionDescription,
     ApprovalPrompt,
@@ -37,10 +42,15 @@ impl MessageKey {
             Self::HostExecWriteDescription,
             Self::HostExecTerminateDescription,
             Self::HostExecListDescription,
+            Self::SubagentSpawnDescription,
+            Self::SubagentWaitDescription,
+            Self::SubagentResultDescription,
+            Self::SubagentListDescription,
             Self::FileWriteDescription,
             Self::FileApplyPatchDescription,
             Self::ManifestPatchDescription,
             Self::HostCommandPermissionDescription,
+            Self::SubagentPermissionDescription,
             Self::FileEditPermissionDescription,
             Self::ManifestPatchPermissionDescription,
             Self::ApprovalPrompt,
@@ -546,6 +556,18 @@ fn en_message(key: MessageKey) -> &'static str {
         MessageKey::HostExecListDescription => {
             "List background host command jobs for the current session with their latest status."
         }
+        MessageKey::SubagentSpawnDescription => {
+            "Spawn a direct child subagent for a bounded task and start it with the provided prompt. Use agent.subagent.wait or agent.subagent.result to collect its final assistant output."
+        }
+        MessageKey::SubagentWaitDescription => {
+            "Wait for one or more direct child subagents to settle and return each current status plus final assistant output when available. Timeout does not abort subagents."
+        }
+        MessageKey::SubagentResultDescription => {
+            "Read the current status and final assistant output for one direct child subagent without waiting."
+        }
+        MessageKey::SubagentListDescription => {
+            "List direct child subagents for the current session with lightweight status information."
+        }
         MessageKey::FileWriteDescription => {
             "Edit a text file on the host filesystem. Provide content for a complete file write, or provide oldString and newString for an exact replacement; replaceAll controls whether every match is replaced."
         }
@@ -567,6 +589,9 @@ fn en_message(key: MessageKey) -> &'static str {
         }
         MessageKey::HostCommandPermissionDescription => {
             "Start and control host processes, including reading output, writing stdin, waiting, listing, or terminating jobs."
+        }
+        MessageKey::SubagentPermissionDescription => {
+            "Spawn and inspect direct child subagents for the current session."
         }
         MessageKey::FileEditPermissionDescription => {
             "Modify the host filesystem through file editing tools, including writing, replacing, moving, or deleting paths."
@@ -599,6 +624,16 @@ fn zh_message(key: MessageKey) -> &'static str {
         MessageKey::HostExecListDescription => {
             "列出当前 session 中的后台宿主机命令 job 及其最新状态。"
         }
+        MessageKey::SubagentSpawnDescription => {
+            "为有边界的任务创建直接子 agent，并用给定 prompt 启动它。使用 agent.subagent.wait 或 agent.subagent.result 收集最终 assistant 输出。"
+        }
+        MessageKey::SubagentWaitDescription => {
+            "等待一个或多个直接子 agent 进入终态，并返回每个子 agent 的当前状态以及可用的最终 assistant 输出。超时不会中止子 agent。"
+        }
+        MessageKey::SubagentResultDescription => {
+            "读取一个直接子 agent 的当前状态和最终 assistant 输出，不等待。"
+        }
+        MessageKey::SubagentListDescription => "列出当前 session 的直接子 agent 及轻量状态信息。",
         MessageKey::FileWriteDescription => {
             "编辑宿主机文件系统中的文本文件。提供 content 表示完整写入文件；或提供 oldString 和 newString 表示精确替换，replaceAll 控制是否替换所有匹配项。"
         }
@@ -621,6 +656,7 @@ fn zh_message(key: MessageKey) -> &'static str {
         MessageKey::HostCommandPermissionDescription => {
             "启动和控制宿主机进程，包括读取输出、写入 stdin、等待、列出或终止 job。"
         }
+        MessageKey::SubagentPermissionDescription => "为当前 session 创建并查看直接子 agent。",
         MessageKey::FileEditPermissionDescription => {
             "通过文件编辑工具修改宿主机文件系统，包括写入、替换、移动或删除路径。"
         }

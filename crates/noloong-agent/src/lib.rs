@@ -43,5 +43,8 @@ pub use tools::{
     DEFAULT_MAX_INLINE_TOOL_OUTPUT_BYTES, DEFAULT_TOOL_OUTPUT_PREVIEW_EDGE_BYTES,
     FILE_EDIT_PERMISSION_CAPABILITY, FileEditManager, HostExecListTool, HostExecReadTool,
     HostExecStartTool, HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool,
-    ManifestPatchProposalTool, ToolOutputOverflowConfig, WRITE_FILE_TOOL_NAME, WriteFileTool,
+    ManifestPatchProposalTool, SubagentController, SubagentFinalOutput, SubagentListTool,
+    SubagentResult, SubagentResultTool, SubagentSpawnRequest, SubagentSpawnTool, SubagentSummary,
+    SubagentWaitOutcome, SubagentWaitTool, ToolOutputOverflowConfig, WRITE_FILE_TOOL_NAME,
+    WriteFileTool,
 };
