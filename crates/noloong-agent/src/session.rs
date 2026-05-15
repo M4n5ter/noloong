@@ -443,13 +443,8 @@ impl AgentSessionBuilder {
         self
     }
 
-    pub fn with_subagent_depth(mut self, depth: usize) -> Self {
+    pub(crate) fn with_subagent_depth(mut self, depth: usize) -> Self {
         self.subagent_depth = depth;
-        self
-    }
-
-    pub fn with_max_subagent_depth(mut self, max_depth: usize) -> Self {
-        self.max_subagent_depth = max_depth;
         self
     }
 

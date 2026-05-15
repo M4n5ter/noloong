@@ -11,7 +11,7 @@ use crate::tools::{
     SubagentController, SubagentResult, SubagentSpawnRequest as ToolSubagentSpawnRequest,
     SubagentSummary, SubagentWaitOutcome, final_assistant_output,
 };
-use crate::{AgentManifest, AgentSession, AgentSystemPrompt, ManifestPatch};
+use crate::{AgentManifest, AgentSession, ManifestPatch};
 use noloong_agent_core::{
     Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentMessage, AgentState, BoxFuture,
     CancellationToken, RunStatus,
@@ -656,8 +656,10 @@ impl RegistrySubagentController {
             return Err(subagent_access_error(session_id, &self.parent_session_id));
         }
         let summary = summary_from_descriptor(&descriptor);
-        let settled = descriptor.status != InteractionSessionStatus::Running;
-        let final_output = final_assistant_output(&descriptor.state);
+        let settled = descriptor.status.is_settled();
+        let final_output = settled
+            .then(|| final_assistant_output(&descriptor.state))
+            .flatten();
         Ok(SubagentResult {
             summary,
             settled,
@@ -670,18 +672,7 @@ fn summary_from_descriptor(descriptor: &InteractionSessionDescriptor) -> Subagen
     SubagentSummary {
         session_id: descriptor.session_id.clone(),
         role: descriptor.role.clone(),
-        status: session_status_str(&descriptor.status).into(),
-    }
-}
-
-fn session_status_str(status: &InteractionSessionStatus) -> &'static str {
-    match status {
-        InteractionSessionStatus::Idle => "idle",
-        InteractionSessionStatus::Running => "running",
-        InteractionSessionStatus::Completed => "completed",
-        InteractionSessionStatus::Aborted => "aborted",
-        InteractionSessionStatus::Failed => "failed",
-        InteractionSessionStatus::Paused => "paused",
+        status: descriptor.status.as_str().into(),
     }
 }
 
@@ -697,10 +688,7 @@ fn subagent_manifest_from_parent(
         .get(SUBAGENT_INHERIT_PROMPT_ADDITIONS_METADATA)
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let additions = match &mut manifest.system_prompt {
-        AgentSystemPrompt::BuiltIn { additions, .. }
-        | AgentSystemPrompt::Custom { additions, .. } => additions,
-    };
+    let additions = manifest.system_prompt.additions_mut();
     if inherit_prompt_additions {
         additions.retain(|addition| !addition.id.starts_with(TRANSIENT_PROMPT_ADDITION_PREFIX));
     } else {

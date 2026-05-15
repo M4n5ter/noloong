@@ -233,7 +233,7 @@ impl AgentSystemPrompt {
         }
     }
 
-    fn additions_mut(&mut self) -> &mut Vec<SystemPromptAddition> {
+    pub(crate) fn additions_mut(&mut self) -> &mut Vec<SystemPromptAddition> {
         match self {
             Self::BuiltIn { additions, .. } | Self::Custom { additions, .. } => additions,
         }

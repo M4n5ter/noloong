@@ -239,6 +239,23 @@ impl From<RunStatus> for InteractionSessionStatus {
     }
 }
 
+impl InteractionSessionStatus {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Aborted => "aborted",
+            Self::Failed => "failed",
+            Self::Paused => "paused",
+        }
+    }
+
+    pub(crate) const fn is_settled(&self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionSessionDescriptor {
