@@ -943,6 +943,15 @@ impl TelegramUiCatalog {
         }
     }
 
+    pub fn input_submission_still_running(self) -> &'static str {
+        match self.locale {
+            Locale::En => {
+                "The agent is still running. I will deliver the result here when it finishes."
+            }
+            Locale::Zh => "智能体仍在运行；完成后我会把结果发到这里。",
+        }
+    }
+
     fn manifest_no_enabled_tools(self) -> &'static str {
         match self.locale {
             Locale::En => "none",

@@ -805,6 +805,25 @@ async fn payload_maps_function_tools_and_tool_results() -> Result<()> {
 }
 
 #[tokio::test]
+async fn payload_does_not_mark_error_tool_results_failed_for_responses_replay() -> Result<()> {
+    let mut request = request_with_tool_history();
+    if let Some(ContentBlock::ToolResult { is_error, .. }) = request.messages[2].content.first_mut()
+    {
+        *is_error = true;
+    }
+    let body = captured_request_body(
+        request,
+        ResponsesApiProviderConfig::new("test-responses", "test-model"),
+    )
+    .await?;
+
+    assert_eq!(body["input"][2]["type"], "function_call_output");
+    assert_eq!(body["input"][2]["call_id"], "call-1");
+    assert!(body["input"][2].get("status").is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn payload_maps_image_url_data_url_and_file_id() -> Result<()> {
     let mut inline = MediaBlock::inline_base64(MediaKind::Image, "aW1hZ2U=");
     inline.mime_type = Some("image/png".into());

@@ -119,6 +119,7 @@ pub struct StdioExtension {
     manifest: ExtensionManifest,
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingRequests,
+    fatal_error: StdioFatalError,
     model_stream_sinks: ModelStreamRegistrations,
     request_counter: AtomicU64,
     request_timeout: Duration,
@@ -127,6 +128,7 @@ pub struct StdioExtension {
 }
 
 type PendingRequests = Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value>>>>>;
+type StdioFatalError = Arc<Mutex<Option<String>>>;
 type ModelStreamRegistrations = Arc<Mutex<BTreeMap<String, ModelStreamRegistration>>>;
 
 #[derive(Clone)]
@@ -163,10 +165,12 @@ impl StdioExtension {
             .ok_or_else(|| AgentCoreError::JsonRpc("extension stdout unavailable".into()))?;
 
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
+        let fatal_error = Arc::new(Mutex::new(None));
         let model_stream_sinks = Arc::new(Mutex::new(BTreeMap::new()));
         tokio::spawn(process::read_stdout(
             stdout,
             pending.clone(),
+            fatal_error.clone(),
             model_stream_sinks.clone(),
         ));
 
@@ -177,6 +181,7 @@ impl StdioExtension {
             },
             writer: Arc::new(Mutex::new(stdin)),
             pending,
+            fatal_error,
             model_stream_sinks,
             request_counter: AtomicU64::new(0),
             request_timeout: config.request_timeout,
@@ -220,6 +225,10 @@ impl StdioExtension {
     where
         T: DeserializeOwned,
     {
+        if let Some(error) = self.fatal_error.lock().await.clone() {
+            return Err(AgentCoreError::JsonRpc(error));
+        }
+
         let id = self.next_request_id();
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -230,6 +239,10 @@ impl StdioExtension {
         let payload = serde_json::to_vec(&request)?;
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id, sender);
+        if let Some(error) = self.fatal_error.lock().await.clone() {
+            self.pending.lock().await.remove(&id);
+            return Err(AgentCoreError::JsonRpc(error));
+        }
 
         let write_result = {
             let mut writer = self.writer.lock().await;

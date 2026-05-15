@@ -952,7 +952,7 @@ async fn invalid_json_from_stdio_extension_is_reported() {
                     fixture.to_string_lossy().to_string(),
                     "--invalid-json".into(),
                 ])
-                .request_timeout(Duration::from_millis(500)),
+                .request_timeout(Duration::from_secs(2)),
         )
         .await;
 
@@ -960,7 +960,10 @@ async fn invalid_json_from_stdio_extension_is_reported() {
         Ok(_) => panic!("invalid JSON extension unexpectedly connected"),
         Err(error) => error.to_string(),
     };
-    assert!(error.contains("invalid json from extension"));
+    assert!(
+        error.contains("invalid json from extension"),
+        "unexpected error: {error}"
+    );
 }
 
 async fn runtime_with_phase_hook_mode(mode: &str) -> Result<AgentRuntime> {

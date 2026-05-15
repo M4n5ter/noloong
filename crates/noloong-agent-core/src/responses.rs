@@ -1012,7 +1012,7 @@ fn render_tool_result_items(content: &[ContentBlock]) -> Result<Vec<Value>> {
             ContentBlock::ToolResult {
                 tool_call_id,
                 content,
-                is_error,
+                is_error: _,
                 ..
             } => {
                 let mut item = Map::new();
@@ -1022,9 +1022,6 @@ fn render_tool_result_items(content: &[ContentBlock]) -> Result<Vec<Value>> {
                     "output".into(),
                     Value::String(render_tool_result_output(content)?),
                 );
-                if *is_error {
-                    item.insert("status".into(), Value::String("failed".into()));
-                }
                 items.push(Value::Object(item));
             }
             _ => {

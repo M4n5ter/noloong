@@ -1,4 +1,4 @@
-use super::{ModelStreamRegistrations, PendingRequests};
+use super::{ModelStreamRegistrations, PendingRequests, StdioFatalError};
 use crate::{AgentCoreError, ModelStreamEvent};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 pub(super) async fn read_stdout(
     stdout: tokio::process::ChildStdout,
     pending: PendingRequests,
+    fatal_error: StdioFatalError,
     model_stream_sinks: ModelStreamRegistrations,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -16,23 +17,26 @@ pub(super) async fn read_stdout(
         match serde_json::from_str::<Value>(&line) {
             Ok(value) => handle_message(value, &pending, &model_stream_sinks).await,
             Err(error) => {
-                let mut pending = pending.lock().await;
-                let pending = std::mem::take(&mut *pending);
-                for (_, sender) in pending {
-                    let _ = sender.send(Err(AgentCoreError::JsonRpc(format!(
-                        "invalid json from extension: {error}"
-                    ))));
-                }
+                let error = format!("invalid json from extension: {error}");
+                fail_pending(&pending, &fatal_error, error).await;
             }
         }
     }
 
-    let mut pending = pending.lock().await;
-    let pending = std::mem::take(&mut *pending);
+    fail_pending(&pending, &fatal_error, "extension stdout closed".into()).await;
+}
+
+async fn fail_pending(pending: &PendingRequests, fatal_error: &StdioFatalError, error: String) {
+    let mut fatal = fatal_error.lock().await;
+    if fatal.is_none() {
+        *fatal = Some(error.clone());
+    }
+    drop(fatal);
+
+    let mut pending_guard = pending.lock().await;
+    let pending = std::mem::take(&mut *pending_guard);
     for (_, sender) in pending {
-        let _ = sender.send(Err(AgentCoreError::JsonRpc(
-            "extension stdout closed".into(),
-        )));
+        let _ = sender.send(Err(AgentCoreError::JsonRpc(error.clone())));
     }
 }
 

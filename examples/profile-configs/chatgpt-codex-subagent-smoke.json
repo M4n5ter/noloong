@@ -1,0 +1,77 @@
+{
+  "defaultProfileId": "chatgpt-codex-subagent-smoke",
+  "registryStore": {
+    "type": "memory"
+  },
+  "profiles": [
+    {
+      "profileId": "chatgpt-codex-subagent-smoke",
+      "displayName": "ChatGPT Codex Subagent Smoke",
+      "description": "ChatGPT subscription profile narrowed to subagent host tools for live smoke tests.",
+      "provider": {
+        "type": "chatgpt_responses",
+        "model": "gpt-5.4-mini",
+        "stateMode": "stateless",
+        "allowFileDataUrlInput": true,
+        "reasoning": {
+          "effort": "medium",
+          "summary": "auto"
+        }
+      },
+      "compaction": {
+        "type": "auto"
+      },
+      "manifestPatches": [
+        {
+          "op": "set_locale",
+          "locale": "zh"
+        },
+        {
+          "op": "update_file_edit_tool_policy",
+          "policy": "disabled"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "host.exec.start"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "host.exec.read"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "host.exec.wait"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "host.exec.write"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "host.exec.terminate"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "host.exec.list"
+        },
+        {
+          "op": "disable_tool",
+          "toolName": "agent.manifest.propose_patch"
+        },
+        {
+          "op": "upsert_system_prompt_addition",
+          "addition": {
+            "id": "transient.subagent-smoke",
+            "text": "Live subagent smoke constraint for the parent agent only: when asked to run a subagent smoke, emit actual agent.subagent.spawn and agent.subagent.wait tool calls. Do not simulate sessionId, status, or finalText in prose.",
+            "enabled": true
+          }
+        }
+      ],
+      "metadata": {
+        "channel": "telegram",
+        "example": true,
+        "smoke": "subagent"
+      }
+    }
+  ]
+}

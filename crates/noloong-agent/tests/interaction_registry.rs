@@ -942,6 +942,54 @@ async fn interaction_registry_subagent_tools_spawn_wait_and_read_final_output() 
 }
 
 #[tokio::test]
+async fn interaction_registry_subagent_spawn_drops_transient_prompt_additions() {
+    let registry = AgentSessionRegistry::new(runtime_tool_profile(
+        "default",
+        Arc::new(SubagentWorkflowModel::default()),
+    ))
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("parent".into()),
+            manifest_patches: vec![
+                ManifestPatch::UpsertSystemPromptAddition {
+                    addition: SystemPromptAddition::new("transient.smoke", "parent-only"),
+                },
+                ManifestPatch::UpsertSystemPromptAddition {
+                    addition: SystemPromptAddition::new("stable.context", "child-visible"),
+                },
+            ],
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+
+    registry
+        .get("parent")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .prompt("delegate")
+        .await
+        .unwrap();
+
+    let child = registry
+        .get_descriptor("session-1")
+        .await
+        .unwrap()
+        .expect("child should exist");
+    let addition_ids = child
+        .manifest
+        .system_prompt
+        .additions()
+        .iter()
+        .map(|addition| addition.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(addition_ids, vec!["stable.context"]);
+}
+
+#[tokio::test]
 async fn interaction_registry_subagent_result_rejects_non_child_sessions() {
     let registry = AgentSessionRegistry::new(runtime_tool_profile("default", Arc::new(TextModel)))
         .expect("registry should build");

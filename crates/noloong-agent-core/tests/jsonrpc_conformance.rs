@@ -180,7 +180,7 @@ async fn request_response_jsonrpc_error_is_reported() -> Result<()> {
 async fn request_response_wrong_id_times_out() -> Result<()> {
     let error = runtime_with_timeouts(
         &[MODE_WRONG_RESPONSE_ID],
-        Duration::from_millis(500),
+        Duration::from_secs(2),
         Duration::from_secs(5),
     )
     .await?

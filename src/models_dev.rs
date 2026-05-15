@@ -32,10 +32,23 @@ impl ModelsDevRegistry {
     }
 
     async fn load(cache_path: PathBuf, source_url: String, refresh_enabled: bool) -> Self {
-        let providers = load_cache(&cache_path)
-            .await
-            .or_else(|| parse_providers(SNAPSHOT).ok())
-            .unwrap_or_default();
+        let (providers, source) = match load_cache(&cache_path).await {
+            Some(providers) => (providers, "cache"),
+            None => match parse_providers(SNAPSHOT) {
+                Ok(providers) => (providers, "snapshot"),
+                Err(error) => {
+                    log::warn!("failed to parse bundled Models.dev snapshot: {error}");
+                    (ModelsDevProviders::default(), "empty")
+                }
+            },
+        };
+        log::info!(
+            "Models.dev registry loaded from {source}; cache={}, refresh={}, source_url={}, proxy_env={}",
+            cache_path.display(),
+            refresh_enabled,
+            source_url,
+            proxy_env_summary()
+        );
         Self {
             providers,
             cache_path,
@@ -58,8 +71,21 @@ impl ModelsDevRegistry {
         let cache_path = self.cache_path.clone();
         let source_url = self.source_url.clone();
         tokio::spawn(async move {
-            if let Err(error) = refresh_cache(&source_url, &cache_path).await {
-                log::warn!("failed to refresh Models.dev registry: {error}");
+            match refresh_cache(&source_url, &cache_path).await {
+                Ok(()) => {
+                    log::info!(
+                        "Models.dev registry refreshed; cache={}, source_url={}",
+                        cache_path.display(),
+                        source_url
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "failed to refresh Models.dev registry from {source_url}/api.json to {} (proxy_env={}): {error}",
+                        cache_path.display(),
+                        proxy_env_summary()
+                    );
+                }
             }
         });
     }
@@ -122,6 +148,24 @@ fn env_bool(name: &str) -> bool {
     env::var(name)
         .ok()
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn proxy_env_summary() -> &'static str {
+    if [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|name| env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+    {
+        "present"
+    } else {
+        "absent"
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -557,13 +557,13 @@ fn en_message(key: MessageKey) -> &'static str {
             "List background host command jobs for the current session with their latest status."
         }
         MessageKey::SubagentSpawnDescription => {
-            "Spawn a direct child subagent for a bounded task and start it with the provided prompt. Use agent.subagent.wait or agent.subagent.result to collect its final assistant output."
+            "Spawn a direct child subagent for a bounded task and start it with the provided prompt. Always use agent.subagent.wait or agent.subagent.result to collect real status and final output; never invent sessionId, status, or finalText in prose."
         }
         MessageKey::SubagentWaitDescription => {
-            "Wait for one or more direct child subagents to settle and return each current status plus final assistant output when available. Timeout does not abort subagents."
+            "Wait for one or more direct child subagents to settle and return each real status plus final assistant output when available. Timeout does not abort subagents; do not simulate wait results."
         }
         MessageKey::SubagentResultDescription => {
-            "Read the current status and final assistant output for one direct child subagent without waiting."
+            "Read the current real status and final assistant output for one direct child subagent without waiting."
         }
         MessageKey::SubagentListDescription => {
             "List direct child subagents for the current session with lightweight status information."
@@ -625,13 +625,13 @@ fn zh_message(key: MessageKey) -> &'static str {
             "列出当前 session 中的后台宿主机命令 job 及其最新状态。"
         }
         MessageKey::SubagentSpawnDescription => {
-            "为有边界的任务创建直接子 agent，并用给定 prompt 启动它。使用 agent.subagent.wait 或 agent.subagent.result 收集最终 assistant 输出。"
+            "为有边界的任务创建直接子 agent，并用给定 prompt 启动它。必须使用 agent.subagent.wait 或 agent.subagent.result 收集真实状态和最终 assistant 输出；不要在文字里编造 sessionId、status 或 finalText。"
         }
         MessageKey::SubagentWaitDescription => {
-            "等待一个或多个直接子 agent 进入终态，并返回每个子 agent 的当前状态以及可用的最终 assistant 输出。超时不会中止子 agent。"
+            "等待一个或多个直接子 agent 进入终态，并返回每个子 agent 的真实状态以及可用的最终 assistant 输出。超时不会中止子 agent；不要模拟等待结果。"
         }
         MessageKey::SubagentResultDescription => {
-            "读取一个直接子 agent 的当前状态和最终 assistant 输出，不等待。"
+            "读取一个直接子 agent 的真实当前状态和最终 assistant 输出，不等待。"
         }
         MessageKey::SubagentListDescription => "列出当前 session 的直接子 agent 及轻量状态信息。",
         MessageKey::FileWriteDescription => {

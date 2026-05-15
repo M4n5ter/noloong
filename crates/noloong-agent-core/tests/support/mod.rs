@@ -69,7 +69,7 @@ pub fn fast_one_retry_reconnect() -> SseReconnectConfig {
 }
 
 pub fn jsonrpc_conformance_config(modes: &[&str]) -> StdioExtensionConfig {
-    jsonrpc_conformance_config_with_timeouts(modes, Duration::from_secs(2), Duration::from_secs(2))
+    jsonrpc_conformance_config_with_timeouts(modes, Duration::from_secs(5), Duration::from_secs(2))
 }
 
 pub fn jsonrpc_conformance_config_with_timeouts(

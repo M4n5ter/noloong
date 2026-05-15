@@ -359,8 +359,10 @@ impl TelegramPoller {
                 let mut latest_offset = None;
                 for update in updates {
                     let next_offset = update.update_id + 1;
-                    if is_supported_update(&update) {
-                        self.handler.handle_update(update).await?;
+                    if is_supported_update(&update)
+                        && let Err(error) = self.handler.handle_update(update).await
+                    {
+                        log::warn!("telegram update handler failed: {error}");
                     }
                     latest_offset = Some(next_offset);
                     self.offset = Some(next_offset);
@@ -550,18 +552,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn polling_does_not_advance_offset_when_handler_fails() {
+    async fn polling_advances_offset_when_handler_fails() {
         let api = Arc::new(FakeApi::with_updates(vec![text_update(7, "hello")]));
         let handler = Arc::new(FailingHandler);
         let store = Arc::new(FakeOffsetStore::default());
         let mut poller = TelegramPoller::new(api, handler).with_offset_store(store.clone());
 
-        assert!(matches!(
-            poller.poll_once().await.unwrap_err(),
-            TelegramPollingError::Handler(_)
-        ));
-        assert_eq!(poller.offset(), None);
-        assert_eq!(store.offset(), None);
+        poller.poll_once().await.unwrap();
+
+        assert_eq!(poller.offset(), Some(8));
+        assert_eq!(store.offset(), Some(8));
     }
 
     #[tokio::test]

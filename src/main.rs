@@ -29,9 +29,9 @@ use noloong_agent::{
     Locale,
     approval::{allow_decision, deny_decision},
     interaction::{
-        InteractionCapabilityPolicy, InteractionControlHandler, InteractionHttpTransportConfig,
-        InteractionTransportAuth, InteractionWsClient, InteractionWsClientConfig,
-        serve_interaction_http,
+        InteractionCapabilityPolicy, InteractionClientError, InteractionControlHandler,
+        InteractionHttpTransportConfig, InteractionTransportAuth, InteractionWsClient,
+        InteractionWsClientConfig, serve_interaction_http,
     },
 };
 use noloong_agent_core::{QueueMode, ToolApprovalRequest, ToolPermissionOutcome};
@@ -299,7 +299,7 @@ async fn run_telegram_bridge_with_config(
     mut config: noloong_agent_telegram::config::TelegramBridgeConfig,
 ) -> Result<(), CliError> {
     let mut client_config = InteractionWsClientConfig::new(&config.interaction_ws_url)
-        .request_timeout(Duration::from_secs(30));
+        .request_timeout(Duration::from_secs(600));
     if let Some(token) = &config.interaction_bearer_token {
         client_config = client_config.bearer_token(token);
     }
@@ -428,12 +428,25 @@ async fn run_display_delivery(
 ) -> Result<(), CliError> {
     let mut notifications = bridge.subscribe_interaction_notifications();
     loop {
-        let notification = notifications
-            .recv()
-            .await
-            .map_err(|error| CliError::Task(error.to_string()))?;
-        let Some(display) = TelegramBridge::parse_display_notification(notification)? else {
-            continue;
+        let notification = match notifications.recv().await {
+            Ok(notification) => notification,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                log::warn!("telegram display notification receiver lagged by {skipped} events");
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return Err(CliError::Task(
+                    "telegram display notification channel closed".into(),
+                ));
+            }
+        };
+        let display = match TelegramBridge::parse_display_notification(notification) {
+            Ok(Some(display)) => display,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!("telegram display notification decode failed: {error}");
+                continue;
+            }
         };
         let Some(key) = bridge.session_key_for_display(&display.session_id) else {
             continue;
@@ -441,7 +454,7 @@ async fn run_display_delivery(
         let cleanup = {
             let state = display_state_for(&display_states, key).await;
             let mut state = state.lock().await;
-            deliver_display_event(
+            match deliver_display_event(
                 &mut state,
                 &delivery,
                 TelegramMessageTarget::new(key.chat_id, key.thread_id),
@@ -450,7 +463,14 @@ async fn run_display_delivery(
                 edit_throttle,
                 catalog,
             )
-            .await?
+            .await
+            {
+                Ok(cleanup) => cleanup,
+                Err(error) => {
+                    log::warn!("telegram display delivery failed: {error}");
+                    continue;
+                }
+            }
         };
         cleanup_display_messages(&delivery, cleanup).await;
     }
@@ -537,9 +557,14 @@ impl BridgeUpdateHandler {
                 log::debug!("agent run failure already rendered through display events: {source}");
                 Ok(())
             }
-            TelegramBridgeError::Unauthorized => Err(TelegramPollingError::Handler(
-                TelegramBridgeError::Unauthorized.to_string(),
-            )),
+            TelegramBridgeError::Unauthorized => Ok(()),
+            TelegramBridgeError::Interaction(InteractionClientError::Timeout(_)) => {
+                self.delivery
+                    .send_text(target, self.catalog.input_submission_still_running(), None)
+                    .await
+                    .map_err(|error| TelegramPollingError::Handler(error.to_string()))?;
+                Ok(())
+            }
             error => {
                 self.delivery
                     .send_text(
@@ -560,9 +585,7 @@ impl BridgeUpdateHandler {
             .access()
             .allows(command.context.chat_id, command.context.user_id)
         {
-            return Err(TelegramPollingError::Handler(
-                noloong_agent_telegram::bridge::TelegramBridgeError::Unauthorized.to_string(),
-            ));
+            return Ok(());
         }
         match TelegramCockpitCommand::from_name(&command.name) {
             Some(TelegramCockpitCommand::Start | TelegramCockpitCommand::Help) => {

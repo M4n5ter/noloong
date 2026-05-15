@@ -1045,6 +1045,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn example_chatgpt_codex_subagent_smoke_profile_builds_registry() {
+        let config = serde_json::from_str::<HostProfileConfig>(include_str!(
+            "../examples/profile-configs/chatgpt-codex-subagent-smoke.json"
+        ))
+        .unwrap();
+
+        let registry = build_registry(&config).await.unwrap();
+
+        assert_eq!(
+            registry.profile_descriptors()[0].profile_id,
+            "chatgpt-codex-subagent-smoke"
+        );
+    }
+
+    #[tokio::test]
     async fn example_plugin_stdio_profile_builds_registry() {
         let mut config = serde_json::from_str::<HostProfileConfig>(include_str!(
             "../examples/profile-configs/plugin-stdio-example.json"

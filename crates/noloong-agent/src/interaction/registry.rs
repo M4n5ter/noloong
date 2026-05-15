@@ -11,7 +11,7 @@ use crate::tools::{
     SubagentController, SubagentResult, SubagentSpawnRequest as ToolSubagentSpawnRequest,
     SubagentSummary, SubagentWaitOutcome, final_assistant_output,
 };
-use crate::{AgentManifest, AgentSession, ManifestPatch};
+use crate::{AgentManifest, AgentSession, AgentSystemPrompt, ManifestPatch};
 use noloong_agent_core::{
     Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentMessage, AgentState, BoxFuture,
     CancellationToken, RunStatus,
@@ -30,6 +30,8 @@ use tokio::time::{Duration, Instant, sleep};
 
 const INTERRUPTED_RUNNING_SESSION_ERROR: &str =
     "agent session was interrupted while running and cannot be resumed automatically";
+const SUBAGENT_INHERIT_PROMPT_ADDITIONS_METADATA: &str = "inheritPromptAdditions";
+const TRANSIENT_PROMPT_ADDITION_PREFIX: &str = "transient.";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -531,16 +533,22 @@ impl SubagentController for RegistrySubagentController {
                         self.parent_session_id
                     ))
                 })?;
+            let ToolSubagentSpawnRequest {
+                role,
+                prompt,
+                metadata,
+            } = request;
+            let manifest = subagent_manifest_from_parent(parent.manifest, &metadata);
             let prompt_id = format!("subagent-initial-{}", current_unix_ms());
             let descriptor = registry
                 .spawn_subagent(SubagentSpawnRequest {
                     parent_session_id: self.parent_session_id.clone(),
                     profile_id: Some(parent.profile_id),
-                    manifest: Some(parent.manifest),
+                    manifest: Some(manifest),
                     manifest_patches: Vec::new(),
-                    role: request.role,
-                    metadata: request.metadata,
-                    initial_prompt: Some(AgentMessage::user(prompt_id, request.prompt)),
+                    role,
+                    metadata,
+                    initial_prompt: Some(AgentMessage::user(prompt_id, prompt)),
                 })
                 .await
                 .map_err(to_core_error)?;
@@ -679,6 +687,26 @@ fn session_status_str(status: &InteractionSessionStatus) -> &'static str {
 
 fn subagent_depth_for_record(record: &AgentSessionRecord) -> usize {
     usize::from(record.parent_session_id.is_some())
+}
+
+fn subagent_manifest_from_parent(
+    mut manifest: AgentManifest,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> AgentManifest {
+    let inherit_prompt_additions = metadata
+        .get(SUBAGENT_INHERIT_PROMPT_ADDITIONS_METADATA)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let additions = match &mut manifest.system_prompt {
+        AgentSystemPrompt::BuiltIn { additions, .. }
+        | AgentSystemPrompt::Custom { additions, .. } => additions,
+    };
+    if inherit_prompt_additions {
+        additions.retain(|addition| !addition.id.starts_with(TRANSIENT_PROMPT_ADDITION_PREFIX));
+    } else {
+        additions.clear();
+    }
+    manifest
 }
 
 fn subagent_access_error(session_id: &str, parent_session_id: &str) -> AgentCoreError {
