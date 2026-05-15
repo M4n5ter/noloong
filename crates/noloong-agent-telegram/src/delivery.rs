@@ -192,6 +192,12 @@ impl TelegramDelivery {
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
     ) -> TelegramDeliveryResult<TelegramMessageHandle> {
+        if text.trim().is_empty() {
+            return Ok(TelegramMessageHandle {
+                chat_id: target.chat_id,
+                message_id,
+            });
+        }
         let rendered = render_markdown_v2(text);
         match self
             .api
@@ -748,6 +754,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(edited.message_id, 9);
+    }
+
+    #[tokio::test]
+    async fn edit_text_skips_empty_text() {
+        let api = Arc::new(FakeTelegramApi::normal());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+
+        let edited = delivery
+            .edit_text(TelegramMessageTarget::chat(42), 9, "\n \t", None)
+            .await
+            .unwrap();
+
+        assert_eq!(edited.message_id, 9);
+        assert!(api.edited_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
