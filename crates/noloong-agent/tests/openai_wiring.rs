@@ -40,7 +40,7 @@ fn openai_feature_registers_compactor_without_changing_default_provider()
         )?
         .with_openai_responses_compactor(
             ContextCompactionConfig::new(1_000)
-                .reserve_tokens(100)
+                .summary_budget_tokens(100)
                 .keep_recent_tokens(10),
             OpenAiResponsesCompactorConfig::new("openai-compact", "model-under-test")
                 .base_url("http://127.0.0.1:1"),

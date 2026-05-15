@@ -24,7 +24,7 @@ async fn stdio_compaction_summarizer_compacts_persistent_state() -> Result<()> {
     let builder = AgentRuntime::builder()
         .with_context_compaction_summarizer_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             "fixture-compaction",
         )
@@ -70,7 +70,7 @@ async fn malformed_stdio_compaction_summarizer_response_fails_phase() -> Result<
     let builder = AgentRuntime::builder()
         .with_context_compaction_summarizer_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             "fixture-compaction",
         )
@@ -103,7 +103,7 @@ async fn malformed_stdio_context_compactor_response_fails_phase() -> Result<()> 
     let builder = AgentRuntime::builder()
         .with_context_compactor_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             "fixture-context-compactor",
         )
@@ -136,7 +136,7 @@ async fn stdio_context_compactor_replaces_persistent_state() -> Result<()> {
     let builder = AgentRuntime::builder()
         .with_context_compactor_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             "fixture-context-compactor",
         )
@@ -180,7 +180,7 @@ async fn stdio_context_compactor_can_return_summary() -> Result<()> {
     let builder = AgentRuntime::builder()
         .with_context_compactor_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             "fixture-context-compactor",
         )

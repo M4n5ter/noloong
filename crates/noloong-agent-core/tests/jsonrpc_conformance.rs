@@ -343,7 +343,7 @@ async fn malformed_compaction_result_fails_context_compact_phase() -> Result<()>
     .await?
     .with_context_compaction_summarizer_id(
         ContextCompactionConfig::new(64)
-            .reserve_tokens(8)
+            .summary_budget_tokens(8)
             .keep_recent_tokens(10),
         "conformance-compaction",
     );

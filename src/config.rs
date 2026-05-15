@@ -4,7 +4,7 @@ use noloong_agent_core::{
     AnthropicEffort, ContextCompactionMode, ResponsesReasoningEffort, ResponsesReasoningSummary,
     ResponsesStateMode,
 };
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
@@ -390,7 +390,7 @@ pub struct EnvHeaderConfig {
     pub value_prefix: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -404,18 +404,31 @@ pub enum ProfileCompactionConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
+        input_limit_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        context_window_tokens: Option<u64>,
+        compact_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        reserve_tokens: Option<u64>,
+        #[schemars(range(min = 1))]
+        input_limit_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(max = 1.0), transform = exclusive_minimum_zero)]
+        trigger_ratio: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 1))]
+        summary_budget_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 1))]
         keep_recent_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<ContextCompactionMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 1))]
         request_timeout_secs: Option<u64>,
     },
+}
+
+fn exclusive_minimum_zero(schema: &mut Schema) {
+    schema.insert("exclusiveMinimum".into(), 0.into());
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1115,9 +1128,11 @@ mod tests {
                     "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
                     "compaction": {
                         "type": "openai_responses",
-                        "model": "gpt-5.4-mini",
-                        "contextWindowTokens": 200000,
-                        "reserveTokens": 32000,
+                        "inputLimitModel": "gpt-5.4-mini",
+                        "compactModel": "gpt-5.4-mini",
+                        "inputLimitTokens": 200000,
+                        "triggerRatio": 0.8,
+                        "summaryBudgetTokens": 32000,
                         "keepRecentTokens": 64000,
                         "mode": "request_only",
                         "requestTimeoutSecs": 120
@@ -1128,9 +1143,11 @@ mod tests {
         .unwrap();
 
         let ProfileCompactionConfig::OpenaiResponses {
-            model,
-            context_window_tokens,
-            reserve_tokens,
+            input_limit_model,
+            compact_model,
+            input_limit_tokens,
+            trigger_ratio,
+            summary_budget_tokens,
             keep_recent_tokens,
             mode,
             request_timeout_secs,
@@ -1139,9 +1156,11 @@ mod tests {
         else {
             panic!("expected OpenAI responses compaction");
         };
-        assert_eq!(model.as_deref(), Some("gpt-5.4-mini"));
-        assert_eq!(*context_window_tokens, Some(200_000));
-        assert_eq!(*reserve_tokens, Some(32_000));
+        assert_eq!(input_limit_model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(compact_model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(*input_limit_tokens, Some(200_000));
+        assert_eq!(*trigger_ratio, Some(0.8));
+        assert_eq!(*summary_budget_tokens, Some(32_000));
         assert_eq!(*keep_recent_tokens, Some(64_000));
         assert_eq!(*mode, Some(ContextCompactionMode::RequestOnly));
         assert_eq!(*request_timeout_secs, Some(120));

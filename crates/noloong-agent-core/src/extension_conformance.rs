@@ -567,7 +567,7 @@ async fn compaction_summarizer_case(stdio: &StdioExtensionConfig) -> Result<()> 
     let runtime = builder
         .with_context_compaction_summarizer_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             CONFORMANCE_COMPACTION_SUMMARIZER_ID,
         )
@@ -604,7 +604,7 @@ async fn context_compactor_case(stdio: &StdioExtensionConfig) -> Result<()> {
     let runtime = builder
         .with_context_compactor_id(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10),
             CONFORMANCE_CONTEXT_COMPACTOR_ID,
         )

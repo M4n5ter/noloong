@@ -6,8 +6,8 @@ use noloong_agent_core::{
     MediaBlock, MediaKind, MessageCompaction, MessageReplacement, MessageRole,
     ModelBackedCompactionSummarizer, ModelBackedCompactionSummarizerConfig, ModelProvider,
     ModelRequest, ModelStreamEvent, ModelStreamSink, PHASE_CONTEXT_COMPACT, Result, StopReason,
-    TokenEstimator, ToolCall, ToolOutput, compacted_messages, compaction_summary_message,
-    plan_compaction, reduce_events,
+    TokenEstimator, ToolCall, ToolOutput, ToolProvider, ToolRequest, ToolSpec, compacted_messages,
+    compaction_summary_message, plan_compaction, reduce_events,
 };
 use serde_json::{Map, json};
 use std::{
@@ -21,14 +21,15 @@ use std::{
 #[test]
 fn compaction_config_and_summary_request_serde_round_trip() -> Result<()> {
     let config = ContextCompactionConfig::new(64_000)
-        .reserve_tokens(4_000)
+        .summary_budget_tokens(4_000)
         .keep_recent_tokens(8_000)
         .mode(ContextCompactionMode::RequestOnly)
         .metadata("owner", json!("test"));
     config.validate()?;
 
     let encoded = serde_json::to_value(&config)?;
-    assert_eq!(encoded["contextWindowTokens"], 64_000);
+    assert_eq!(encoded["inputLimitTokens"], 64_000);
+    assert_eq!(encoded["triggerRatio"], 0.9);
     assert_eq!(encoded["mode"], "request_only");
     assert_eq!(
         serde_json::from_value::<ContextCompactionConfig>(encoded)?,
@@ -52,7 +53,7 @@ fn compaction_config_and_summary_request_serde_round_trip() -> Result<()> {
 
     assert!(
         ContextCompactionConfig::new(100)
-            .reserve_tokens(100)
+            .trigger_ratio(0.0)
             .validate()
             .is_err()
     );
@@ -214,12 +215,32 @@ fn replace_messages_effect_rejects_partial_state_coverage() {
 fn planner_skips_below_threshold() -> Result<()> {
     let messages = vec![message("u1", MessageRole::User, "short")];
     let decision = plan_compaction(
-        &ContextCompactionConfig::new(10_000).reserve_tokens(1_000),
+        &ContextCompactionConfig::new(10_000).summary_budget_tokens(1_000),
         &HeuristicTokenEstimator,
         &messages,
     )?;
 
     assert!(matches!(decision, CompactionDecision::Skip { .. }));
+    Ok(())
+}
+
+#[test]
+fn planner_compacts_at_trigger_threshold() -> Result<()> {
+    let messages = vec![
+        message("u1", MessageRole::User, "old"),
+        message("a1", MessageRole::Assistant, "old answer"),
+        message("u2", MessageRole::User, "recent"),
+    ];
+    let decision = plan_compaction(
+        &ContextCompactionConfig::new(100)
+            .trigger_ratio(0.9)
+            .summary_budget_tokens(10)
+            .keep_recent_tokens(1),
+        &PerMessageEstimator(30),
+        &messages,
+    )?;
+
+    assert!(matches!(decision, CompactionDecision::Compact(_)));
     Ok(())
 }
 
@@ -459,7 +480,7 @@ async fn compaction_noop_does_not_call_summarizer() -> Result<()> {
     let runtime = AgentRuntime::builder()
         .with_model_provider(provider)
         .with_context_compaction(
-            ContextCompactionConfig::new(10_000).reserve_tokens(1_000),
+            ContextCompactionConfig::new(10_000).summary_budget_tokens(1_000),
             summarizer.clone(),
         )
         .max_turns(1)
@@ -477,6 +498,73 @@ async fn compaction_noop_does_not_call_summarizer() -> Result<()> {
         .await?;
 
     assert_eq!(summarizer.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn compaction_waits_until_tool_result_before_next_model_request() -> Result<()> {
+    let provider = Arc::new(SequenceModel::new(vec![
+        vec![
+            ModelStreamEvent::ToolCall {
+                tool_call: ToolCall {
+                    id: "call-1".into(),
+                    name: "large_echo".into(),
+                    arguments: json!({}),
+                },
+            },
+            ModelStreamEvent::Finished {
+                stop_reason: StopReason::ToolUse,
+            },
+        ],
+        vec![
+            ModelStreamEvent::TextDelta {
+                text: "done".into(),
+            },
+            ModelStreamEvent::Finished {
+                stop_reason: StopReason::Stop,
+            },
+        ],
+    ]));
+    let summarizer = Arc::new(CountingSummarizer::default());
+    let runtime = AgentRuntime::builder()
+        .with_model_provider(provider.clone())
+        .with_tool(Arc::new(LargeEchoTool))
+        .with_context_compaction_estimator(
+            ContextCompactionConfig::new(100)
+                .trigger_ratio(0.9)
+                .summary_budget_tokens(10)
+                .keep_recent_tokens(1),
+            summarizer.clone(),
+            Arc::new(PerMessageEstimator(30)),
+        )
+        .max_turns(2)
+        .build()?;
+
+    let report = runtime.run("short").await?;
+
+    assert_eq!(summarizer.calls.load(Ordering::SeqCst), 1);
+    let tool_completed = report
+        .events
+        .iter()
+        .position(|event| matches!(event.kind, AgentEventKind::ToolExecutionCompleted { .. }))
+        .expect("tool should complete");
+    let compact_effect = report
+        .events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                AgentEventKind::EffectCommitted {
+                    effect: AgentEffect::CompactMessages { .. }
+                }
+            )
+        })
+        .expect("compaction should commit after tool result");
+    assert!(tool_completed < compact_effect);
+
+    let requests = provider.requests.lock().expect("requests lock poisoned");
+    assert_eq!(requests.len(), 2);
+    assert_text_present(&requests[1].messages, "summary");
     Ok(())
 }
 
@@ -641,7 +729,7 @@ async fn model_backed_summarizer_fails_on_failed_or_empty_output() -> Result<()>
 fn compact_plan(messages: &[AgentMessage]) -> Result<noloong_agent_core::CompactionPlan> {
     match plan_compaction(
         &ContextCompactionConfig::new(64)
-            .reserve_tokens(8)
+            .summary_budget_tokens(8)
             .keep_recent_tokens(10),
         &HeuristicTokenEstimator,
         messages,
@@ -662,7 +750,7 @@ fn runtime_with_compaction(
         .with_model_provider(provider)
         .with_context_compaction(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10)
                 .mode(mode),
             summarizer,
@@ -680,7 +768,7 @@ fn runtime_with_compactor(
         .with_model_provider(provider)
         .with_context_compactor(
             ContextCompactionConfig::new(64)
-                .reserve_tokens(8)
+                .summary_budget_tokens(8)
                 .keep_recent_tokens(10)
                 .mode(mode),
             compactor,
@@ -755,6 +843,14 @@ struct CountingSummarizer {
     calls: AtomicUsize,
 }
 
+struct PerMessageEstimator(u64);
+
+impl TokenEstimator for PerMessageEstimator {
+    fn estimate_message_tokens(&self, _message: &AgentMessage) -> u64 {
+        self.0
+    }
+}
+
 struct ReplacementCompactor;
 
 impl ContextCompactor for ReplacementCompactor {
@@ -794,6 +890,37 @@ impl CompactionSummarizer for CountingSummarizer {
             Ok(CompactionSummaryResult {
                 summary: "summary".into(),
                 metadata: Map::new(),
+            })
+        })
+    }
+}
+
+struct LargeEchoTool;
+
+impl ToolProvider for LargeEchoTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "large_echo".into(),
+            description: "Return a large test result".into(),
+            input_schema: json!({ "type": "object" }),
+            execution_mode: None,
+            permissions: Vec::new(),
+        }
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        _request: ToolRequest,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, ToolOutput> {
+        Box::pin(async move {
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text {
+                    text: "tool output ".repeat(500),
+                }],
+                details: json!({}),
+                is_error: false,
+                updates: Vec::new(),
             })
         })
     }

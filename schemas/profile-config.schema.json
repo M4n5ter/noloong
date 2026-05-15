@@ -1019,11 +1019,9 @@
         },
         {
           "properties": {
-            "contextWindowTokens": {
-              "format": "uint64",
-              "minimum": 0,
+            "compactModel": {
               "type": [
-                "integer",
+                "string",
                 "null"
               ]
             },
@@ -1033,9 +1031,23 @@
                 "null"
               ]
             },
+            "inputLimitModel": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inputLimitTokens": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "keepRecentTokens": {
               "format": "uint64",
-              "minimum": 0,
+              "minimum": 1,
               "type": [
                 "integer",
                 "null"
@@ -1051,25 +1063,28 @@
                 }
               ]
             },
-            "model": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "requestTimeoutSecs": {
               "format": "uint64",
-              "minimum": 0,
+              "minimum": 1,
               "type": [
                 "integer",
                 "null"
               ]
             },
-            "reserveTokens": {
+            "summaryBudgetTokens": {
               "format": "uint64",
-              "minimum": 0,
+              "minimum": 1,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "triggerRatio": {
+              "exclusiveMinimum": 0,
+              "format": "double",
+              "maximum": 1.0,
+              "type": [
+                "number",
                 "null"
               ]
             },

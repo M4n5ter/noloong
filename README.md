@@ -155,7 +155,7 @@ cargo run -p noloong -- chatgpt login --flow browser
 cargo run -p noloong -- chatgpt status
 ```
 
-The profile example below uses token-file auth by default, uses `gpt-5.4-mini`, runs the ChatGPT Responses backend in stateless mode, and enables Codex compact automatically:
+The profile example below uses token-file auth by default, uses `gpt-5.4-mini`, runs the ChatGPT Responses backend in stateless mode, and enables Codex compact automatically. Auto compaction uses Models.dev metadata for the main model input limit and triggers at 90% of that input limit; the compact request itself still goes through the ChatGPT subscription Responses compact endpoint.
 
 ```bash
 cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json

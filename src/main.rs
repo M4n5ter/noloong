@@ -2,6 +2,7 @@ mod build_info;
 mod chatgpt;
 mod config;
 mod host;
+mod models_dev;
 mod schema;
 #[cfg(test)]
 mod test_support;

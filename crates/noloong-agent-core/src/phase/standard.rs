@@ -91,7 +91,7 @@ pub(super) async fn context_compact(context: PhaseContext<'_>) -> Result<PhaseOu
         messages_to_summarize,
         turn_prefix_messages,
         retained_messages: retained_messages.clone(),
-        token_budget: compaction.config.reserve_tokens,
+        token_budget: compaction.config.summary_budget_tokens,
         tokens_before,
         estimated_retained_tokens,
         is_split_turn,

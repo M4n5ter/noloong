@@ -5,6 +5,7 @@ use crate::config::{
     ResponsesProviderReasoningConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
     validate_responses_reasoning_state_mode,
 };
+use crate::models_dev::ModelsDevRegistry;
 use noloong_agent::{
     AgentManifest, AgentSession, ManifestPatch,
     interaction::{
@@ -35,20 +36,25 @@ use serde_json::json;
 use std::{env, sync::Arc, time::Duration};
 use thiserror::Error;
 
-const DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS: u64 = 128_000;
-const DEFAULT_CHATGPT_COMPACTION_RESERVE_TOKENS: u64 = 16_384;
-const DEFAULT_CHATGPT_COMPACTION_KEEP_RECENT_TOKENS: u64 = 20_000;
+const DEFAULT_CHATGPT_COMPACTION_INPUT_LIMIT_TOKENS: u64 = 144_384;
+const MODELS_DEV_OPENAI_PROVIDER_ID: &str = "openai";
 
 pub async fn build_registry(
     config: &HostProfileConfig,
 ) -> Result<AgentSessionRegistry, HostBuildError> {
     config.validate()?;
+    let models_dev = if config.profiles.iter().any(profile_needs_models_dev) {
+        let models_dev = ModelsDevRegistry::load_default().await;
+        models_dev.refresh_cache_in_background();
+        Some(models_dev)
+    } else {
+        None
+    };
     let mut profiles = Vec::with_capacity(config.profiles.len());
     for profile_config in &config.profiles {
-        profiles.push(
-            Arc::new(RuntimeProfile::try_from_config(profile_config).await?)
-                as Arc<dyn AgentRuntimeProfile>,
-        );
+        profiles.push(Arc::new(
+            RuntimeProfile::try_from_config(profile_config, models_dev.as_ref()).await?,
+        ) as Arc<dyn AgentRuntimeProfile>);
     }
     let default_profile_id = config
         .default_profile_id
@@ -57,6 +63,22 @@ pub async fn build_registry(
     let store = build_registry_store(&config.registry_store).await?;
     AgentSessionRegistry::with_store(default_profile_id, profiles, store)
         .map_err(HostBuildError::Interaction)
+}
+
+fn profile_needs_models_dev(config: &RuntimeProfileConfig) -> bool {
+    if !matches!(
+        config.provider,
+        BuiltInProviderConfig::ChatgptResponses { .. }
+    ) {
+        return false;
+    }
+    match &config.compaction {
+        ProfileCompactionConfig::Auto => true,
+        ProfileCompactionConfig::OpenaiResponses {
+            input_limit_tokens, ..
+        } => input_limit_tokens.is_none(),
+        ProfileCompactionConfig::None => false,
+    }
 }
 
 async fn build_registry_store(
@@ -118,7 +140,10 @@ struct RuntimeProfile {
 }
 
 impl RuntimeProfile {
-    async fn try_from_config(config: &RuntimeProfileConfig) -> Result<Self, HostBuildError> {
+    async fn try_from_config(
+        config: &RuntimeProfileConfig,
+        models_dev: Option<&ModelsDevRegistry>,
+    ) -> Result<Self, HostBuildError> {
         let mut validated_manifest = AgentManifest::default();
         let mut default_manifest_patches = config
             .plugins
@@ -139,6 +164,7 @@ impl RuntimeProfile {
             &config.profile_id,
             &config.compaction,
             provider.chatgpt_compact.as_ref(),
+            models_dev,
         )?;
         let event_store = build_event_store(&config.event_store).await?;
         Ok(Self {
@@ -478,6 +504,7 @@ fn build_profile_compaction(
     profile_id: &str,
     config: &ProfileCompactionConfig,
     chatgpt_source: Option<&ChatGptCompactSource>,
+    models_dev: Option<&ModelsDevRegistry>,
 ) -> Result<Option<RuntimeCompaction>, HostBuildError> {
     match config {
         ProfileCompactionConfig::Auto => chatgpt_source
@@ -486,15 +513,18 @@ fn build_profile_compaction(
                     profile_id,
                     source,
                     OpenAiResponsesCompactionOptions::default(),
+                    models_dev,
                 )
             })
             .transpose(),
         ProfileCompactionConfig::None => Ok(None),
         ProfileCompactionConfig::OpenaiResponses {
             id,
-            model,
-            context_window_tokens,
-            reserve_tokens,
+            input_limit_model,
+            compact_model,
+            input_limit_tokens,
+            trigger_ratio,
+            summary_budget_tokens,
             keep_recent_tokens,
             mode,
             request_timeout_secs,
@@ -509,13 +539,16 @@ fn build_profile_compaction(
                 source,
                 OpenAiResponsesCompactionOptions {
                     id: id.clone(),
-                    model: model.clone(),
-                    context_window_tokens: *context_window_tokens,
-                    reserve_tokens: *reserve_tokens,
+                    input_limit_model: input_limit_model.clone(),
+                    compact_model: compact_model.clone(),
+                    input_limit_tokens: *input_limit_tokens,
+                    trigger_ratio: *trigger_ratio,
+                    summary_budget_tokens: *summary_budget_tokens,
                     keep_recent_tokens: *keep_recent_tokens,
                     mode: *mode,
                     request_timeout_secs: *request_timeout_secs,
                 },
+                models_dev,
             )
             .map(Some)
         }
@@ -525,9 +558,11 @@ fn build_profile_compaction(
 #[derive(Clone, Debug, Default)]
 struct OpenAiResponsesCompactionOptions {
     id: Option<String>,
-    model: Option<String>,
-    context_window_tokens: Option<u64>,
-    reserve_tokens: Option<u64>,
+    input_limit_model: Option<String>,
+    compact_model: Option<String>,
+    input_limit_tokens: Option<u64>,
+    trigger_ratio: Option<f64>,
+    summary_budget_tokens: Option<u64>,
     keep_recent_tokens: Option<u64>,
     mode: Option<ContextCompactionMode>,
     request_timeout_secs: Option<u64>,
@@ -537,27 +572,43 @@ fn openai_responses_runtime_compaction(
     profile_id: &str,
     source: &ChatGptCompactSource,
     options: OpenAiResponsesCompactionOptions,
+    models_dev: Option<&ModelsDevRegistry>,
 ) -> Result<RuntimeCompaction, HostBuildError> {
-    let reserve_tokens = options
-        .reserve_tokens
-        .unwrap_or(DEFAULT_CHATGPT_COMPACTION_RESERVE_TOKENS);
-    let context_window_tokens = options
-        .context_window_tokens
-        .unwrap_or(DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS.saturating_add(reserve_tokens));
-    let keep_recent_tokens = options
-        .keep_recent_tokens
-        .unwrap_or(DEFAULT_CHATGPT_COMPACTION_KEEP_RECENT_TOKENS);
-    let context_config = ContextCompactionConfig::new(context_window_tokens)
-        .reserve_tokens(reserve_tokens)
-        .keep_recent_tokens(keep_recent_tokens)
+    let input_limit_model = options
+        .input_limit_model
+        .unwrap_or_else(|| source.model.clone());
+    let input_limit_tokens = options.input_limit_tokens.unwrap_or_else(|| {
+        models_dev
+            .and_then(|registry| {
+                registry.input_limit(MODELS_DEV_OPENAI_PROVIDER_ID, &input_limit_model)
+            })
+            .unwrap_or(DEFAULT_CHATGPT_COMPACTION_INPUT_LIMIT_TOKENS)
+    });
+    let mut context_config = ContextCompactionConfig::new(input_limit_tokens);
+    if let Some(trigger_ratio) = options.trigger_ratio {
+        context_config = context_config.trigger_ratio(trigger_ratio);
+    }
+    if let Some(summary_budget_tokens) = options.summary_budget_tokens {
+        context_config = context_config.summary_budget_tokens(summary_budget_tokens);
+    }
+    if let Some(keep_recent_tokens) = options.keep_recent_tokens {
+        context_config = context_config.keep_recent_tokens(keep_recent_tokens);
+    }
+    let context_config = context_config
         .mode(options.mode.unwrap_or_default())
         .metadata("source", json!("openai_responses"))
         .metadata("profileId", json!(profile_id))
-        .metadata("providerId", json!(source.provider_id.clone()));
+        .metadata("providerId", json!(source.provider_id.clone()))
+        .metadata("inputLimitProvider", json!(MODELS_DEV_OPENAI_PROVIDER_ID))
+        .metadata("inputLimitModel", json!(input_limit_model));
+    context_config.validate()?;
     let compactor_id = options
         .id
         .unwrap_or_else(|| format!("{}.compact", source.provider_id));
-    let model = options.model.unwrap_or_else(|| source.model.clone());
+    let model = options
+        .compact_model
+        .unwrap_or_else(|| source.model.clone());
+    let context_config = context_config.metadata("compactModel", json!(model.clone()));
     let mut compactor_config = OpenAiResponsesCompactorConfig::new(compactor_id, model)
         .auth_provider(Arc::clone(&source.auth_provider))
         .state_mode(source.state_mode);
@@ -653,7 +704,7 @@ fn opendal_error(error: opendal::Error) -> HostBuildError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS, RuntimeProfile, apply_anthropic_reasoning,
+        HostBuildError, RuntimeProfile, apply_anthropic_reasoning,
         apply_chat_completions_reasoning, apply_responses_reasoning, build_registry,
         chat_completions_reasoning_extra_body, responses_reasoning_config,
     };
@@ -664,6 +715,7 @@ mod tests {
         ResponsesProviderReasoningConfig, ResponsesProviderReasoningEffort,
         ResponsesProviderReasoningSummary, RuntimeProfileConfig,
     };
+    use crate::models_dev::ModelsDevRegistry;
     use noloong_agent::{
         AgentManifest, AgentSession, ManifestPatch, interaction::AgentRuntimeProfile,
     };
@@ -684,6 +736,30 @@ mod tests {
     };
 
     static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
+
+    async fn runtime_profile(
+        config: &RuntimeProfileConfig,
+    ) -> Result<RuntimeProfile, HostBuildError> {
+        let models_dev = models_dev_registry();
+        RuntimeProfile::try_from_config(config, Some(&models_dev)).await
+    }
+
+    fn models_dev_registry() -> ModelsDevRegistry {
+        ModelsDevRegistry::from_json_for_tests(
+            r#"{
+                "openai": {
+                    "models": {
+                        "gpt-5.4-mini": {
+                            "limit": {"context": 400000, "input": 272000, "output": 128000}
+                        },
+                        "compact-only": {
+                            "limit": {"context": 64000, "input": 32000, "output": 8192}
+                        }
+                    }
+                }
+            }"#,
+        )
+    }
 
     #[tokio::test]
     async fn profile_config_builds_registry_store() {
@@ -870,7 +946,7 @@ mod tests {
         let db = TempSqliteDb::new("profile-event-store");
         let config = runtime_profile_config(sqlite_event_store(&db.path, true));
 
-        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let profile = runtime_profile(&config).await.unwrap();
 
         profile
             .event_store
@@ -886,7 +962,7 @@ mod tests {
         let db = TempSqliteDb::new("profile-event-reload");
         let config = runtime_profile_config(sqlite_event_store(&db.path, true));
 
-        let first_profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let first_profile = runtime_profile(&config).await.unwrap();
         first_profile
             .event_store
             .append(event("reloaded-run", 1, AgentEventKind::RunStarted))
@@ -894,7 +970,7 @@ mod tests {
             .unwrap();
         drop(first_profile);
 
-        let second_profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let second_profile = runtime_profile(&config).await.unwrap();
         let loaded = second_profile
             .event_store
             .load("reloaded-run")
@@ -909,7 +985,7 @@ mod tests {
     async fn profile_runtime_writes_events_to_configured_event_store() {
         let db = TempSqliteDb::new("profile-event-runtime");
         let config = runtime_profile_config(sqlite_event_store(&db.path, true));
-        let mut profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let mut profile = runtime_profile(&config).await.unwrap();
         profile.provider = Arc::new(TextModelProvider);
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
@@ -930,7 +1006,7 @@ mod tests {
         let db = TempSqliteDb::new("profile-event-no-schema");
         let config = runtime_profile_config(sqlite_event_store(&db.path, false));
 
-        let error = match RuntimeProfile::try_from_config(&config).await {
+        let error = match runtime_profile(&config).await {
             Ok(_) => panic!("event store without schema should fail"),
             Err(error) => error,
         };
@@ -1013,7 +1089,7 @@ mod tests {
         )
         .unwrap();
 
-        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let profile = runtime_profile(&config).await.unwrap();
         let descriptor = profile.descriptor();
 
         assert!(matches!(
@@ -1037,7 +1113,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
 
@@ -1046,13 +1122,44 @@ mod tests {
             .context_compaction_config()
             .expect("auto ChatGPT profile should register compaction");
 
-        assert_eq!(
-            compaction.trigger_threshold(),
-            DEFAULT_CHATGPT_COMPACTION_TRIGGER_TOKENS
-        );
+        assert_eq!(compaction.input_limit_tokens, 272_000);
+        assert_eq!(compaction.trigger_ratio, 0.9);
+        assert_eq!(compaction.trigger_threshold(), 244_800);
         assert_eq!(compaction.mode, ContextCompactionMode::PersistentState);
         assert_eq!(compaction.metadata["source"], "openai_responses");
         assert_eq!(compaction.metadata["profileId"], "chatgpt");
+        assert_eq!(compaction.metadata["inputLimitModel"], "gpt-5.4-mini");
+        assert_eq!(compaction.metadata["compactModel"], "gpt-5.4-mini");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_compaction_can_lookup_input_limit_model_separately() {
+        let config = serde_json::from_str::<RuntimeProfileConfig>(
+            r#"{
+                "profileId": "chatgpt",
+                "displayName": "ChatGPT",
+                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
+                "compaction": {
+                    "type": "openai_responses",
+                    "inputLimitModel": "compact-only",
+                    "compactModel": "gpt-5.4-mini"
+                }
+            }"#,
+        )
+        .unwrap();
+        let profile = runtime_profile(&config).await.unwrap();
+        let session = AgentSession::builder().build();
+        let manifest = AgentManifest::default();
+
+        let runtime = profile.build_runtime(&session, &manifest).await.unwrap();
+        let compaction = runtime
+            .context_compaction_config()
+            .expect("explicit compaction should be registered");
+
+        assert_eq!(compaction.input_limit_tokens, 32_000);
+        assert_eq!(compaction.trigger_threshold(), 28_800);
+        assert_eq!(compaction.metadata["inputLimitModel"], "compact-only");
+        assert_eq!(compaction.metadata["compactModel"], "gpt-5.4-mini");
     }
 
     #[tokio::test]
@@ -1066,7 +1173,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
 
@@ -1084,8 +1191,11 @@ mod tests {
                 "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
                 "compaction": {
                     "type": "openai_responses",
-                    "contextWindowTokens": 200000,
-                    "reserveTokens": 32000,
+                    "inputLimitModel": "compact-only",
+                    "compactModel": "gpt-5.4-mini",
+                    "inputLimitTokens": 200000,
+                    "triggerRatio": 0.8,
+                    "summaryBudgetTokens": 32000,
                     "keepRecentTokens": 64000,
                     "mode": "request_only",
                     "requestTimeoutSecs": 120
@@ -1093,7 +1203,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let profile = RuntimeProfile::try_from_config(&config).await.unwrap();
+        let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();
         let manifest = AgentManifest::default();
 
@@ -1102,10 +1212,14 @@ mod tests {
             .context_compaction_config()
             .expect("explicit compaction should be registered");
 
-        assert_eq!(compaction.context_window_tokens, 200_000);
-        assert_eq!(compaction.reserve_tokens, 32_000);
+        assert_eq!(compaction.input_limit_tokens, 200_000);
+        assert_eq!(compaction.trigger_ratio, 0.8);
+        assert_eq!(compaction.trigger_threshold(), 160_000);
+        assert_eq!(compaction.summary_budget_tokens, 32_000);
         assert_eq!(compaction.keep_recent_tokens, 64_000);
         assert_eq!(compaction.mode, ContextCompactionMode::RequestOnly);
+        assert_eq!(compaction.metadata["inputLimitModel"], "compact-only");
+        assert_eq!(compaction.metadata["compactModel"], "gpt-5.4-mini");
     }
 
     fn runtime_profile_config(event_store: ProfileEventStoreConfig) -> RuntimeProfileConfig {

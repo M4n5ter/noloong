@@ -13,7 +13,8 @@ pub const COMPACTION_METADATA_KEY: &str = "noloong.compaction";
 pub(crate) const COMPACTION_METADATA_IS_SPLIT_TURN_KEY: &str = "isSplitTurn";
 pub(crate) const COMPACTION_METADATA_MODE_KEY: &str = "mode";
 pub(crate) const COMPACTION_METADATA_TOKENS_BEFORE_KEY: &str = "tokensBefore";
-const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
+const DEFAULT_TRIGGER_RATIO: f64 = 0.9;
+const DEFAULT_SUMMARY_BUDGET_TOKENS: u64 = 16_384;
 const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 const TOOL_RESULT_SUMMARY_MAX_CHARS: usize = 2_000;
 const MEDIA_TOKEN_ESTIMATE: u64 = 1_200;
@@ -58,11 +59,12 @@ pub enum ContextCompactionMode {
     RequestOnly,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextCompactionConfig {
-    pub context_window_tokens: u64,
-    pub reserve_tokens: u64,
+    pub input_limit_tokens: u64,
+    pub trigger_ratio: f64,
+    pub summary_budget_tokens: u64,
     pub keep_recent_tokens: u64,
     pub mode: ContextCompactionMode,
     #[serde(default)]
@@ -70,18 +72,24 @@ pub struct ContextCompactionConfig {
 }
 
 impl ContextCompactionConfig {
-    pub fn new(context_window_tokens: u64) -> Self {
+    pub fn new(input_limit_tokens: u64) -> Self {
         Self {
-            context_window_tokens,
-            reserve_tokens: DEFAULT_RESERVE_TOKENS,
+            input_limit_tokens,
+            trigger_ratio: DEFAULT_TRIGGER_RATIO,
+            summary_budget_tokens: DEFAULT_SUMMARY_BUDGET_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
             mode: ContextCompactionMode::PersistentState,
             metadata: Map::new(),
         }
     }
 
-    pub fn reserve_tokens(mut self, reserve_tokens: u64) -> Self {
-        self.reserve_tokens = reserve_tokens;
+    pub fn trigger_ratio(mut self, trigger_ratio: f64) -> Self {
+        self.trigger_ratio = trigger_ratio;
+        self
+    }
+
+    pub fn summary_budget_tokens(mut self, summary_budget_tokens: u64) -> Self {
+        self.summary_budget_tokens = summary_budget_tokens;
         self
     }
 
@@ -101,14 +109,20 @@ impl ContextCompactionConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.context_window_tokens == 0 {
+        if self.input_limit_tokens == 0 {
             return Err(AgentCoreError::InvalidEffect(
-                "compaction context window must be greater than zero".into(),
+                "compaction input limit must be greater than zero".into(),
             ));
         }
-        if self.reserve_tokens >= self.context_window_tokens {
+        if !self.trigger_ratio.is_finite() || self.trigger_ratio <= 0.0 || self.trigger_ratio > 1.0
+        {
             return Err(AgentCoreError::InvalidEffect(
-                "compaction reserve tokens must be smaller than context window".into(),
+                "compaction trigger ratio must be greater than zero and at most one".into(),
+            ));
+        }
+        if self.summary_budget_tokens == 0 {
+            return Err(AgentCoreError::InvalidEffect(
+                "compaction summary budget must be greater than zero".into(),
             ));
         }
         if self.keep_recent_tokens == 0 {
@@ -120,7 +134,7 @@ impl ContextCompactionConfig {
     }
 
     pub fn trigger_threshold(&self) -> u64 {
-        self.context_window_tokens - self.reserve_tokens
+        (self.input_limit_tokens as f64 * self.trigger_ratio).floor() as u64
     }
 }
 
@@ -423,7 +437,7 @@ pub fn plan_compaction(
         .map(|message| estimator.estimate_message_tokens(message))
         .collect::<Vec<_>>();
     let tokens_before = token_estimates.iter().sum();
-    if tokens_before <= config.trigger_threshold() {
+    if tokens_before < config.trigger_threshold() {
         return Ok(CompactionDecision::Skip {
             estimated_tokens: tokens_before,
         });
@@ -638,7 +652,13 @@ fn find_cut_point(
     }
     let cut_index = target_index
         .and_then(|index| {
-            (index..end_index).find(|candidate| is_valid_cut_role(&messages[*candidate].role))
+            (index..end_index)
+                .find(|candidate| is_valid_cut_role(&messages[*candidate].role))
+                .or_else(|| {
+                    (start_index..=index)
+                        .rev()
+                        .find(|candidate| is_valid_cut_role(&messages[*candidate].role))
+                })
         })
         .unwrap_or(first_valid_cut);
 
