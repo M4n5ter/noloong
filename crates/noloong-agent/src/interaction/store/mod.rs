@@ -12,6 +12,7 @@ mod snapshot;
 mod sql;
 mod traits;
 
+pub use crate::interaction::{AutomationRecord, GoalRecord};
 pub use memory::InMemoryAgentSessionRegistryStore;
 #[cfg(feature = "registry-store-object")]
 pub use object::{OpenDalAgentSessionRegistryStore, OpenDalAgentSessionRegistryStoreConfig};
@@ -23,4 +24,7 @@ pub use snapshot::{
 #[cfg(any(feature = "registry-store-sqlite", feature = "registry-store-postgres"))]
 pub use sql::{SqlAgentSessionRegistryStore, SqlAgentSessionRegistryStoreConfig};
 pub use traits::AgentSessionRegistryStore;
-pub(super) use traits::{duplicate_session_error, missing_session_error};
+pub(super) use traits::{
+    duplicate_automation_error, duplicate_session_error, missing_automation_error,
+    missing_session_error,
+};

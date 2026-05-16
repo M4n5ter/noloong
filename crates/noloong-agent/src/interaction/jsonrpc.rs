@@ -11,6 +11,13 @@ pub type InteractionFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, InteractionError>> + Send + 'a>>;
 
 pub trait JsonRpcHandler: Send + Sync {
+    fn connection_handler(&self) -> Self
+    where
+        Self: Sized + Clone,
+    {
+        self.clone()
+    }
+
     fn handle<'a>(
         &'a self,
         method: &'a str,

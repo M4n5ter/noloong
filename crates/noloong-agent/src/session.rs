@@ -1,8 +1,8 @@
 use crate::{
     AgentManifest, ApplyPatchTool, BuiltInApprovalHook, BuiltInToolName,
-    BuiltInToolOutputOverflowHook, Catalog, FileEditManager, FileEditToolPolicy, HostEnvironment,
-    HostProcessCompletion, HostProcessEvent, HostProcessManager, HostProcessSubscription,
-    ManifestProposalStore, ToolOutputOverflowConfig, WriteFileTool,
+    BuiltInToolOutputOverflowHook, Catalog, FileEditManager, FileEditToolPolicy, GoalRecord,
+    HostEnvironment, HostProcessCompletion, HostProcessEvent, HostProcessManager,
+    HostProcessSubscription, ManifestProposalStore, ToolOutputOverflowConfig, WriteFileTool,
     approval::{ApprovalCache, cache_key_from_approval_resolution},
     plugin::{PluginLoadError, PluginLoadFailurePolicy, PluginLoadWarning},
     system_prompt::{
@@ -10,10 +10,10 @@ use crate::{
     },
     text,
     tools::{
-        APPLY_PATCH_TOOL_NAME, HostExecListTool, HostExecReadTool, HostExecStartTool,
-        HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
-        SubagentController, SubagentListTool, SubagentResultTool, SubagentSpawnTool,
-        SubagentWaitTool, WRITE_FILE_TOOL_NAME,
+        APPLY_PATCH_TOOL_NAME, GoalController, GoalUpdateTool, HostExecListTool, HostExecReadTool,
+        HostExecStartTool, HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool,
+        ManifestPatchProposalTool, SubagentController, SubagentListTool, SubagentResultTool,
+        SubagentSpawnTool, SubagentWaitTool, WRITE_FILE_TOOL_NAME,
     },
 };
 use noloong_agent_core::{
@@ -45,6 +45,8 @@ struct AgentSessionInner {
     file_edit_manager: FileEditManager,
     proposal_store: ManifestProposalStore,
     subagent_controller: Option<Arc<dyn SubagentController>>,
+    goal_controller: Option<Arc<dyn GoalController>>,
+    active_goal: Mutex<Option<GoalRecord>>,
     subagent_depth: usize,
     max_subagent_depth: usize,
     tool_output_overflow_config: ToolOutputOverflowConfig,
@@ -58,6 +60,8 @@ pub struct AgentSessionBuilder {
     process_manager: Option<HostProcessManager>,
     proposal_store: ManifestProposalStore,
     subagent_controller: Option<Arc<dyn SubagentController>>,
+    goal_controller: Option<Arc<dyn GoalController>>,
+    active_goal: Option<GoalRecord>,
     subagent_depth: usize,
     max_subagent_depth: usize,
     tool_output_overflow_config: ToolOutputOverflowConfig,
@@ -72,6 +76,8 @@ impl Default for AgentSessionBuilder {
             process_manager: None,
             proposal_store: ManifestProposalStore::default(),
             subagent_controller: None,
+            goal_controller: None,
+            active_goal: None,
             subagent_depth: 0,
             max_subagent_depth: 1,
             tool_output_overflow_config: ToolOutputOverflowConfig::default(),
@@ -131,6 +137,14 @@ impl AgentSession {
 
     pub fn proposal_store(&self) -> ManifestProposalStore {
         self.inner.proposal_store.clone()
+    }
+
+    pub(crate) fn set_active_goal_for_tools(&self, goal: Option<GoalRecord>) {
+        *self
+            .inner
+            .active_goal
+            .lock()
+            .expect("agent session active goal lock poisoned") = goal;
     }
 
     pub fn resolved_system_prompt(&self) -> ResolvedSystemPrompt {
@@ -278,6 +292,9 @@ impl AgentSession {
                 Arc::new(SubagentListTool::new(controller, catalog.clone()))
                     as Arc<dyn ToolProvider>
             }),
+            BuiltInToolName::GoalUpdate => self.goal_controller().map(|controller| {
+                Arc::new(GoalUpdateTool::new(controller, catalog.clone())) as Arc<dyn ToolProvider>
+            }),
             BuiltInToolName::ManifestProposePatch => Some(Arc::new(
                 ManifestPatchProposalTool::new(self.inner.proposal_store.clone(), catalog.clone()),
             )),
@@ -289,6 +306,10 @@ impl AgentSession {
             return None;
         }
         self.inner.subagent_controller.clone()
+    }
+
+    fn goal_controller(&self) -> Option<Arc<dyn GoalController>> {
+        self.inner.goal_controller.clone()
     }
 }
 
@@ -316,6 +337,11 @@ impl PhaseHook for BuiltInSystemPromptHook {
             cancellation.throw_if_cancelled()?;
             let prompt = resolved_system_prompt_from_inner(&self.inner);
             let mut request = context.request.clone();
+            if !goal_update_tool_available(&self.inner) {
+                request
+                    .tools
+                    .retain(|tool| tool.name != BuiltInToolName::GoalUpdate.as_str());
+            }
             request.messages.insert(
                 0,
                 system_prompt_message(&prompt, context.run_id, context.turn_id),
@@ -323,6 +349,15 @@ impl PhaseHook for BuiltInSystemPromptHook {
             Ok(Some(BeforeModelRequestHookResult { request }))
         })
     }
+}
+
+fn goal_update_tool_available(inner: &AgentSessionInner) -> bool {
+    inner
+        .active_goal
+        .lock()
+        .expect("agent session active goal lock poisoned")
+        .as_ref()
+        .is_some_and(GoalRecord::is_pursuing)
 }
 
 fn resolved_system_prompt_from_inner(inner: &AgentSessionInner) -> ResolvedSystemPrompt {
@@ -443,6 +478,16 @@ impl AgentSessionBuilder {
         self
     }
 
+    pub fn with_goal_controller(mut self, controller: Arc<dyn GoalController>) -> Self {
+        self.goal_controller = Some(controller);
+        self
+    }
+
+    pub(crate) fn with_active_goal(mut self, goal: Option<GoalRecord>) -> Self {
+        self.active_goal = goal;
+        self
+    }
+
     pub(crate) fn with_subagent_depth(mut self, depth: usize) -> Self {
         self.subagent_depth = depth;
         self
@@ -476,6 +521,8 @@ impl AgentSessionBuilder {
                 file_edit_manager,
                 proposal_store: self.proposal_store,
                 subagent_controller: self.subagent_controller,
+                goal_controller: self.goal_controller,
+                active_goal: Mutex::new(self.active_goal),
                 subagent_depth: self.subagent_depth,
                 max_subagent_depth: self.max_subagent_depth,
                 tool_output_overflow_config: self.tool_output_overflow_config,

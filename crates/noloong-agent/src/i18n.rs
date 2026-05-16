@@ -22,11 +22,13 @@ pub enum MessageKey {
     SubagentWaitDescription,
     SubagentResultDescription,
     SubagentListDescription,
+    GoalUpdateDescription,
     FileWriteDescription,
     FileApplyPatchDescription,
     ManifestPatchDescription,
     HostCommandPermissionDescription,
     SubagentPermissionDescription,
+    GoalPermissionDescription,
     FileEditPermissionDescription,
     ManifestPatchPermissionDescription,
     ApprovalPrompt,
@@ -46,11 +48,13 @@ impl MessageKey {
             Self::SubagentWaitDescription,
             Self::SubagentResultDescription,
             Self::SubagentListDescription,
+            Self::GoalUpdateDescription,
             Self::FileWriteDescription,
             Self::FileApplyPatchDescription,
             Self::ManifestPatchDescription,
             Self::HostCommandPermissionDescription,
             Self::SubagentPermissionDescription,
+            Self::GoalPermissionDescription,
             Self::FileEditPermissionDescription,
             Self::ManifestPatchPermissionDescription,
             Self::ApprovalPrompt,
@@ -568,6 +572,9 @@ fn en_message(key: MessageKey) -> &'static str {
         MessageKey::SubagentListDescription => {
             "List direct child subagents for the current session with lightweight status information."
         }
+        MessageKey::GoalUpdateDescription => {
+            "Update the current session goal during a goal audit. Use this tool only for real goal status changes, and provide concise summary and evidence when marking achieved, unmet, or budget_limited."
+        }
         MessageKey::FileWriteDescription => {
             "Edit a text file on the host filesystem. Provide content for a complete file write, or provide oldString and newString for an exact replacement; replaceAll controls whether every match is replaced."
         }
@@ -592,6 +599,9 @@ fn en_message(key: MessageKey) -> &'static str {
         }
         MessageKey::SubagentPermissionDescription => {
             "Spawn and inspect direct child subagents for the current session."
+        }
+        MessageKey::GoalPermissionDescription => {
+            "Update the active goal record for the current session."
         }
         MessageKey::FileEditPermissionDescription => {
             "Modify the host filesystem through file editing tools, including writing, replacing, moving, or deleting paths."
@@ -634,6 +644,9 @@ fn zh_message(key: MessageKey) -> &'static str {
             "读取一个直接子 agent 的真实当前状态和最终 assistant 输出，不等待。"
         }
         MessageKey::SubagentListDescription => "列出当前 session 的直接子 agent 及轻量状态信息。",
+        MessageKey::GoalUpdateDescription => {
+            "在 goal 审计中更新当前 session 的目标状态。只在目标状态确实发生变化时使用，并在标记 achieved、unmet 或 budget_limited 时给出简明 summary 和 evidence。"
+        }
         MessageKey::FileWriteDescription => {
             "编辑宿主机文件系统中的文本文件。提供 content 表示完整写入文件；或提供 oldString 和 newString 表示精确替换，replaceAll 控制是否替换所有匹配项。"
         }
@@ -657,6 +670,7 @@ fn zh_message(key: MessageKey) -> &'static str {
             "启动和控制宿主机进程，包括读取输出、写入 stdin、等待、列出或终止 job。"
         }
         MessageKey::SubagentPermissionDescription => "为当前 session 创建并查看直接子 agent。",
+        MessageKey::GoalPermissionDescription => "更新当前 session 的活动 goal 记录。",
         MessageKey::FileEditPermissionDescription => {
             "通过文件编辑工具修改宿主机文件系统，包括写入、替换、移动或删除路径。"
         }

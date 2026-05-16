@@ -376,7 +376,8 @@ impl ModelProvider for ChatCompletionsProvider {
                     MediaKind::Custom(_) => LocalFileUriMediaMaterialization::Leave,
                 })
                 .await?;
-            let tool_names = ProviderToolNameCodec::new(&request.tools);
+            let tool_names =
+                ProviderToolNameCodec::new_with_message_history(&request.tools, &request.messages);
             let payload = build_chat_payload(&self.config, &tool_names, &request)?;
             let stream_id = format!("chat-completions-{}-{}", request.run_id, request.turn_id);
 

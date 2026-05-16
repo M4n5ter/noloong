@@ -1,6 +1,9 @@
 use noloong_agent::{
-    AgentManifest, AgentSession, AgentSystemPrompt, BuiltInToolName, ManifestPatch,
-    SystemPromptAddition,
+    AUTOMATION_SESSION_METADATA_KEY, AUTOMATION_SYSTEM_PROMPT_ADDITION_ID, AgentManifest,
+    AgentSession, AgentSessionRegistryOptions, AgentSystemPrompt, AutomationCreateRequest,
+    AutomationPromptInput, AutomationRecord, AutomationTarget, AutomationTimeSchedule,
+    AutomationTrigger, BuiltInToolName, GOAL_AUDIT_SOURCE_TYPE, GoalRecord, GoalSetRequest,
+    ManifestPatch, SystemPromptAddition,
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
         AgentSessionDeleteOptions, AgentSessionListFilter, AgentSessionQueueSnapshot,
@@ -13,9 +16,10 @@ use noloong_agent::{
 };
 use noloong_agent_core::{
     AgentCoreError, AgentMessage, AgentRuntime, AgentState, BoxFuture, CancellationToken,
-    EventStore, InMemoryEventStore, ModelProvider, ModelRequest, ModelStreamEvent, ModelStreamSink,
-    QueueMode, RunStatus, StopReason, ToolApprovalRequest, ToolApprovalRequestSpec,
-    ToolApprovalResolution, ToolCall, ToolPermissionDecision, ToolPermissionOutcome, ToolRequest,
+    ContentBlock, EventStore, InMemoryEventStore, ModelProvider, ModelRequest, ModelStreamEvent,
+    ModelStreamSink, QueueMode, RunStatus, StopReason, ToolApprovalRequest,
+    ToolApprovalRequestSpec, ToolApprovalResolution, ToolCall, ToolPermissionDecision,
+    ToolPermissionOutcome, ToolRequest,
 };
 use serde_json::Map;
 use serde_json::json;
@@ -1048,6 +1052,366 @@ async fn interaction_registry_subagent_result_rejects_non_child_sessions() {
 }
 
 #[tokio::test]
+async fn interaction_registry_goal_audit_runs_after_turn_and_mounts_tool() {
+    let model = Arc::new(CapturingToolRequestModel::default());
+    let registry = AgentSessionRegistry::new(runtime_tool_profile("default", model.clone()))
+        .expect("registry should build");
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("goal-session".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .set_goal(GoalSetRequest {
+            session_id: "goal-session".into(),
+            objective: "finish goal audit".into(),
+            token_budget: None,
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    registry
+        .get("goal-session")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .prompt("work")
+        .await
+        .unwrap();
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert_tool_names_include(&requests[0], &[BuiltInToolName::GoalUpdate.as_str()]);
+    assert!(requests[1].messages.iter().any(|message| {
+        message
+            .metadata
+            .get("source")
+            .and_then(|source| source.get("type"))
+            .is_some_and(|source_type| source_type == GOAL_AUDIT_SOURCE_TYPE)
+    }));
+    let goal = registry.get_goal("goal-session").await.unwrap().unwrap();
+    assert!(!goal.last_audit.unwrap().pending);
+}
+
+#[tokio::test]
+async fn interaction_registry_goal_tool_not_mounted_without_goal() {
+    let model = Arc::new(CapturingToolRequestModel::default());
+    let registry = AgentSessionRegistry::new(runtime_tool_profile("default", model.clone()))
+        .expect("registry should build");
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("plain-session".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+
+    registry
+        .get("plain-session")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .prompt("work")
+        .await
+        .unwrap();
+
+    assert_tool_names_exclude(
+        &model.requests()[0],
+        &[BuiltInToolName::GoalUpdate.as_str()],
+    );
+}
+
+#[tokio::test]
+async fn interaction_registry_fires_automation_to_existing_session() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("automation-target".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-existing".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "automation-target".into(),
+            },
+            trigger: once_trigger(current_unix_ms_for_test() + 60_000),
+            prompt: AutomationPromptInput::Text {
+                text: "automation work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    let automation = registry
+        .fire_automation("automation-existing")
+        .await
+        .unwrap();
+    let target = registry
+        .get_descriptor("automation-target")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(automation.last_fired_at_ms.is_some());
+    assert_eq!(target.status, InteractionSessionStatus::Completed);
+    assert_eq!(
+        target.state.messages[0].metadata["source"]["type"],
+        "automation"
+    );
+    assert!(matches!(
+        &target.state.messages[0].content[0],
+        ContentBlock::Text { text } if text.contains("Automation `automation-existing` fired")
+    ));
+}
+
+#[tokio::test]
+async fn interaction_registry_fires_automation_to_busy_session_as_steering() {
+    let registry = AgentSessionRegistry::new(blocking_profile("blocking")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("busy-target".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let registered = registry.get("busy-target").await.unwrap().unwrap();
+    let agent = registered.agent().clone();
+    let run = tokio::spawn(async move { agent.prompt("block").await });
+    wait_until_status(&registry, "busy-target", InteractionSessionStatus::Running).await;
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-busy".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "busy-target".into(),
+            },
+            trigger: once_trigger(current_unix_ms_for_test() + 60_000),
+            prompt: AutomationPromptInput::Text {
+                text: "automation observation".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    registry.fire_automation("automation-busy").await.unwrap();
+    let queued = registry
+        .get("busy-target")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .queued_steering_messages();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].message.metadata["source"]["type"], "automation");
+
+    registry
+        .delete_session(
+            "busy-target",
+            AgentSessionDeleteOptions { force_abort: true },
+        )
+        .await
+        .unwrap();
+    let _ = run.await.unwrap();
+}
+
+#[tokio::test]
+async fn interaction_registry_creates_pure_automation_session() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-new-session".into()),
+            target: AutomationTarget::NewSession {
+                session_id: None,
+                profile_id: None,
+            },
+            trigger: once_trigger(current_unix_ms_for_test() + 60_000),
+            prompt: AutomationPromptInput::Text {
+                text: "automation work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    let automation = registry
+        .fire_automation("automation-new-session")
+        .await
+        .unwrap();
+    let session_id = automation
+        .target
+        .session_id()
+        .expect("automation target should be materialized")
+        .to_owned();
+    let descriptor = registry
+        .get_descriptor(&session_id)
+        .await
+        .unwrap()
+        .expect("automation session should exist");
+
+    assert_eq!(
+        descriptor.metadata[AUTOMATION_SESSION_METADATA_KEY]["automationId"],
+        "automation-new-session"
+    );
+    assert!(
+        descriptor
+            .manifest
+            .system_prompt
+            .additions()
+            .iter()
+            .any(|addition| addition.id == AUTOMATION_SYSTEM_PROMPT_ADDITION_ID)
+    );
+}
+
+#[tokio::test]
+async fn interaction_registry_time_runner_fires_due_automation() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("runner-target".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-runner".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "runner-target".into(),
+            },
+            trigger: once_trigger(current_unix_ms_for_test() + 20),
+            prompt: AutomationPromptInput::Text {
+                text: "runner work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    for _ in 0..100 {
+        let automation = registry
+            .get_automation("automation-runner")
+            .await
+            .unwrap()
+            .unwrap();
+        if automation.last_fired_at_ms.is_some() {
+            assert_eq!(
+                automation.status,
+                noloong_agent::AutomationStatus::Completed
+            );
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    panic!("automation runner did not fire due automation");
+}
+
+#[tokio::test]
+async fn interaction_registry_can_disable_automation_runner() {
+    let registry = AgentSessionRegistry::with_store_and_options(
+        "default",
+        vec![text_profile("default")],
+        Arc::new(InMemoryAgentSessionRegistryStore::default())
+            as Arc<dyn AgentSessionRegistryStore>,
+        AgentSessionRegistryOptions {
+            automation_runner_enabled: false,
+        },
+    )
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("runner-disabled-target".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-runner-disabled".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "runner-disabled-target".into(),
+            },
+            trigger: once_trigger(current_unix_ms_for_test()),
+            prompt: AutomationPromptInput::Text {
+                text: "runner disabled work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(50)).await;
+
+    let automation = registry
+        .get_automation("automation-runner-disabled")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(automation.last_fired_at_ms.is_none());
+}
+
+#[tokio::test]
+async fn interaction_registry_rejects_concurrent_automation_fire() {
+    let registry = AgentSessionRegistry::new(blocking_profile("blocking")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("double-fire-target".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-double-fire".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "double-fire-target".into(),
+            },
+            trigger: once_trigger(current_unix_ms_for_test() + 60_000),
+            prompt: AutomationPromptInput::Text {
+                text: "blocking automation".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+    let first_registry = registry.clone();
+    let first_fire = tokio::spawn(async move {
+        first_registry
+            .fire_automation("automation-double-fire")
+            .await
+    });
+    wait_until_status(
+        &registry,
+        "double-fire-target",
+        InteractionSessionStatus::Running,
+    )
+    .await;
+
+    let error = registry
+        .fire_automation("automation-double-fire")
+        .await
+        .expect_err("concurrent fire should be rejected");
+    assert_eq!(error.code, INTERACTION_ERROR_BUSY);
+
+    registry
+        .delete_session(
+            "double-fire-target",
+            AgentSessionDeleteOptions { force_abort: true },
+        )
+        .await
+        .unwrap();
+    first_fire.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn interaction_registry_requires_force_to_delete_running_session() {
     let registry = AgentSessionRegistry::new(blocking_profile("blocking")).unwrap();
     registry
@@ -1096,6 +1460,22 @@ async fn wait_until_status(
         sleep(Duration::from_millis(10)).await;
     }
     panic!("session did not reach status {status:?}");
+}
+
+fn once_trigger(once_at_ms: u64) -> AutomationTrigger {
+    AutomationTrigger::Time {
+        schedule: AutomationTimeSchedule {
+            once_at_ms: Some(once_at_ms),
+            interval_seconds: None,
+        },
+    }
+}
+
+fn current_unix_ms_for_test() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn text_profile(profile_id: &str) -> Arc<dyn AgentRuntimeProfile> {
@@ -1323,6 +1703,45 @@ impl AgentSessionRegistryStore for CountingSaveStore {
     fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
         self.inner.list()
     }
+
+    fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()> {
+        self.inner.save_goal(goal)
+    }
+
+    fn get_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<GoalRecord>> {
+        self.inner.get_goal(session_id)
+    }
+
+    fn list_goals<'a>(&'a self) -> InteractionFuture<'a, Vec<GoalRecord>> {
+        self.inner.list_goals()
+    }
+
+    fn remove_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()> {
+        self.inner.remove_goal(session_id)
+    }
+
+    fn insert_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        self.inner.insert_automation(automation)
+    }
+
+    fn save_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        self.inner.save_automation(automation)
+    }
+
+    fn get_automation<'a>(
+        &'a self,
+        automation_id: &'a str,
+    ) -> InteractionFuture<'a, Option<AutomationRecord>> {
+        self.inner.get_automation(automation_id)
+    }
+
+    fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>> {
+        self.inner.list_automations()
+    }
+
+    fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()> {
+        self.inner.remove_automation(automation_id)
+    }
 }
 
 #[derive(Default)]
@@ -1361,6 +1780,45 @@ impl AgentSessionRegistryStore for FailingSaveStore {
 
     fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
         self.inner.list()
+    }
+
+    fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()> {
+        self.inner.save_goal(goal)
+    }
+
+    fn get_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<GoalRecord>> {
+        self.inner.get_goal(session_id)
+    }
+
+    fn list_goals<'a>(&'a self) -> InteractionFuture<'a, Vec<GoalRecord>> {
+        self.inner.list_goals()
+    }
+
+    fn remove_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()> {
+        self.inner.remove_goal(session_id)
+    }
+
+    fn insert_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        self.inner.insert_automation(automation)
+    }
+
+    fn save_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        self.inner.save_automation(automation)
+    }
+
+    fn get_automation<'a>(
+        &'a self,
+        automation_id: &'a str,
+    ) -> InteractionFuture<'a, Option<AutomationRecord>> {
+        self.inner.get_automation(automation_id)
+    }
+
+    fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>> {
+        self.inner.list_automations()
+    }
+
+    fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()> {
+        self.inner.remove_automation(automation_id)
     }
 }
 

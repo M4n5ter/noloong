@@ -1,5 +1,7 @@
 use super::{
-    AgentSessionRecord, AgentSessionRegistryStore, duplicate_session_error, missing_session_error,
+    AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, GoalRecord,
+    duplicate_automation_error, duplicate_session_error, missing_automation_error,
+    missing_session_error,
 };
 use crate::interaction::InteractionFuture;
 use std::{
@@ -10,6 +12,8 @@ use std::{
 #[derive(Clone, Default)]
 pub struct InMemoryAgentSessionRegistryStore {
     records: Arc<Mutex<BTreeMap<String, AgentSessionRecord>>>,
+    goals: Arc<Mutex<BTreeMap<String, GoalRecord>>>,
+    automations: Arc<Mutex<BTreeMap<String, AutomationRecord>>>,
 }
 
 impl AgentSessionRegistryStore for InMemoryAgentSessionRegistryStore {
@@ -71,6 +75,113 @@ impl AgentSessionRegistryStore for InMemoryAgentSessionRegistryStore {
                 .values()
                 .cloned()
                 .collect())
+        })
+    }
+
+    fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            self.goals
+                .lock()
+                .expect("interaction goal store lock poisoned")
+                .insert(goal.session_id.clone(), goal);
+            Ok(())
+        })
+    }
+
+    fn get_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<GoalRecord>> {
+        Box::pin(async move {
+            Ok(self
+                .goals
+                .lock()
+                .expect("interaction goal store lock poisoned")
+                .get(session_id)
+                .cloned())
+        })
+    }
+
+    fn list_goals<'a>(&'a self) -> InteractionFuture<'a, Vec<GoalRecord>> {
+        Box::pin(async move {
+            Ok(self
+                .goals
+                .lock()
+                .expect("interaction goal store lock poisoned")
+                .values()
+                .cloned()
+                .collect())
+        })
+    }
+
+    fn remove_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            self.goals
+                .lock()
+                .expect("interaction goal store lock poisoned")
+                .remove(session_id);
+            Ok(())
+        })
+    }
+
+    fn insert_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            let mut automations = self
+                .automations
+                .lock()
+                .expect("interaction automation store lock poisoned");
+            if automations.contains_key(&automation.automation_id) {
+                return Err(duplicate_automation_error(&automation.automation_id));
+            }
+            automations.insert(automation.automation_id.clone(), automation);
+            Ok(())
+        })
+    }
+
+    fn save_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            let mut automations = self
+                .automations
+                .lock()
+                .expect("interaction automation store lock poisoned");
+            if !automations.contains_key(&automation.automation_id) {
+                return Err(missing_automation_error(&automation.automation_id));
+            }
+            automations.insert(automation.automation_id.clone(), automation);
+            Ok(())
+        })
+    }
+
+    fn get_automation<'a>(
+        &'a self,
+        automation_id: &'a str,
+    ) -> InteractionFuture<'a, Option<AutomationRecord>> {
+        Box::pin(async move {
+            Ok(self
+                .automations
+                .lock()
+                .expect("interaction automation store lock poisoned")
+                .get(automation_id)
+                .cloned())
+        })
+    }
+
+    fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>> {
+        Box::pin(async move {
+            Ok(self
+                .automations
+                .lock()
+                .expect("interaction automation store lock poisoned")
+                .values()
+                .cloned()
+                .collect())
+        })
+    }
+
+    fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            self.automations
+                .lock()
+                .expect("interaction automation store lock poisoned")
+                .remove(automation_id);
+            Ok(())
         })
     }
 }

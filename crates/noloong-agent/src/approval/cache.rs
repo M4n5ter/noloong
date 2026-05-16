@@ -82,7 +82,8 @@ pub(super) fn approval_cache_key_for_tool_call(tool_call: &ToolCall) -> Option<A
         | BuiltInToolName::SubagentSpawn
         | BuiltInToolName::SubagentWait
         | BuiltInToolName::SubagentResult
-        | BuiltInToolName::SubagentList => None,
+        | BuiltInToolName::SubagentList
+        | BuiltInToolName::GoalUpdate => None,
     }
 }
 

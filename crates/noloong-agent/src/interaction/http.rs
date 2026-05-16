@@ -176,6 +176,7 @@ async fn serve_jsonrpc_websocket<H>(socket: WebSocket, state: InteractionHttpSta
 where
     H: JsonRpcHandler + Clone + Send + Sync + 'static,
 {
+    let handler = state.handler.connection_handler();
     let (sender, mut receiver) = socket.split();
     let (outbound_sender, outbound_receiver, notifier) =
         jsonrpc_outbound_channel(state.config.outbound_buffer);
@@ -197,8 +198,7 @@ where
                         continue;
                     }
                 };
-                let output =
-                    dispatch_jsonrpc_request(&state.handler, request, notifier.clone()).await;
+                let output = dispatch_jsonrpc_request(&handler, request, notifier.clone()).await;
                 if send_response(&outbound_sender, output.response).is_err() {
                     break;
                 }

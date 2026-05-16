@@ -156,7 +156,8 @@ pub(super) fn classify_built_in_tool(
         | BuiltInToolName::SubagentSpawn
         | BuiltInToolName::SubagentWait
         | BuiltInToolName::SubagentResult
-        | BuiltInToolName::SubagentList => ApprovalClassification::allow(
+        | BuiltInToolName::SubagentList
+        | BuiltInToolName::GoalUpdate => ApprovalClassification::allow(
             "built_in_tool",
             "allowed built-in host lifecycle operation",
             cache_key,

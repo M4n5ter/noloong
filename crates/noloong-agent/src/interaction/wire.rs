@@ -16,6 +16,8 @@ pub enum InteractionAuthorityCapability {
     ManifestApply,
     ProcessControl,
     SubagentSpawn,
+    GoalManage,
+    AutomationManage,
     SessionDelete,
 }
 
@@ -28,6 +30,8 @@ impl InteractionAuthorityCapability {
             Self::ManifestApply => "manifest.apply",
             Self::ProcessControl => "process.control",
             Self::SubagentSpawn => "subagent.spawn",
+            Self::GoalManage => "goal.manage",
+            Self::AutomationManage => "automation.manage",
             Self::SessionDelete => "session.delete",
         }
     }
@@ -40,6 +44,8 @@ impl InteractionAuthorityCapability {
             "manifest.apply" => Ok(Self::ManifestApply),
             "process.control" => Ok(Self::ProcessControl),
             "subagent.spawn" => Ok(Self::SubagentSpawn),
+            "goal.manage" => Ok(Self::GoalManage),
+            "automation.manage" => Ok(Self::AutomationManage),
             "session.delete" => Ok(Self::SessionDelete),
             other => Err(InteractionError::invalid_params(format!(
                 "unknown authority capability: {other}"
@@ -55,6 +61,8 @@ impl InteractionAuthorityCapability {
             Self::ManifestApply,
             Self::ProcessControl,
             Self::SubagentSpawn,
+            Self::GoalManage,
+            Self::AutomationManage,
             Self::SessionDelete,
         ]
         .into_iter()

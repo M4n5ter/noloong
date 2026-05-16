@@ -1,4 +1,4 @@
-use super::AgentSessionRecord;
+use super::{AgentSessionRecord, AutomationRecord, GoalRecord};
 use crate::interaction::{InteractionError, InteractionFuture};
 
 pub trait AgentSessionRegistryStore: Send + Sync {
@@ -16,6 +16,27 @@ pub trait AgentSessionRegistryStore: Send + Sync {
     fn get<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<AgentSessionRecord>>;
 
     fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>>;
+
+    fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()>;
+
+    fn get_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<GoalRecord>>;
+
+    fn list_goals<'a>(&'a self) -> InteractionFuture<'a, Vec<GoalRecord>>;
+
+    fn remove_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()>;
+
+    fn insert_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()>;
+
+    fn save_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()>;
+
+    fn get_automation<'a>(
+        &'a self,
+        automation_id: &'a str,
+    ) -> InteractionFuture<'a, Option<AutomationRecord>>;
+
+    fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>>;
+
+    fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()>;
 }
 
 pub(in crate::interaction) fn duplicate_session_error(session_id: &str) -> InteractionError {
@@ -24,4 +45,12 @@ pub(in crate::interaction) fn duplicate_session_error(session_id: &str) -> Inter
 
 pub(in crate::interaction) fn missing_session_error(session_id: &str) -> InteractionError {
     InteractionError::not_found(format!("session not found: {session_id}"))
+}
+
+pub(in crate::interaction) fn duplicate_automation_error(automation_id: &str) -> InteractionError {
+    InteractionError::invalid_params(format!("automation already exists: {automation_id}"))
+}
+
+pub(in crate::interaction) fn missing_automation_error(automation_id: &str) -> InteractionError {
+    InteractionError::not_found(format!("automation not found: {automation_id}"))
 }

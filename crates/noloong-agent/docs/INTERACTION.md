@@ -53,7 +53,7 @@ For ChatGPT subscription profiles, credentials still stay in the Rust host. Run 
 
 ## Initialize
 
-The client starts with `initialize` and requests authority plus UX capabilities. The server intersects those requests with host policy.
+The client starts with `initialize` and requests authority plus UX capabilities. The server intersects those requests with host policy. WebSocket grants are scoped to that socket, so a debug HTTP client cannot change an already connected bridge's authority or UX grant.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"telegram-bridge","requestedAuthority":["agent.run","agent.queue","approval.resolve"],"requestedUx":{"displayEvents":true,"streamText":true,"editMessage":true,"markdown":true,"maxMessageBytes":8192}}}
@@ -75,9 +75,11 @@ Authority capabilities:
 | `manifest.apply` | `manifest/proposals/approve`, `manifest/apply_approved` |
 | `process.control` | `process/wait`, `process/write`, `process/terminate` |
 | `subagent.spawn` | `subagent/spawn` |
+| `goal.manage` | `goal/set`, `goal/pause`, `goal/resume`, `goal/clear`, `goal/update` |
+| `automation.manage` | `automation/create`, `automation/update`, `automation/delete`, `automation/fire` |
 | `session.delete` | `session/delete` |
 
-Read-only methods such as `profile/list`, `session/list`, `session/get`, `agent/state`, `queue/list`, `approval/list`, `manifest/get`, `manifest/system_prompt/get`, `manifest/proposals/list`, `process/list`, and `process/read` do not require a sensitive authority capability.
+Read-only methods such as `profile/list`, `session/list`, `session/get`, `goal/get`, `automation/get`, `automation/list`, `agent/state`, `queue/list`, `approval/list`, `manifest/get`, `manifest/system_prompt/get`, `manifest/proposals/list`, `process/list`, and `process/read` do not require a sensitive authority capability.
 
 ## Sessions and Profiles
 
@@ -127,6 +129,43 @@ Typical model-callable flow:
 ```
 
 The final output returned by `wait` and `result` is the child session's last assistant message plus `finalText`, which concatenates text blocks while preserving the full message JSON. Access is limited to direct children of the current session.
+
+## Goals
+
+Each session can have one active goal. Setting a new goal replaces the prior active goal. A `TurnCompleted` listener injects one `goal_audit` steering observation after normal turns while the goal is pursuing; there is no scheduled goal audit. During an audit turn, the model can explicitly update the goal through `agent.goal.update`. Free-text assistant output alone does not change goal status.
+
+```json
+{"jsonrpc":"2.0","id":20,"method":"goal/set","params":{"sessionId":"root","objective":"Finish the migration and verify tests.","tokenBudget":200000}}
+{"jsonrpc":"2.0","id":21,"method":"goal/get","params":{"sessionId":"root"}}
+{"jsonrpc":"2.0","id":22,"method":"goal/pause","params":{"sessionId":"root"}}
+{"jsonrpc":"2.0","id":23,"method":"goal/resume","params":{"sessionId":"root"}}
+{"jsonrpc":"2.0","id":24,"method":"goal/update","params":{"sessionId":"root","status":"achieved","summary":"Migration completed.","evidence":"Relevant registry and control tests passed."}}
+{"jsonrpc":"2.0","id":25,"method":"goal/clear","params":{"sessionId":"root"}}
+```
+
+Model-callable audit update:
+
+```json
+{"tool":"agent.goal.update","arguments":{"status":"budget_limited","summary":"Token budget was exhausted before verification completed.","evidence":"The final run stopped before the requested test phase."}}
+```
+
+## Automations
+
+Automation is trigger-agnostic. The MVP trigger kind is `time` with either `onceAtMs` or `intervalSeconds`; future webhook or external triggers can reuse the same delivery path. Existing idle/completed sessions receive automation prompts as direct `agent/prompt` input. Existing running/paused sessions receive them as steering observations. Dedicated automation sessions are created with metadata and a system prompt addition explaining that they are automation tasks that may be woken by triggers.
+
+Create and manually fire an automation for an existing session:
+
+```json
+{"jsonrpc":"2.0","id":30,"method":"automation/create","params":{"automationId":"nightly-summary","target":{"type":"existing_session","sessionId":"root"},"trigger":{"type":"time","schedule":{"intervalSeconds":86400}},"prompt":{"type":"text","text":"Summarize progress since the previous automation run."}}}
+{"jsonrpc":"2.0","id":31,"method":"automation/list","params":{"status":"active"}}
+{"jsonrpc":"2.0","id":32,"method":"automation/fire","params":{"automationId":"nightly-summary"}}
+```
+
+Create a pure automation session on first fire:
+
+```json
+{"jsonrpc":"2.0","id":33,"method":"automation/create","params":{"target":{"type":"new_session","profileId":"default"},"trigger":{"type":"time","schedule":{"onceAtMs":4102444800000}},"prompt":{"type":"text","text":"Run the one-shot maintenance task."}}}
+```
 
 ## Agent Runs and Queues
 

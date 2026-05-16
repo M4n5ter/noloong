@@ -557,7 +557,8 @@ impl ModelProvider for ResponsesApiProvider {
             })
             .await?;
             let render_config = ResponsesApiRequestRenderConfig::from(&self.config);
-            let tool_names = ProviderToolNameCodec::new(&request.tools);
+            let tool_names =
+                ProviderToolNameCodec::new_with_message_history(&request.tools, &request.messages);
             let payload = render_responses_api_request_with_tool_names(
                 &render_config,
                 &tool_names,
@@ -633,7 +634,8 @@ pub fn render_responses_api_request(
     config: &ResponsesApiRequestRenderConfig,
     request: &ModelRequest,
 ) -> Result<Value> {
-    let tool_names = ProviderToolNameCodec::new(&request.tools);
+    let tool_names =
+        ProviderToolNameCodec::new_with_message_history(&request.tools, &request.messages);
     render_responses_api_request_with_tool_names(config, &tool_names, request)
 }
 

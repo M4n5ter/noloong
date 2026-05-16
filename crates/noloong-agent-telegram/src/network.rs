@@ -192,7 +192,7 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn default_seed_fallback_ips() -> Vec<String> {
-    vec!["149.154.167.220".into(), "91.108.56.130".into()]
+    Vec::new()
 }
 
 fn use_env_proxy(config: &TelegramNetworkConfig) -> bool {
@@ -261,6 +261,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn network_defaults_to_system_dns_without_static_fallback() {
+        let config = TelegramNetworkConfig::default();
+
+        assert_eq!(
+            network_resolution_mode(&config),
+            TelegramNetworkResolutionMode::SystemDns
+        );
+        assert!(config.seed_fallback_ips.is_empty());
+    }
+
     #[tokio::test]
     async fn network_discovers_doh_fallback_ips() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -297,6 +308,20 @@ mod tests {
 
         task.abort();
         assert_eq!(addrs, vec!["149.154.167.220:443".parse().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn network_default_discovers_no_fallback_addrs() {
+        let config = TelegramNetworkConfig {
+            disable_env_proxy: true,
+            ..Default::default()
+        };
+
+        let addrs = discover_fallback_addrs(&config, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert!(addrs.is_empty());
     }
 
     #[tokio::test]

@@ -1,485 +1,353 @@
-# Implementation Plan: Telegram Agent Cockpit
-
-> 状态：Phase 1 的 Bot API、配置和 checkpoint 底座已完成；文件下载执行期错误映射会在 Phase 2 输入处理中补齐。后续继续推进多模态输入、native 输出和 cockpit UI。目标是把 `noloong-agent-telegram` 从“文本桥”升级为个人私聊优先的 Telegram-native Agent Cockpit：完整接入 Noloong interaction control plane，支持多模态输入输出、文件流、状态卡、审批卡、任务卡、队列/manifest/subagent/session 操作，并把移动端长任务体验打磨到可长期使用。
+# Implementation Plan: Goal and Trigger-Agnostic Automation
 
 ## Overview
 
-当前 Telegram V1 已支持文本输入、文本 batching、display stream、流式编辑、最终回复、工具状态和 inline approval。短板是体验仍像最小 bridge：没有命令菜单、没有 cockpit 状态面、没有 Telegram 文件/媒体输入输出、没有后台 process 管理、没有 manifest/subagent/session/queue 的 Telegram UI，也没有重启 update checkpoint。第一阶段主场景锁定为个人私聊；群组/topic 继续保持现有 mention/thread 基础能力，但不做多人协作审批优化。
+Build two separate host-level capabilities in `noloong-agent`: **Goal** tracks one long-running objective for a session and audits it only at agent turn boundaries; **Automation** stores trigger-driven prompts and delivers them to target sessions when triggers fire. Automation must not be modeled as "cron only": the MVP implements a `time` trigger, but the data model and runner are trigger-agnostic so future webhook or external event triggers can reuse the same delivery path.
 
 ## Architecture Decisions
 
-- Telegram bridge 仍是 application-layer interaction client，不进入 `noloong-agent-core`，也不持有 provider credentials。
-- 第一阶段继续使用 long polling；不实现 webhook、Mini App、payments、inline mode、business connection 或 channel 管理。
-- Telegram 初始化请求完整 authority：`agent.run`、`agent.queue`、`approval.resolve`、`manifest.apply`、`process.control`、`subagent.spawn`、`session.delete`；危险操作必须通过 callback confirmation。
-- 文件策略采用 hybrid：小文件 inline base64，大文件下载到受控目录并以 `file://` URI 进入 `MediaBlock`，所有 Telegram `file_id`、MIME、文件名、大小保留到 metadata。
-- 输出优先走 Telegram native media/file API；无法发送 native media 的 provider-only 内容降级为可读卡片。
-- 体验模型采用 Agent Cockpit：聊天仍是主入口，但 commands、inline buttons、状态卡、审批卡、任务卡、文件卡是第一等交互面。
+- Goal and Automation live in `noloong-agent` host/interaction layer, not in `noloong-agent-core`.
+- Each session has at most one active goal. Setting a new goal replaces the previous active goal.
+- Goal audit is turn-end only. There is no scheduled goal audit and no time-based goal wakeup.
+- Goal audit uses the existing steering queue: a `TurnCompleted` listener injects a `goal_audit` observation, allowing the same run loop to continue into an audit turn.
+- Goal status changes are explicit through a model-callable built-in tool and interaction API; free-text assistant output alone must not mark a goal complete.
+- Automation is trigger-agnostic. MVP trigger kind is `time`, with `onceAtMs` and `intervalSeconds`; daily/weekly/cron/webhook are not in MVP.
+- Automation delivery to an existing running/paused session uses steering observation, not follow-up. Idle/completed sessions may be prompted immediately.
+- Pure automation sessions receive a system prompt addition that explains they are automation tasks and may be woken by triggers.
+- Persistence uses the interaction registry store boundary, but goal and automation records are separate from `AgentSessionRecord`.
 
 ## Task List
 
-### Phase 1: Telegram Bot API Foundation
+### Phase 1: Shared Models and Persistence
 
-#### Task 1: Expand Telegram API primitives
+#### Task 1: Define Goal and Automation domain models
 
-**Description:** 扩展 `TelegramApi` 抽象，让 bridge 具备 Telegram-native 的文件、媒体、chat action 和 command menu 能力。此任务只补 Bot API 能力层，不改变业务流。
+**Description:** Add the typed records, enums, metadata keys, and store contracts that all later slices depend on. Keep trigger and target shapes extensible without coupling automation to time schedules.
 
 **Acceptance criteria:**
-- [x] `TelegramApi` 支持 `get_file`、download file bytes、`send_photo`、`send_document`、`send_audio`、`send_voice`、`send_video`、`send_chat_action`、`set_my_commands`。
-- [x] send/media request 支持 `message_thread_id`、caption、reply markup；edit request 保持 Telegram Bot API 原生 `chat_id + message_id` 定位。
-- [x] 新增 `TelegramInputFile`，支持 multipart upload path/bytes 与 Telegram `file_id` reuse。
+- [x] `GoalRecord` supports `sessionId`, `objective`, `status`, optional `tokenBudget`, `lastAudit`, `createdAtMs`, and `updatedAtMs`.
+- [x] `AutomationRecord` supports `automationId`, `status`, `target`, `trigger`, `prompt`, `metadata`, `lastFiredAtMs`, and `nextFireAtMs`.
+- [x] `AutomationTrigger` is a tagged enum with MVP `time`; `AutomationTarget` distinguishes existing session vs new automation session.
+- [x] Shared message metadata constants exist for `source.type = automation` and `source.type = goal_audit`.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram telegram_api`
-- [x] fake API 覆盖 request serde、multipart-free JSON paths、Bot API error fallback。
+- [x] Unit tests cover serde round-trips for goal records, automation records, time triggers, and targets.
+- [x] `cargo test -p noloong-agent goal automation`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/telegram_api.rs`
-- `crates/noloong-agent-telegram/src/polling.rs`
+- `crates/noloong-agent/src/interaction/goal.rs`
+- `crates/noloong-agent/src/interaction/automation.rs`
+- `crates/noloong-agent/src/interaction/store/traits.rs`
 
 **Estimated scope:** M
 
-#### Task 2: Add Telegram bridge file policy and startup update policy
+#### Task 2: Persist Goal and Automation records in registry stores
 
-**Description:** 增加 Telegram 文件生命周期配置和重启 update 处理策略。默认避免重启后误处理旧消息，同时为 media input/output 提供稳定落地目录。
+**Description:** Extend memory, object, SQLite, and Postgres registry stores to persist goal and automation records through the same store abstraction used by session snapshots.
 
 **Acceptance criteria:**
-- [x] `TelegramBridgeConfig` 增加 `file_policy`：inline 上限、最大下载大小、下载目录、保留时长。
-- [x] `TelegramBridgeConfig` 增加 `startup_update_policy`，默认 `skip_pending_without_checkpoint`。
-- [x] CLI/env 能配置下载目录、大小上限、是否跳过 pending updates。
-- [x] 下载目录创建失败、文件过大、未知 MIME 返回可本地化错误。
+- [x] Memory store implements CRUD/list for goals and automations.
+- [x] Object store writes records under stable prefixes such as `goals/` and `automations/`.
+- [x] SQL store persists JSON payload plus indexed identifiers needed for lookup/list: id, session id, status, next fire time.
+- [x] Store errors follow existing `InteractionError` conventions.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram config`
-- [x] `cargo test -p noloong --bin noloong telegram_config`
+- [x] Store tests cover insert/get/list/save/delete for memory, object, SQLite, and Postgres-gated tests.
+- [x] `cargo test -p noloong-agent --test interaction_registry_store_object --test interaction_registry_store_sqlite --test interaction_registry_store_postgres`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/config.rs`
-- `src/main.rs`
+- `crates/noloong-agent/src/interaction/store/memory.rs`
+- `crates/noloong-agent/src/interaction/store/object.rs`
+- `crates/noloong-agent/src/interaction/store/sql.rs`
 
 **Estimated scope:** M
 
-#### Task 3: Persist long-polling offset checkpoints
+### Checkpoint: Persistence Foundation
 
-**Description:** 让 Telegram polling 在正常处理 update 后记录 offset，重启时从 checkpoint 恢复；无 checkpoint 时按 startup policy 处理 pending updates。
+- [x] Domain serde tests pass.
+- [x] Registry store tests pass for enabled store backends.
+- [x] No changes required in `noloong-agent-core`.
+
+### Phase 2: Goal Lifecycle and Turn-End Audit
+
+#### Task 3: Add Goal management APIs to interaction control
+
+**Description:** Expose session-scoped goal lifecycle operations through JSON-RPC. This is the management surface that UI clients and future Telegram commands will wrap.
 
 **Acceptance criteria:**
-- [x] 新增 offset store trait，并提供默认 file-backed implementation。
-- [x] `TelegramPoller` 启动时可加载 initial offset。
-- [x] 每个 update 成功处理后保存 `update_id + 1`。
-- [x] `skip_pending_without_checkpoint` 会先 consume 当前 pending updates，再开始处理新消息。
+- [x] Add authority capability `goal.manage`.
+- [x] Add methods `goal/set`, `goal/get`, `goal/pause`, `goal/resume`, `goal/clear`, and `goal/update`.
+- [x] `goal/set` creates or replaces the active goal for a session.
+- [x] Paused, cleared, achieved, unmet, and budget-limited goals are not considered pursuing.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram polling`
-- [x] fake poller 覆盖重启不重复处理、handler 失败不推进 offset。
+- [x] Interaction tests cover create, replace, read, pause, resume, clear, update, and missing session errors.
+- [x] `cargo test -p noloong-agent --test interaction_control goal`
 
-**Dependencies:** Task 2
+**Dependencies:** Tasks 1-2
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/polling.rs`
-- `crates/noloong-agent-telegram/src/config.rs`
+- `crates/noloong-agent/src/interaction/control.rs`
+- `crates/noloong-agent/src/interaction/wire.rs`
+- `crates/noloong-agent/tests/interaction_control.rs`
 
 **Estimated scope:** M
 
-### Checkpoint: Bot API Foundation
+#### Task 4: Add model-callable Goal update tool
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent-telegram`
-- [x] `cargo test -p noloong --bin noloong`
-
-### Phase 2: Multi-modal Input
-
-#### Task 4: Parse rich Telegram updates into bridge input
-
-**Description:** 将 `TelegramUpdate` 从 text-only 扩展到 photo/document/audio/voice/video/caption，并保留 chat/thread/user/reply metadata。命令消息仍单独路由，不进入文本 batching。
+**Description:** Add a built-in host tool so the agent can explicitly update the current session's goal status during an audit turn. This avoids parsing free-form assistant text to decide whether a goal is complete.
 
 **Acceptance criteria:**
-- [x] `TelegramMessage` 反序列化 photo、document、audio、voice、video、caption、entities。
-- [x] 新增 `TelegramInboundMessage`，可表达 text + media attachments。
-- [x] 支持 caption 作为文本块，附件按 Telegram 顺序转入 media attachment model。
-- [x] command detection 支持 `/cmd` 和 `/cmd@bot_username`。
+- [x] Add built-in tool `agent.goal.update`, mounted only when the session has a pursuing goal and a goal controller is available.
+- [x] Tool input supports `status: pursuing|achieved|unmet|budget_limited`, plus optional `summary` and `evidence`.
+- [x] Tool can update only the current session's active goal.
+- [x] Tool output returns the updated goal record as JSON.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram input`
-- [x] serde fixtures 覆盖图片、文档、语音、视频、caption、bot mention。
+- [x] Tool unit tests cover valid update, invalid status, no active goal, and cross-session denial.
+- [x] `cargo test -p noloong-agent --test goal_tools`
 
-**Dependencies:** Task 1
+**Dependencies:** Task 3
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/polling.rs`
-- `crates/noloong-agent-telegram/src/input.rs`
-- `crates/noloong-agent-telegram/src/access.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/src/tools/goal.rs`
+- `crates/noloong-agent/tests/goal_tools.rs`
 
 **Estimated scope:** M
 
-#### Task 5: Convert Telegram attachments to Agent media
+#### Task 5: Inject turn-end Goal audit steering
 
-**Description:** 实现 Telegram attachment resolver：调用 `get_file` / download，根据 file policy 生成 `ContentBlock::Media`，并把 Telegram file metadata 写入 `MediaBlock.metadata`。
+**Description:** Wire goal audit into session runtime events. When a pursuing goal exists and a turn completes, inject a steering observation that asks the agent to audit progress and call `agent.goal.update` if the goal status changed.
 
 **Acceptance criteria:**
-- [x] 小文件按 MIME/kind 生成 inline base64 media。
-- [x] 大文件写入受控目录，并生成 `MediaSource::Uri { uri: "file://..." }`。
-- [x] 图片映射 `MediaKind::Image`，语音/音频映射 `Audio`，视频映射 `Video`，其它 document 映射 `File`。
-- [x] 当前 provider 不支持原生音频/语音/视频输入时，Telegram 先发送本地化提醒；若接口支持普通文件输入则降级为文件提交，否则在进入 provider 前本地化拒绝。
-- [x] 超过最大下载大小时生成明确用户可见错误，不创建 agent prompt。
+- [x] `TurnCompleted` for sessions with pursuing goals injects one `goal_audit` steering observation.
+- [x] Audit is skipped for paused, achieved, unmet, budget-limited, or cleared goals.
+- [x] Audit message metadata includes `source.type`, `goalId/sessionId`, and `auditReason: turn_end`.
+- [x] Audit injection does not create a timer and does not wake idle sessions by time.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram media`
-- [x] fake API 覆盖 file_id reuse、下载失败、MIME 缺失、大小超限。
+- [x] Registry/session tests prove a normal turn with a pursuing goal produces an audit turn.
+- [x] Tests prove non-pursuing statuses do not inject audit.
+- [x] `cargo test -p noloong-agent --test interaction_registry goal`
 
-**Dependencies:** Task 2, Task 4
+**Dependencies:** Task 4
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/input.rs`
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/i18n.rs`
+- `crates/noloong-agent/src/interaction/registry.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/interaction_registry.rs`
 
 **Estimated scope:** M
 
-#### Task 6: Prompt with rich AgentMessage
+### Checkpoint: Goal Path
 
-**Description:** 将 `handle_text_message` 升级为 `handle_inbound_message`。idle/completed 走 `agent/prompt`，running/paused 走 `agent/follow_up`，并确保媒体输入不会被文本 batching 破坏顺序。
+- [x] `goal/set` plus one agent run can trigger a goal-audit turn.
+- [x] Agent can update goal status through `agent.goal.update`.
+- [x] No scheduled goal audit exists.
+- [x] `cargo test -p noloong-agent --test interaction_control --test interaction_registry --test goal_tools`
+
+### Phase 3: Automation CRUD and Delivery
+
+#### Task 6: Add Automation management APIs
+
+**Description:** Expose trigger-agnostic automation CRUD through JSON-RPC. The API should describe triggers generically even though MVP only ships `time`.
 
 **Acceptance criteria:**
-- [x] 文本-only 消息继续保持 batching 行为。
-- [x] 带附件消息立即形成一个 `AgentMessage`，不与其它消息合并。
-- [x] running/paused 状态下用户输入进入 follow-up queue。
-- [x] message id 使用稳定 Telegram chat/message id，避免重复提交。
+- [x] Add authority capability `automation.manage`.
+- [x] Add methods `automation/create`, `automation/get`, `automation/list`, `automation/update`, `automation/delete`, and `automation/fire`.
+- [x] `automation/create` validates target session/profile references and computes initial `nextFireAtMs` for `time` triggers.
+- [x] `automation/fire` manually fires any active automation through the same delivery path as trigger fires.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram bridge`
-- [x] fake interaction 覆盖 text-only、caption+media、running follow-up；media resolver 覆盖 media-only block 生成。
+- [x] Interaction tests cover CRUD, manual fire, paused automation behavior, invalid target, and invalid trigger.
+- [x] `cargo test -p noloong-agent --test interaction_control automation`
 
-**Dependencies:** Task 5
+**Dependencies:** Tasks 1-2
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/input.rs`
-- `src/main.rs`
+- `crates/noloong-agent/src/interaction/control.rs`
+- `crates/noloong-agent/src/interaction/automation.rs`
+- `crates/noloong-agent/tests/interaction_control.rs`
 
 **Estimated scope:** M
 
-### Checkpoint: Multi-modal Input
+#### Task 7: Implement Automation delivery semantics
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent-telegram input bridge`
-- [x] Manual smoke：私聊发送图片、文档、语音、视频，Agent 能看到对应 media block。
-
-### Phase 3: Telegram-native Output and Display
-
-#### Task 7: Send assistant media and files natively
-
-**Description:** 扩展 delivery/rendering，将 assistant message 中的 `ContentBlock::Media` 发送为 Telegram 原生 photo/document/audio/video/voice。文本和媒体混合时使用 caption 或相邻消息，保证移动端可读。
+**Description:** Implement the shared delivery path that turns an automation record into a session message. Existing sessions and pure automation sessions must receive different context.
 
 **Acceptance criteria:**
-- [x] inline base64 media 可上传为 Telegram file。
-- [x] `file://` media 可从本地路径上传。
-- [x] provider-only media 无本地数据时渲染为可读 fallback card。
-- [x] 发送失败时降级为文本说明，不丢失最终回复。
+- [x] Existing idle/completed target sessions receive `Agent::prompt(AgentInput::Message)`.
+- [x] Existing running/paused target sessions receive a steering observation and snapshot save.
+- [x] Delivered messages include automation source metadata, automation id, trigger type, and fired timestamp.
+- [x] Missing target sessions fail the fire attempt without corrupting automation state.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram delivery`
-- [x] fake API 覆盖 send_photo/send_document/send_audio/send_video/send_voice、provider-only fallback、media send failure fallback。
+- [x] Tests cover idle prompt, running steering, paused steering, missing session, and metadata shape.
+- [x] `cargo test -p noloong-agent --test automation_delivery`
 
-**Dependencies:** Task 1
+**Dependencies:** Task 6
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/delivery.rs`
-- `crates/noloong-agent-telegram/src/render.rs`
-- `crates/noloong-agent-telegram/src/telegram_api.rs`
+- `crates/noloong-agent/src/interaction/automation.rs`
+- `crates/noloong-agent/src/interaction/registry.rs`
+- `crates/noloong-agent/tests/automation_delivery.rs`
 
 **Estimated scope:** M
 
-#### Task 8: Improve streaming UX with run cards and chat actions
+#### Task 8: Support pure automation sessions
 
-**Description:** 将 display delivery 从“不断编辑一条文本”升级为移动端友好的临时状态层：typing/upload actions、流式预览、最终消息、失败/暂停状态均有稳定 UI；run 成功完成后清理中间状态，只保留最终 assistant 回复。
+**Description:** Let automation create or target a dedicated automation session. These sessions need explicit prompt context saying they are automation tasks that may be woken by triggers.
 
 **Acceptance criteria:**
-- [x] run started 发送 chat action；run paused/failed 才显示状态卡。
-- [x] 文本流按节流编辑预览，最终回复替换或补发。
-- [x] 长回复 split 后保留首尾和 continuation 标识。
-- [x] `send_chat_action` 在长模型运行和文件上传时使用。
-- [x] run completed 后删除 paused/status card，不额外留下“运行已完成”消息。
+- [x] New automation session target can create a session using selected/default profile.
+- [x] Automation session records include metadata marking automation ownership.
+- [x] Automation sessions receive a system prompt addition explaining automation identity and trigger wakeups.
+- [x] Existing non-automation sessions are not given the automation identity prompt.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram display`
-- [x] fake display 覆盖 started/delta/final/failed/paused/chat action。
+- [x] Tests cover session creation, metadata, manifest/system prompt addition, and normal session non-regression.
+- [x] `cargo test -p noloong-agent --test interaction_registry automation_session`
 
 **Dependencies:** Task 7
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/display.rs`
-- `crates/noloong-agent-telegram/src/delivery.rs`
-- `crates/noloong-agent-telegram/src/text.rs`
+- `crates/noloong-agent/src/interaction/registry.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/interaction_registry.rs`
 
 **Estimated scope:** M
 
-#### Task 9: Make tool and approval cards production-grade
+### Checkpoint: Manual Automation
 
-**Description:** 将现有 tool status 和 approval button 打磨为可审计但不污染最终对话的临时卡片：工具参数摘要、权限、reason、过期时间、审批后清理原卡片，并支持 pending approval 列表。
+- [x] Automation CRUD works through interaction JSON-RPC.
+- [x] `automation/fire` works for existing and pure automation sessions.
+- [x] Busy-session delivery uses steering observation, not follow-up.
+- [x] `cargo test -p noloong-agent --test interaction_control --test automation_delivery --test interaction_registry`
+
+### Phase 4: Time Trigger Runner
+
+#### Task 9: Add trigger runner lifecycle
+
+**Description:** Add a host-side runner that scans active automations, fires due triggers, and updates `lastFiredAtMs` / `nextFireAtMs`. The runner is generic over trigger kind even though only `time` can become due in MVP.
 
 **Acceptance criteria:**
-- [x] approval card 显示 tool、参数摘要、permissions、reason、expires_at。
-- [x] allow/deny 后优先删除原审批卡；删除失败时 fallback 为编辑原消息并移除按钮。
-- [x] callback 非授权用户只收到 callback toast，不改变审批状态。
-- [x] `/approvals` 可列出并重新渲染当前 pending approvals。
-- [x] tool started 状态在 tool completed 后删除，不在成功完成后残留中间消息。
+- [x] Runner starts with the interaction registry and can be disabled in tests/config.
+- [x] Runner wakes on nearest `nextFireAtMs`, fires due active automations, and persists updated fire state.
+- [x] Concurrent runner ticks do not double-fire the same automation.
+- [x] Failed fire attempts are recorded in automation metadata or last error without disabling the automation.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram approval`
-- [x] `cargo test -p noloong-agent-telegram display`
-- [x] fake callback 覆盖 allow、deny、expired、unauthorized。
+- [x] Time-controlled tests cover once, interval, paused, failure, and no double-fire.
+- [x] `cargo test -p noloong-agent --test automation_runner`
 
-**Dependencies:** Task 8
+**Dependencies:** Tasks 6-8
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/approval.rs`
-- `crates/noloong-agent-telegram/src/display.rs`
-- `crates/noloong-agent-telegram/src/i18n.rs`
+- `crates/noloong-agent/src/interaction/automation.rs`
+- `crates/noloong-agent/src/interaction/registry.rs`
+- `crates/noloong-agent/tests/automation_runner.rs`
 
 **Estimated scope:** M
 
-### Checkpoint: Native Output
+#### Task 10: Implement MVP time trigger calculations
 
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent-telegram`
-- [x] Manual smoke：模型输出文本、图片/文件、审批请求，Telegram UI 可读且按钮状态正确。
-
-### Phase 4: Agent Cockpit Commands
-
-#### Task 10: Add command parser and command menu registration
-
-**Description:** 新增 Telegram command layer，启动时注册本地化 bot commands，并将命令从普通 prompt 中分离。命令只操作当前 chat 的 active session，除非显式指定 session id。
+**Description:** Implement deterministic calculation for MVP `time` triggers. Keep schedule logic isolated so future daily/weekly/cron/webhook work does not affect delivery.
 
 **Acceptance criteria:**
-- [x] 支持 `/start`、`/help`、`/status`、`/new`、`/switch`、`/sessions`、`/profiles`、`/continue`、`/abort`、`/queue`、`/approvals`、`/processes`、`/process`、`/manifest`、`/subagent`、`/settings`。
-- [x] `set_my_commands` 在 bridge 初始化后执行，按 locale 注册描述。
-- [x] 命令解析支持 `/cmd@bot_username`。
-- [x] 未知命令返回本地化 help，不进入 agent prompt。
+- [x] `onceAtMs` fires once, then becomes completed or inactive.
+- [x] `intervalSeconds` computes next fire from actual fire time, not from process wake time.
+- [x] Invalid schedules are rejected at create/update.
+- [x] Trigger calculation is pure and covered by unit tests.
 
 **Verification:**
-- [x] `cargo test -p noloong-agent-telegram commands`
-- [x] `cargo test -p noloong-agent-telegram input`
-- [x] `cargo test -p noloong telegram_`
-- [x] fake API 验证 command menu payload。
+- [x] Unit tests cover due/not due, next fire, invalid interval, and once completion.
+- [x] `cargo test -p noloong-agent automation_time`
 
-**Dependencies:** Task 1, Task 4
+**Dependencies:** Task 9
 
 **Files likely touched:**
-- `crates/noloong-agent-telegram/src/input.rs`
-- `crates/noloong-agent-telegram/src/i18n.rs`
-- `src/main.rs`
-
-**Estimated scope:** M
-
-#### Task 11: Implement session and profile cockpit
-
-**Description:** 让 Telegram 私聊可管理多个 sessions 与 profiles：创建新会话、切换 active session、查看当前状态、列出历史 sessions，并提供删除确认。
-
-**Acceptance criteria:**
-- [x] `/profiles` 列出 profiles，并可用按钮切换默认 active profile。
-- [x] `/new` 创建新 session 并设为 active。
-- [x] `/sessions` 列出当前 chat 的 sessions，按钮可 switch/delete。
-- [x] `/status` 显示 active session profile、status、queues、manifest summary。
-- [x] session delete 必须二次确认，且 running session 需要 force abort 确认。
-
-**Verification:**
-- [x] `cargo test -p noloong-agent-telegram session`
-- [x] `cargo test -p noloong-agent-telegram bridge`
-- [x] `cargo test -p noloong telegram_`
-- [x] fake interaction 覆盖 profile/list、session/create/list/get/delete。
-
-**Dependencies:** Task 10
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/src/session.rs`
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/display.rs`
-
-**Estimated scope:** M
-
-#### Task 12: Implement run and queue cockpit
-
-**Description:** 暴露 run control 与 queue control。用户可 `/continue`、`/abort`、查看 follow-up/steering queue、清空或编辑队列中的用户输入。
-
-**Acceptance criteria:**
-- [x] `/continue` 调用 `agent/continue`。
-- [x] `/abort` 调用 `agent/abort`，running 时需要确认。
-- [x] `/queue` 显示 steering/follow-up 队列摘要。
-- [x] queue card 支持 clear、set mode、将当前用户消息作为 follow-up。
-
-**Verification:**
-- [x] `cargo test -p noloong-agent-telegram queue`
-- [x] `cargo test -p noloong telegram_`
-- [x] fake interaction 覆盖 `queue/list`、`queue/clear`、`queue/set_mode`、`agent/continue`、`agent/abort`。
-
-**Dependencies:** Task 11
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/display.rs`
-- `crates/noloong-agent-telegram/src/i18n.rs`
-
-**Estimated scope:** M
-
-#### Task 13: Implement process cockpit
-
-**Description:** 将后台命令能力接入 Telegram：查看 jobs、读取输出、等待完成、写 stdin、终止进程。超长输出以 document 回传，短输出以卡片展示。
-
-**Acceptance criteria:**
-- [x] `/processes` 调用 `process/list` 并显示 job status。
-- [x] `/process <job_id>` 显示 read/wait/write/terminate 按钮。
-- [x] `process/read` 支持增量读取和 max bytes。
-- [x] terminate/write 等操作必须通过 confirmation callback。
-- [x] 超长 stdout/stderr 作为 text file document 回传。
-
-**Verification:**
-- [x] `cargo test -p noloong-agent-telegram process`
-- [x] `cargo test -p noloong telegram_`
-- [x] fake interaction 覆盖 list/read/wait/write/terminate。
-
-**Dependencies:** Task 11
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/delivery.rs`
-- `crates/noloong-agent-telegram/src/i18n.rs`
-
-**Estimated scope:** M
-
-#### Task 14: Implement manifest and subagent cockpit
-
-**Description:** 暴露 manifest proposal 与 subagent spawn 能力。Telegram 侧只做安全 UI，不让用户直接编辑完整 manifest JSON。
-
-**Acceptance criteria:**
-- [x] `/manifest` 显示 system prompt summary、enabled tools、pending proposals。
-- [x] pending proposal 可 approve，apply approved 必须确认。
-- [x] `/subagent` 可基于 active session spawn 子会话，并可带 initial prompt。
-- [x] subagent session 自动加入当前 chat 的 session list。
-
-**Verification:**
-- [x] `cargo test -p noloong-agent-telegram`
-- [x] `cargo test -p noloong telegram_`
-- [x] fake interaction 覆盖 `manifest/*` 与 `subagent/spawn`。
-
-**Dependencies:** Task 11
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/src/bridge.rs`
-- `crates/noloong-agent-telegram/src/session.rs`
-- `crates/noloong-agent-telegram/src/i18n.rs`
-
-**Estimated scope:** M
-
-### Checkpoint: Cockpit Commands
-
-- [x] `cargo fmt --all --check`
-- [x] `cargo test -p noloong-agent-telegram`
-- [x] Manual smoke：`/status`、`/new`、`/sessions`、`/queue`、`/processes`、`/manifest`、`/subagent` 都能在私聊中完成一条真实路径。
-
-### Phase 5: Polish, Docs, and Live Verification
-
-#### Task 15: Harden Telegram UX details
-
-**Description:** 处理移动端体验细节：MarkdownV2 fallback、按钮 callback 过期、重复点击、message not modified、rate limit、错误卡片、命令帮助、i18n 完整性。
-
-**Acceptance criteria:**
-- [x] 所有用户可见字符串都来自 `TelegramUiCatalog`。
-- [x] callback data 长度始终 <= 64 bytes。
-- [x] duplicate callback 不会重复执行危险操作。
-- [x] Telegram API 429 按 `retry_after` 退避。
-- [x] Markdown parse error fallback 保留按钮和重要内容。
-
-**Verification:**
-- [x] `cargo test -p noloong-agent-telegram`
-- [x] `rg -n '\"[^\"]*[\\u4e00-\\u9fff]|Run failed|Tool started|Approval' crates/noloong-agent-telegram/src`
-
-**Dependencies:** Tasks 9-14
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/src/i18n.rs`
-- `crates/noloong-agent-telegram/src/delivery.rs`
-- `crates/noloong-agent-telegram/src/approval.rs`
-
-**Estimated scope:** M
-
-#### Task 16: Update docs and examples
-
-**Description:** 更新 Telegram docs、interaction docs 和示例配置，明确 Agent Cockpit 能力、文件策略、安全默认值、长任务体验、命令列表和 live testing SOP。
-
-**Acceptance criteria:**
-- [x] `TELEGRAM.md` 不再描述 V1 缺少 media/file/profile/process 等能力。
-- [x] docs 说明 personal-first、long-polling-first、hybrid file policy。
-- [x] 示例配置包含 Telegram file policy 和 startup update policy。
-- [x] 文档给出 ChatGPT subscription 与 OpenRouter free 两条 smoke 命令。
-
-**Verification:**
-- [x] `rg -n "Telegram Agent Cockpit|filePolicy|startupUpdatePolicy|/processes|/manifest" crates/noloong-agent-telegram/docs crates/noloong-agent/docs examples/profile-configs`
-
-**Dependencies:** Task 15
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
-- `crates/noloong-agent/docs/INTERACTION.md`
-- `examples/profile-configs/*.json*`
+- `crates/noloong-agent/src/interaction/automation.rs`
+- `crates/noloong-agent/tests/automation_runner.rs`
 
 **Estimated scope:** S
 
-#### Task 17: Full verification and live smoke
+### Checkpoint: Time Automation
 
-**Description:** 运行完整本地验证，并用测试 bot 做真实 Telegram smoke。真实 smoke 覆盖文字、多媒体、文件、审批、后台 process、commands 和最终输出。
+- [x] Time-triggered automation fires without manual `automation/fire`.
+- [x] Runner survives fire failures and keeps processing other automations.
+- [x] No Goal audit is scheduled by the runner.
+- [x] `cargo test -p noloong-agent --test automation_runner --test automation_delivery`
+
+### Phase 5: Contracts, Docs, and Regression
+
+#### Task 11: Update docs and schemas
+
+**Description:** Document the new interaction methods, capabilities, trigger model, metadata conventions, and the explicit distinction between Goal and Automation.
 
 **Acceptance criteria:**
-- [x] format check 通过。
-- [x] clippy 无 warning。
-- [x] workspace tests 通过。
-- [x] Telegram live smoke 通过：文本、图片、文档、语音、视频、审批按钮、process card、文件回传。
-- [x] ChatGPT subscription profile 与 OpenRouter free profile 都至少完成一次私聊 prompt。
+- [x] Interaction docs list `goal/*` and `automation/*` methods with example payloads.
+- [x] Conformance matrix includes Goal and Automation coverage.
+- [x] Profile/config schema changes are included only if runner configuration is exposed.
+- [x] Docs state that Goal has no scheduled audit.
 
 **Verification:**
-- [x] `cargo fmt --all --check`
-- [x] `cargo clippy --workspace --all-targets --all-features`
-- [x] `cargo test --workspace`
-- [x] Manual Telegram live smoke with test bot credentials.
-  - 2026-05-12: OpenRouter free private text prompt passed (`openrouter text smoke ok`).
-  - 2026-05-12: ChatGPT subscription private text prompt passed after subscription refresh (`chatgpt subscription text smoke ok`).
-  - 2026-05-12: ChatGPT subscription `audio/ogg` unsupported-media smoke passed. Telegram delivered the audio update, and the bridge rendered a localized unsupported-media notice before provider submission; no provider 400 or polling failure occurred.
-  - 2026-05-14: ChatGPT subscription profile (`examples/profile-configs/chatgpt-codex-subscription.json`) private cockpit smoke passed in Telegram Desktop: `/status`, `/new`, `/sessions`, `/queue`, `/processes`, `/manifest`, and `/subagent researcher ...` all completed a real path with Chinese UI text and no console-side bridge error.
-  - 2026-05-14: Telegram image and document media smoke passed. `smoke-image.png` with caption reached the agent as image input and produced a final model reply; `README.md` was downloaded to `target/telegram-smoke-downloads/.../README.md`, materialized for the Responses file path, and the approval flow resumed after `/approve`.
-  - 2026-05-14: Telegram audio/video unsupported-media smoke passed with the ChatGPT subscription Responses policy. `smoke-video.mp4` arrived as `video/mp4` media/document and `smoke-audio.ogg` arrived as `audio/ogg`; both rendered localized unsupported-media notices before provider submission, with no provider 400.
-  - 2026-05-14: Telegram process and file-return smoke passed. A host command approval card for `host.exec.start` was rendered and resolved via `/approve`; `/processes` listed `host-job-1`, `host-job-2`, and `host-job-3`; `/process host-job-2` returned long output as `process-host-job-2.txt` Telegram document with read/wait/terminate buttons.
+- [x] Documentation examples are syntactically valid JSON.
+- [x] `cargo test -p noloong-agent --test interaction_control`
 
-**Dependencies:** Task 16
+**Dependencies:** Tasks 3-10
 
 **Files likely touched:**
-- None, unless verification finds defects.
+- `crates/noloong-agent/docs/INTERACTION.md`
+- `crates/noloong-agent/docs/CONFORMANCE_MATRIX.md`
+- `schemas/profile-config.schema.json`
+
+**Estimated scope:** S
+
+#### Task 12: Full regression and live smoke hooks
+
+**Description:** Run focused and workspace-level validation, then prepare smoke paths for future Telegram/CLI wrappers without implementing those wrappers in MVP.
+
+**Acceptance criteria:**
+- [x] Focused tests pass for goal, automation delivery, automation runner, and interaction control.
+- [x] Workspace tests pass.
+- [x] A manual smoke recipe exists: create session, set goal, run prompt, observe audit, create automation, manually fire, then interval-fire.
+
+**Verification:**
+- [x] `cargo fmt --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test -p noloong-agent`
+- [x] `cargo test --workspace`
+
+**Dependencies:** Tasks 1-11
+
+**Files likely touched:**
+- `crates/noloong-agent/docs/INTERACTION.md`
+- `plans/CURRENT_PLAN.md`
 
 **Estimated scope:** S
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
-| --- | --- | --- |
-| Telegram Bot API rate limit / edit throttling | High | 保留 edit throttle，429 使用 `retry_after`，流式预览和最终消息分离。 |
-| 文件下载放大磁盘和内存 | High | hybrid file policy、最大下载大小、受控目录、后续清理任务。 |
-| 全 authority 暴露危险操作 | High | 交互层 policy 仍可限制；Telegram 端 destructive/process/manifest/session delete 全部二次确认。 |
-| 多 session 路由错发 | Medium | active session 显式存储；display delivery 只按 session id -> Telegram route 投递。 |
-| MarkdownV2 解析失败导致消息丢失 | Medium | 维持 plain text fallback，并确保 fallback 保留 reply markup。 |
-| 群组行为未优化 | Medium | 第一阶段明确 personal-first；群组只保持现有 mention/thread gating。 |
+|------|--------|------------|
+| Goal audit loops forever | High | Audit only for pursuing goals; `agent.goal.update` can mark achieved/unmet/budget-limited; tests assert no audit for terminal statuses. |
+| Automation becomes cron-shaped | Medium | Keep `trigger` as tagged enum and isolate time calculations in trigger-specific code. |
+| Busy session automation changes user intent | Medium | Deliver as steering observation, never follow-up, and mark source metadata clearly. |
+| Store expansion becomes too broad | Medium | Add goal/automation CRUD alongside existing registry store patterns; avoid changing `AgentSessionRecord`. |
+| Runner double-fires after restart or concurrent ticks | High | Persist `lastFiredAtMs` and `nextFireAtMs`; update fire state atomically per store as far as each backend supports. |
 
 ## Parallelization Opportunities
 
-- Task 1-3 必须优先顺序完成。
-- Task 4-6 与 Task 7 可在 Task 1 后部分并行，但共享 `TelegramApi` contract 需先冻结。
-- Task 11-14 可在 Task 10 完成后并行，写入范围需要按 session/queue/process/manifest 分开。
-- Task 15-17 必须最后统一收口。
+- Tasks 3-5 must be sequential after persistence because Goal API, tool, and audit depend on each other.
+- Tasks 6-8 can run after persistence and mostly parallelize with Goal work if store contracts are stable.
+- Tasks 9-10 must wait for Automation delivery.
+- Task 11 docs can start once API shapes in Tasks 3 and 6 are fixed.
 
-## Not Doing
+## Open Questions
 
-- 不实现 webhook；long polling 先做到稳定、可恢复、可观测。
-- 不实现 Telegram Mini App；复杂 UI 先用 command + inline keyboard + cards 完成。
-- 不把 Telegram bot token、model credentials 或 provider config 放进 Telegram bridge。
-- 不优先优化群组协作、多用户审批或 topic 自动管理。
+- None for MVP. Daily/weekly schedules, cron/RRULE, webhook triggers, Telegram commands, and multi-goal sessions are explicitly deferred.

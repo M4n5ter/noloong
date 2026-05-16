@@ -1,6 +1,9 @@
 use super::codec::{decode_record_json, encode_record_json};
-use super::{AgentSessionRecord, AgentSessionRegistryStore, duplicate_session_error};
-use crate::interaction::{InteractionError, InteractionFuture};
+use super::{
+    AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, GoalRecord,
+    duplicate_automation_error, duplicate_session_error, missing_automation_error,
+};
+use crate::interaction::{AutomationStatus, GoalStatus, InteractionError, InteractionFuture};
 use noloong_agent_core::RunStatus;
 #[cfg(feature = "registry-store-sqlite")]
 use std::path::{Path, PathBuf};
@@ -149,6 +152,166 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
             rows.into_iter().map(decode_row).collect()
         })
     }
+
+    fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            let row = goal_row(goal)?;
+            if goal_query(&row.session_id)
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?
+                .into_iter()
+                .next()
+                .is_some()
+            {
+                StoredGoal::filter_by_session_id(row.session_id)
+                    .update()
+                    .goal_id(row.goal_id)
+                    .status(row.status)
+                    .record_json(row.record_json)
+                    .updated_at_ms(row.updated_at_ms)
+                    .exec(&mut db)
+                    .await
+                    .map_err(to_store_error)?;
+            } else {
+                toasty::create!(StoredGoal {
+                    session_id: row.session_id,
+                    goal_id: row.goal_id,
+                    status: row.status,
+                    record_json: row.record_json,
+                    updated_at_ms: row.updated_at_ms,
+                })
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn get_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<GoalRecord>> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            let rows = goal_query(session_id)
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            rows.into_iter().next().map(decode_goal_row).transpose()
+        })
+    }
+
+    fn list_goals<'a>(&'a self) -> InteractionFuture<'a, Vec<GoalRecord>> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            let rows = Query::<List<StoredGoal>>::all()
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            rows.into_iter().map(decode_goal_row).collect()
+        })
+    }
+
+    fn remove_goal<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            goal_query(session_id)
+                .delete()
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            Ok(())
+        })
+    }
+
+    fn insert_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            if self
+                .get_automation(&automation.automation_id)
+                .await?
+                .is_some()
+            {
+                return Err(duplicate_automation_error(&automation.automation_id));
+            }
+            let mut db = self.db.clone();
+            let row = automation_row(automation)?;
+            toasty::create!(StoredAutomation {
+                automation_id: row.automation_id,
+                status: row.status,
+                next_fire_at_ms: row.next_fire_at_ms,
+                record_json: row.record_json,
+                updated_at_ms: row.updated_at_ms,
+            })
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+            Ok(())
+        })
+    }
+
+    fn save_automation<'a>(&'a self, automation: AutomationRecord) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            if self
+                .get_automation(&automation.automation_id)
+                .await?
+                .is_none()
+            {
+                return Err(missing_automation_error(&automation.automation_id));
+            }
+            let mut db = self.db.clone();
+            let row = automation_row(automation)?;
+            StoredAutomation::filter_by_automation_id(row.automation_id)
+                .update()
+                .status(row.status)
+                .next_fire_at_ms(row.next_fire_at_ms)
+                .record_json(row.record_json)
+                .updated_at_ms(row.updated_at_ms)
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            Ok(())
+        })
+    }
+
+    fn get_automation<'a>(
+        &'a self,
+        automation_id: &'a str,
+    ) -> InteractionFuture<'a, Option<AutomationRecord>> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            let rows = automation_query(automation_id)
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            rows.into_iter()
+                .next()
+                .map(decode_automation_row)
+                .transpose()
+        })
+    }
+
+    fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            let rows = Query::<List<StoredAutomation>>::all()
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            rows.into_iter().map(decode_automation_row).collect()
+        })
+    }
+
+    fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            automation_query(automation_id)
+                .delete()
+                .exec(&mut db)
+                .await
+                .map_err(to_store_error)?;
+            Ok(())
+        })
+    }
 }
 
 #[derive(Debug, toasty::Model)]
@@ -162,6 +325,28 @@ struct StoredAgentSession {
     status: String,
     record_json: String,
     created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, toasty::Model)]
+#[table = "stored_goals"]
+struct StoredGoal {
+    #[key]
+    session_id: String,
+    goal_id: String,
+    status: String,
+    record_json: String,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, toasty::Model)]
+#[table = "stored_automations"]
+struct StoredAutomation {
+    #[key]
+    automation_id: String,
+    status: String,
+    next_fire_at_ms: Option<u64>,
+    record_json: String,
     updated_at_ms: u64,
 }
 
@@ -205,7 +390,11 @@ impl SqlStoreLocation {
         table_name_prefix: Option<&str>,
     ) -> Result<toasty::Db, InteractionError> {
         let mut builder = toasty::Db::builder();
-        builder.models(toasty::models!(StoredAgentSession));
+        builder.models(toasty::models!(
+            StoredAgentSession,
+            StoredGoal,
+            StoredAutomation
+        ));
         if let Some(prefix) = table_name_prefix {
             builder.table_name_prefix(prefix);
         }
@@ -292,6 +481,77 @@ fn session_query(session_id: &str) -> Query<List<StoredAgentSession>> {
     )
 }
 
+fn goal_query(session_id: &str) -> Query<List<StoredGoal>> {
+    Query::<List<StoredGoal>>::filter(StoredGoal::fields().session_id().eq(session_id.to_string()))
+}
+
+fn automation_query(automation_id: &str) -> Query<List<StoredAutomation>> {
+    Query::<List<StoredAutomation>>::filter(
+        StoredAutomation::fields()
+            .automation_id()
+            .eq(automation_id.to_string()),
+    )
+}
+
+fn goal_row(goal: GoalRecord) -> Result<StoredGoal, InteractionError> {
+    let status = goal_status_type(&goal.status).to_string();
+    let record_json = serde_json::to_string(&goal).map_err(to_store_error)?;
+    Ok(StoredGoal {
+        session_id: goal.session_id,
+        goal_id: goal.goal_id,
+        status,
+        record_json,
+        updated_at_ms: goal.updated_at_ms,
+    })
+}
+
+fn decode_goal_row(row: StoredGoal) -> Result<GoalRecord, InteractionError> {
+    let record: GoalRecord = serde_json::from_str(&row.record_json).map_err(to_store_error)?;
+    let status = goal_status_type(&record.status);
+    let consistent = row.session_id == record.session_id
+        && row.goal_id == record.goal_id
+        && row.status == status
+        && row.updated_at_ms == record.updated_at_ms;
+    if consistent {
+        Ok(record)
+    } else {
+        Err(InteractionError::internal(format!(
+            "stored goal record metadata drift detected: {}",
+            row.session_id
+        )))
+    }
+}
+
+fn automation_row(automation: AutomationRecord) -> Result<StoredAutomation, InteractionError> {
+    let status = automation_status_type(&automation.status).to_string();
+    let record_json = serde_json::to_string(&automation).map_err(to_store_error)?;
+    Ok(StoredAutomation {
+        automation_id: automation.automation_id,
+        status,
+        next_fire_at_ms: automation.next_fire_at_ms,
+        record_json,
+        updated_at_ms: automation.updated_at_ms,
+    })
+}
+
+fn decode_automation_row(row: StoredAutomation) -> Result<AutomationRecord, InteractionError> {
+    let record: AutomationRecord =
+        serde_json::from_str(&row.record_json).map_err(to_store_error)?;
+    let status = automation_status_type(&record.status);
+    let consistent = row.automation_id == record.automation_id
+        && row.status == status
+        && row.next_fire_at_ms == record.next_fire_at_ms
+        && row.updated_at_ms == record.updated_at_ms;
+    if consistent {
+        Ok(record)
+    } else {
+        Err(InteractionError::internal(format!(
+            "stored automation record metadata drift detected: {}",
+            row.automation_id
+        )))
+    }
+}
+
 fn run_status_type(status: &RunStatus) -> &'static str {
     match status {
         RunStatus::Idle => "idle",
@@ -300,6 +560,25 @@ fn run_status_type(status: &RunStatus) -> &'static str {
         RunStatus::Aborted => "aborted",
         RunStatus::Failed => "failed",
         RunStatus::Paused => "paused",
+    }
+}
+
+fn goal_status_type(status: &GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Pursuing => "pursuing",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Achieved => "achieved",
+        GoalStatus::Unmet => "unmet",
+        GoalStatus::BudgetLimited => "budget_limited",
+        GoalStatus::Cleared => "cleared",
+    }
+}
+
+fn automation_status_type(status: &AutomationStatus) -> &'static str {
+    match status {
+        AutomationStatus::Active => "active",
+        AutomationStatus::Paused => "paused",
+        AutomationStatus::Completed => "completed",
     }
 }
 

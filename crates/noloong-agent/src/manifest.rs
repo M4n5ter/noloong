@@ -497,6 +497,7 @@ define_built_in_tool_names! {
     SubagentWait => "agent.subagent.wait",
     SubagentResult => "agent.subagent.result",
     SubagentList => "agent.subagent.list",
+    GoalUpdate => "agent.goal.update",
     ManifestProposePatch => "agent.manifest.propose_patch",
 }
 

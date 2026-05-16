@@ -214,27 +214,34 @@ async fn dotted_tool_names_are_encoded_in_assistant_history() -> Result<()> {
 }
 
 #[tokio::test]
-async fn undeclared_canonical_tool_in_history_reports_context() -> Result<()> {
+async fn omitted_history_tool_names_are_still_encoded_for_replay() -> Result<()> {
+    let server = MockServer::spawn(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
+    .await?;
     let provider = ChatCompletionsProvider::new(
         ChatCompletionsProviderConfig::new("test-chat", "test-model")
-            .base_url("http://127.0.0.1:9")
+            .base_url(server.url())
             .without_api_key(),
     )?;
 
-    let error = provider
+    provider
         .stream_model(
             request_with_dotted_tool_history_without_tools(),
             Arc::new(|_| Box::pin(async { Ok(()) })),
             CancellationToken::new(),
         )
-        .await
-        .expect_err("undeclared canonical tool should fail before request")
-        .to_string();
+        .await?;
 
-    assert!(error.contains("undeclared canonical tool"));
-    assert!(error.contains(DOTTED_TEST_TOOL_NAME));
-    assert!(error.contains("test-chat"));
-    assert!(error.contains("test-model"));
+    let body = server.request_json();
+    assert!(body.get("tools").is_none());
+    assert_eq!(
+        body["messages"][1]["tool_calls"][0]["function"]["name"],
+        "host_exec_start"
+    );
+    assert_eq!(body["messages"][2]["name"], "host_exec_start");
     Ok(())
 }
 

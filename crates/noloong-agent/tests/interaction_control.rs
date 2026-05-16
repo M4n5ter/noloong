@@ -5,7 +5,7 @@ use noloong_agent::{
         AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore,
         DISPLAY_EVENT_NOTIFICATION, InMemoryAgentSessionRegistryStore, InteractionCapabilityPolicy,
         InteractionControlHandler, InteractionError, InteractionFuture,
-        InteractionProfileDescriptor, RAW_EVENT_NOTIFICATION, serve_jsonrpc,
+        InteractionProfileDescriptor, JsonRpcHandler, RAW_EVENT_NOTIFICATION, serve_jsonrpc,
     },
     process::StartCommandRequest,
 };
@@ -113,6 +113,85 @@ async fn interaction_control_prompts_and_emits_raw_and_display_events() {
         message["method"] == DISPLAY_EVENT_NOTIFICATION
             && message["params"]["event"]["type"] == "assistant_message_final"
     }));
+}
+
+#[tokio::test]
+async fn interaction_control_grants_are_scoped_to_jsonrpc_connection() {
+    let handler = test_handler("default").await;
+    let websocket_like_handler = handler.connection_handler();
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server);
+    let server = tokio::spawn(serve_jsonrpc(
+        server_reader,
+        server_writer,
+        websocket_like_handler,
+    ));
+    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let mut lines = BufReader::new(client_reader).lines();
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "name": "websocket-client",
+                "requestedAuthority": ["agent.run"],
+                "requestedUx": {"displayEvents": true, "streamText": true}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        read_message(&mut lines).await["result"]["grant"]["ux"]["displayEvents"],
+        true
+    );
+    write_rpc(
+        &mut client_writer,
+        rpc(2, "session/create", json!({"sessionId": "root"})),
+    )
+    .await;
+    assert_eq!(
+        read_message(&mut lines).await["result"]["sessionId"],
+        "root"
+    );
+
+    let control_messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                10,
+                "initialize",
+                json!({
+                    "name": "http-control-client",
+                    "requestedAuthority": ["agent.run"],
+                    "requestedUx": {}
+                }),
+            ),
+            rpc(11, "shutdown", json!({})),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response(&control_messages, 10)["result"]["grant"]["ux"]["displayEvents"],
+        false
+    );
+
+    write_rpc(
+        &mut client_writer,
+        rpc(3, "display/subscribe", json!({"sessionId": "root"})),
+    )
+    .await;
+    assert!(
+        read_message(&mut lines).await["result"]["subscriptionId"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("subscription-"))
+    );
+
+    write_rpc(&mut client_writer, rpc(4, "shutdown", json!({}))).await;
+    assert_eq!(read_message(&mut lines).await["result"]["ok"], true);
+    drop(client_writer);
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -331,6 +410,185 @@ async fn interaction_control_subagent_spawn_requires_capability() {
         response(&messages, 3)["error"]["data"]["requiredCapability"],
         "subagent.spawn"
     );
+}
+
+#[tokio::test]
+async fn interaction_control_manages_goal_lifecycle() {
+    let handler = test_handler("default").await;
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                1,
+                "initialize",
+                json!({
+                    "name": "goal-client",
+                    "requestedAuthority": ["goal.manage"]
+                }),
+            ),
+            rpc(2, "session/create", json!({"sessionId": "root"})),
+            rpc(
+                3,
+                "goal/set",
+                json!({
+                    "sessionId": "root",
+                    "objective": "ship goal support",
+                    "tokenBudget": 100
+                }),
+            ),
+            rpc(4, "goal/get", json!({"sessionId": "root"})),
+            rpc(5, "goal/pause", json!({"sessionId": "root"})),
+            rpc(6, "goal/resume", json!({"sessionId": "root"})),
+            rpc(
+                7,
+                "goal/update",
+                json!({
+                    "sessionId": "root",
+                    "status": "achieved",
+                    "summary": "done",
+                    "evidence": "test"
+                }),
+            ),
+            rpc(8, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(response(&messages, 3)["result"]["status"], "pursuing");
+    assert_eq!(
+        response(&messages, 4)["result"]["objective"],
+        "ship goal support"
+    );
+    assert_eq!(response(&messages, 5)["result"]["status"], "paused");
+    assert_eq!(response(&messages, 6)["result"]["status"], "pursuing");
+    assert_eq!(response(&messages, 7)["result"]["status"], "achieved");
+    assert_eq!(
+        response(&messages, 7)["result"]["lastAudit"]["summary"],
+        "done"
+    );
+}
+
+#[tokio::test]
+async fn interaction_control_creates_and_fires_automation() {
+    let handler = test_handler("default").await;
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                1,
+                "initialize",
+                json!({
+                    "name": "automation-client",
+                    "requestedAuthority": ["automation.manage"]
+                }),
+            ),
+            rpc(2, "session/create", json!({"sessionId": "root"})),
+            rpc(
+                3,
+                "automation/create",
+                json!({
+                    "automationId": "auto-1",
+                    "target": {"type": "existing_session", "sessionId": "root"},
+                    "trigger": {
+                        "type": "time",
+                        "schedule": {"onceAtMs": 4102444800000u64}
+                    },
+                    "prompt": {"type": "text", "text": "automation ping"}
+                }),
+            ),
+            rpc(4, "automation/list", json!({})),
+            rpc(5, "automation/fire", json!({"automationId": "auto-1"})),
+            rpc(6, "session/get", json!({"sessionId": "root"})),
+            rpc(7, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(response(&messages, 3)["result"]["automationId"], "auto-1");
+    assert_eq!(
+        response(&messages, 4)["result"][0]["automationId"],
+        "auto-1"
+    );
+    assert!(response(&messages, 5)["result"]["lastFiredAtMs"].is_number());
+    assert_eq!(response(&messages, 6)["result"]["status"], "completed");
+    assert_eq!(
+        response(&messages, 6)["result"]["state"]["messages"][0]["metadata"]["source"]["type"],
+        "automation"
+    );
+}
+
+#[tokio::test]
+async fn interaction_control_validates_automation_inputs_and_status() {
+    let handler = test_handler("default").await;
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                1,
+                "initialize",
+                json!({
+                    "name": "automation-client",
+                    "requestedAuthority": ["automation.manage"]
+                }),
+            ),
+            rpc(
+                2,
+                "automation/create",
+                json!({
+                    "automationId": "bad-target",
+                    "target": {"type": "existing_session", "sessionId": "missing"},
+                    "trigger": {
+                        "type": "time",
+                        "schedule": {"onceAtMs": 4102444800000u64}
+                    },
+                    "prompt": {"type": "text", "text": "automation ping"}
+                }),
+            ),
+            rpc(
+                3,
+                "automation/create",
+                json!({
+                    "automationId": "bad-trigger",
+                    "target": {"type": "new_session", "profileId": "default"},
+                    "trigger": {
+                        "type": "time",
+                        "schedule": {"intervalSeconds": 0}
+                    },
+                    "prompt": {"type": "text", "text": "automation ping"}
+                }),
+            ),
+            rpc(4, "session/create", json!({"sessionId": "root"})),
+            rpc(
+                5,
+                "automation/create",
+                json!({
+                    "automationId": "paused-auto",
+                    "target": {"type": "existing_session", "sessionId": "root"},
+                    "trigger": {
+                        "type": "time",
+                        "schedule": {"onceAtMs": 4102444800000u64}
+                    },
+                    "prompt": {"type": "text", "text": "automation ping"}
+                }),
+            ),
+            rpc(
+                6,
+                "automation/update",
+                json!({"automationId": "paused-auto", "status": "paused"}),
+            ),
+            rpc(7, "automation/fire", json!({"automationId": "paused-auto"})),
+            rpc(8, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(response(&messages, 2)["error"]["code"], -32072);
+    assert_eq!(response(&messages, 3)["error"]["code"], -32602);
+    assert_eq!(response(&messages, 6)["result"]["status"], "paused");
+    assert_eq!(response(&messages, 7)["error"]["code"], -32602);
 }
 
 #[tokio::test]
@@ -893,6 +1151,23 @@ async fn run_jsonrpc(handler: InteractionControlHandler, requests: Vec<Value>) -
     drop(client_writer);
     server.await.unwrap().unwrap();
     messages
+}
+
+async fn write_rpc<W>(writer: &mut W, request: Value)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let line = serde_json::to_vec(&request).unwrap();
+    writer.write_all(&line).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+}
+
+async fn read_message<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> Value
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap()
 }
 
 fn response(messages: &[Value], id: i64) -> &Value {

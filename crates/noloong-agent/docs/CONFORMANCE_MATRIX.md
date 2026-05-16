@@ -17,6 +17,8 @@ This matrix tracks the application-layer interaction control plane. The core ker
 | PostgreSQL registry store | `registry-store-postgres`, env-gated live SQL snapshot backend | `cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres` |
 | OpenDAL registry store | `registry-store-object`, single-writer object snapshot backend | `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object` |
 | Subagents | `subagent/spawn`, `agent.subagent.spawn/wait/result/list`, parent metadata, initial prompt, direct-child gate | `cargo test -p noloong-agent --test interaction_registry --test interaction_control --test subagent_tools` |
+| Goals | `goal/set/get/pause/resume/clear/update`, `agent.goal.update`, turn-end audit steering | `cargo test -p noloong-agent --test interaction_registry --test interaction_control --test goal_tools` |
+| Automations | `automation/create/get/list/update/delete/fire`, existing-session delivery, pure automation sessions, time runner | `cargo test -p noloong-agent --test interaction_registry --test interaction_control` |
 | Agent run control | `agent/prompt`, `agent/continue`, `agent/abort`, `agent/wait_idle`, `agent/state` | `cargo test -p noloong-agent --test interaction_control` |
 | Queues | `agent/steer`, `agent/follow_up`, `queue/list`, `queue/edit`, `queue/clear`, `queue/set_mode` | `cargo test -p noloong-agent --test interaction_control` |
 | Raw events | `event/subscribe`, `event/unsubscribe`, `agent/event` notification | `cargo test -p noloong-agent --test interaction_control` |

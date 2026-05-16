@@ -823,6 +823,24 @@ async fn payload_does_not_mark_error_tool_results_failed_for_responses_replay() 
     Ok(())
 }
 
+#[test]
+fn payload_replays_history_tool_that_is_no_longer_declared() -> Result<()> {
+    let body = render_responses_api_request(
+        &ResponsesApiRequestRenderConfig::new("test-responses", "test-model"),
+        &ModelRequest {
+            tools: Vec::new(),
+            ..request_with_tool_history()
+        },
+    )?;
+
+    assert!(body.get("tools").is_none());
+    assert_eq!(body["input"][1]["type"], "function_call");
+    assert_eq!(body["input"][1]["name"], "lookup");
+    assert_eq!(body["input"][2]["type"], "function_call_output");
+    assert_eq!(body["input"][2]["call_id"], "call-1");
+    Ok(())
+}
+
 #[tokio::test]
 async fn payload_maps_image_url_data_url_and_file_id() -> Result<()> {
     let mut inline = MediaBlock::inline_base64(MediaKind::Image, "aW1hZ2U=");

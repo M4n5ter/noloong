@@ -1,4 +1,5 @@
 mod file_edit;
+mod goal;
 mod host_exec;
 mod manifest;
 mod output_overflow;
@@ -13,6 +14,10 @@ pub(crate) use file_edit::apply_patch_target_paths;
 pub use file_edit::{
     APPLY_PATCH_TOOL_NAME, ApplyPatchTool, FILE_EDIT_PERMISSION_CAPABILITY, FileEditManager,
     WRITE_FILE_TOOL_NAME, WriteFileTool,
+};
+pub use goal::{
+    GOAL_PERMISSION_CAPABILITY, GoalController, GoalUpdateRequest, GoalUpdateTool,
+    update_goal_audit,
 };
 pub use host_exec::{
     HostExecListTool, HostExecReadTool, HostExecStartTool, HostExecTerminateTool, HostExecWaitTool,

@@ -164,13 +164,12 @@ Environment variables:
 - `TELEGRAM_DISABLE_FALLBACK_IPS`
 - `TELEGRAM_DISABLE_ENV_PROXY`
 
-Network selection is automatic. Explicit `TELEGRAM_PROXY` wins first. If it is not set, ambient proxy environment variables such as `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` are honored. If no proxy is active, fallback addresses are injected through `resolve_to_addrs("api.telegram.org", ...)` while preserving the request host and TLS SNI. Set `TELEGRAM_DISABLE_ENV_PROXY=1` to force the fallback/direct path even when proxy env vars are present.
+Network selection is automatic. Explicit `TELEGRAM_PROXY` wins first. If it is not set, ambient proxy environment variables such as `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` are honored. If no proxy is active, the bridge uses normal system DNS by default so macOS TUN/fake-IP routing can decide how `api.telegram.org` is reached. Static fallback addresses are used only when `TELEGRAM_FALLBACK_IPS` or DoH endpoints are explicitly configured; they preserve the request host and TLS SNI through `resolve_to_addrs("api.telegram.org", ...)`. Set `TELEGRAM_DISABLE_ENV_PROXY=1` only when you need to ignore ambient proxy variables.
 
-For Shadowrocket fake-IP setups, prefer the fallback/direct path when the HTTP proxy returns TLS handshake errors for Telegram:
+For Shadowrocket fake-IP setups, leave fallback IPs unset so the system resolver and TUN stack can select the fake-IP route. Use static fallback IPs only as a diagnostic override:
 
 ```sh
 unset TELEGRAM_PROXY
-export TELEGRAM_DISABLE_ENV_PROXY=1
 export TELEGRAM_FALLBACK_IPS=149.154.167.220
 ```
 

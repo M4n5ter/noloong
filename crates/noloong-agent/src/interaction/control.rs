@@ -1,9 +1,11 @@
 use super::{
-    AgentSessionDeleteOptions, AgentSessionListFilter, AgentSessionRegistry, DisplayEvent,
-    InteractionAuthorityCapability, InteractionCapabilityGrant, InteractionCapabilityPolicy,
-    InteractionClientInfo, InteractionError, InteractionFuture, InteractionNotifier,
-    InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionUxCapabilities,
-    JsonRpcHandler, JsonRpcHandlerOutput, SubagentSpawnRequest, store::missing_session_error,
+    AgentSessionDeleteOptions, AgentSessionListFilter, AgentSessionRegistry,
+    AutomationCreateRequest, AutomationListRequest, AutomationRequest, AutomationUpdateRequest,
+    DisplayEvent, GoalSetRequest, GoalStatusUpdateRequest, InteractionAuthorityCapability,
+    InteractionCapabilityGrant, InteractionCapabilityPolicy, InteractionClientInfo,
+    InteractionError, InteractionFuture, InteractionNotifier, InteractionProfileDescriptor,
+    InteractionSessionDescriptor, InteractionUxCapabilities, JsonRpcHandler, JsonRpcHandlerOutput,
+    SubagentSpawnRequest, store::missing_session_error,
 };
 use crate::{ReadOutputRequest, text};
 use noloong_agent_core::{
@@ -29,14 +31,18 @@ pub const DISPLAY_SUBSCRIBE_METHOD: &str = "display/subscribe";
 #[derive(Clone)]
 pub struct InteractionControlHandler {
     inner: Arc<InteractionControlHandlerInner>,
+    client: Arc<InteractionControlClientState>,
 }
 
 struct InteractionControlHandlerInner {
     registry: AgentSessionRegistry,
     policy: InteractionCapabilityPolicy,
+    subscription_counter: AtomicU64,
+}
+
+struct InteractionControlClientState {
     grant: Mutex<Option<InteractionCapabilityGrant>>,
     subscriptions: Mutex<BTreeMap<String, InteractionSubscription>>,
-    subscription_counter: AtomicU64,
 }
 
 struct InteractionSubscription {
@@ -50,9 +56,11 @@ impl InteractionControlHandler {
             inner: Arc::new(InteractionControlHandlerInner {
                 registry,
                 policy,
+                subscription_counter: AtomicU64::new(0),
+            }),
+            client: Arc::new(InteractionControlClientState {
                 grant: Mutex::new(None),
                 subscriptions: Mutex::new(BTreeMap::new()),
-                subscription_counter: AtomicU64::new(0),
             }),
         }
     }
@@ -61,11 +69,21 @@ impl InteractionControlHandler {
         &self.inner.registry
     }
 
+    fn new_connection(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            client: Arc::new(InteractionControlClientState {
+                grant: Mutex::new(None),
+                subscriptions: Mutex::new(BTreeMap::new()),
+            }),
+        }
+    }
+
     fn initialize(&self, params: Value) -> Result<Value, InteractionError> {
         let client = parse_params::<InteractionClientInfo>(params)?;
         let grant = self.inner.policy.grant(&client);
         *self
-            .inner
+            .client
             .grant
             .lock()
             .expect("interaction capability grant lock poisoned") = Some(grant.clone());
@@ -85,7 +103,7 @@ impl InteractionControlHandler {
         capability: InteractionAuthorityCapability,
     ) -> Result<(), InteractionError> {
         let grant = self
-            .inner
+            .client
             .grant
             .lock()
             .expect("interaction capability grant lock poisoned")
@@ -112,7 +130,7 @@ impl InteractionControlHandler {
     }
 
     fn granted_ux(&self) -> InteractionUxCapabilities {
-        self.inner
+        self.client
             .grant
             .lock()
             .expect("interaction capability grant lock poisoned")
@@ -132,6 +150,10 @@ impl InteractionControlHandler {
 }
 
 impl JsonRpcHandler for InteractionControlHandler {
+    fn connection_handler(&self) -> Self {
+        self.new_connection()
+    }
+
     fn handle<'a>(
         &'a self,
         method: &'a str,
@@ -175,6 +197,83 @@ impl JsonRpcHandler for InteractionControlHandler {
                     self.require(method, InteractionAuthorityCapability::SubagentSpawn)?;
                     let request = parse_params::<SubagentSpawnRequest>(params)?;
                     value(self.inner.registry.spawn_subagent(request).await?)?
+                }
+                "goal/set" => {
+                    self.require(method, InteractionAuthorityCapability::GoalManage)?;
+                    let request = parse_params::<GoalSetRequest>(params)?;
+                    value(self.inner.registry.set_goal(request).await?)?
+                }
+                "goal/get" => {
+                    let request = parse_params::<SessionRequest>(params)?;
+                    value(self.inner.registry.get_goal(&request.session_id).await?)?
+                }
+                "goal/pause" => {
+                    self.require(method, InteractionAuthorityCapability::GoalManage)?;
+                    let request = parse_params::<SessionRequest>(params)?;
+                    value(self.inner.registry.pause_goal(&request.session_id).await?)?
+                }
+                "goal/resume" => {
+                    self.require(method, InteractionAuthorityCapability::GoalManage)?;
+                    let request = parse_params::<SessionRequest>(params)?;
+                    value(self.inner.registry.resume_goal(&request.session_id).await?)?
+                }
+                "goal/clear" => {
+                    self.require(method, InteractionAuthorityCapability::GoalManage)?;
+                    let request = parse_params::<SessionRequest>(params)?;
+                    value(self.inner.registry.clear_goal(&request.session_id).await?)?
+                }
+                "goal/update" => {
+                    self.require(method, InteractionAuthorityCapability::GoalManage)?;
+                    let request = parse_params::<GoalStatusUpdateRequest>(params)?;
+                    value(
+                        self.inner
+                            .registry
+                            .update_goal_status(request, String::new(), 0)
+                            .await?,
+                    )?
+                }
+                "automation/create" => {
+                    self.require(method, InteractionAuthorityCapability::AutomationManage)?;
+                    let request = parse_params::<AutomationCreateRequest>(params)?;
+                    value(self.inner.registry.create_automation(request).await?)?
+                }
+                "automation/get" => {
+                    let request = parse_params::<AutomationRequest>(params)?;
+                    value(
+                        self.inner
+                            .registry
+                            .get_automation(&request.automation_id)
+                            .await?,
+                    )?
+                }
+                "automation/list" => {
+                    let request = parse_params::<AutomationListRequest>(params)?;
+                    value(self.inner.registry.list_automations(request).await?)?
+                }
+                "automation/update" => {
+                    self.require(method, InteractionAuthorityCapability::AutomationManage)?;
+                    let request = parse_params::<AutomationUpdateRequest>(params)?;
+                    value(self.inner.registry.update_automation(request).await?)?
+                }
+                "automation/delete" => {
+                    self.require(method, InteractionAuthorityCapability::AutomationManage)?;
+                    let request = parse_params::<AutomationRequest>(params)?;
+                    value(
+                        self.inner
+                            .registry
+                            .delete_automation(&request.automation_id)
+                            .await?,
+                    )?
+                }
+                "automation/fire" => {
+                    self.require(method, InteractionAuthorityCapability::AutomationManage)?;
+                    let request = parse_params::<AutomationRequest>(params)?;
+                    value(
+                        self.inner
+                            .registry
+                            .fire_automation(&request.automation_id)
+                            .await?,
+                    )?
                 }
                 "agent/prompt" => {
                     self.require(method, InteractionAuthorityCapability::AgentRun)?;
@@ -495,7 +594,7 @@ impl InteractionControlHandler {
                 Ok(())
             }
         });
-        self.inner
+        self.client
             .subscriptions
             .lock()
             .expect("interaction subscription lock poisoned")
@@ -534,7 +633,7 @@ impl InteractionControlHandler {
                 Ok(())
             }
         });
-        self.inner
+        self.client
             .subscriptions
             .lock()
             .expect("interaction subscription lock poisoned")
@@ -553,7 +652,7 @@ impl InteractionControlHandler {
         subscription_id: String,
     ) -> Result<UnsubscribeResult, InteractionError> {
         let subscription = self
-            .inner
+            .client
             .subscriptions
             .lock()
             .expect("interaction subscription lock poisoned")

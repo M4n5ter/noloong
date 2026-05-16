@@ -1,4 +1,4 @@
-use crate::{AgentCoreError, Result, ToolSpec};
+use crate::{AgentCoreError, AgentMessage, ContentBlock, Result, ToolSpec};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_PROVIDER_TOOL_NAME_LEN: usize = 64;
@@ -10,13 +10,31 @@ pub(crate) struct ProviderToolNameCodec {
 }
 
 impl ProviderToolNameCodec {
+    #[cfg(test)]
     pub(crate) fn new(tools: &[ToolSpec]) -> Self {
+        Self::new_with_extra_names(tools, std::iter::empty::<&str>())
+    }
+
+    pub(crate) fn new_with_message_history(tools: &[ToolSpec], messages: &[AgentMessage]) -> Self {
+        Self::new_with_extra_names(tools, message_tool_names(messages))
+    }
+
+    fn new_with_extra_names<'a>(
+        tools: &[ToolSpec],
+        extra_names: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for tool in tools {
             groups
                 .entry(provider_safe_base(&tool.name))
                 .or_default()
                 .insert(tool.name.clone());
+        }
+        for name in extra_names {
+            groups
+                .entry(provider_safe_base(name))
+                .or_default()
+                .insert(name.to_owned());
         }
 
         let mut used = BTreeSet::new();
@@ -70,6 +88,16 @@ impl ProviderToolNameCodec {
                 ))
             })
     }
+}
+
+fn message_tool_names(messages: &[AgentMessage]) -> impl Iterator<Item = &str> {
+    messages.iter().flat_map(|message| {
+        message.content.iter().filter_map(|block| match block {
+            ContentBlock::ToolCall { tool_call } => Some(tool_call.name.as_str()),
+            ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
+            _ => None,
+        })
+    })
 }
 
 fn unique_provider_name(

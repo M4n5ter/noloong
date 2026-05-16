@@ -1,7 +1,8 @@
 #![cfg(feature = "registry-store-sqlite")]
 
 use noloong_agent::{
-    AgentManifest, AgentSession,
+    AgentManifest, AgentSession, AutomationRecord, AutomationTarget, AutomationTimeSchedule,
+    AutomationTrigger, GoalRecord,
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
         AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore, InteractionError,
@@ -50,6 +51,47 @@ async fn sqlite_store_insert_get_list_save_remove() {
 
     store.remove("root").await.unwrap();
     assert!(store.get("root").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn sqlite_store_persists_goal_and_automation_records() {
+    let store = SqlAgentSessionRegistryStore::connect(
+        SqlAgentSessionRegistryStoreConfig::sqlite_in_memory(),
+    )
+    .await
+    .unwrap();
+
+    let goal = GoalRecord::new("root", "finish sqlite store support");
+    store.save_goal(goal.clone()).await.unwrap();
+    assert_eq!(store.get_goal("root").await.unwrap(), Some(goal.clone()));
+    assert_eq!(store.list_goals().await.unwrap(), vec![goal.clone()]);
+    store.remove_goal("root").await.unwrap();
+    assert!(store.get_goal("root").await.unwrap().is_none());
+
+    let automation = automation_record("automation-sqlite");
+    store.insert_automation(automation.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .get_automation(&automation.automation_id)
+            .await
+            .unwrap(),
+        Some(automation.clone())
+    );
+    assert_eq!(
+        store.list_automations().await.unwrap(),
+        vec![automation.clone()]
+    );
+    store
+        .remove_automation(&automation.automation_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get_automation(&automation.automation_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -137,6 +179,22 @@ fn record(session_id: &str) -> AgentSessionRecord {
         created_at_ms: 1,
         updated_at_ms: 2,
     }
+}
+
+fn automation_record(automation_id: &str) -> AutomationRecord {
+    AutomationRecord::new(
+        automation_id,
+        AutomationTarget::ExistingSession {
+            session_id: "root".into(),
+        },
+        AutomationTrigger::Time {
+            schedule: AutomationTimeSchedule {
+                once_at_ms: Some(123),
+                interval_seconds: None,
+            },
+        },
+        AgentMessage::user("automation-prompt", "hello"),
+    )
 }
 
 fn text_profile(profile_id: &str) -> Arc<dyn AgentRuntimeProfile> {

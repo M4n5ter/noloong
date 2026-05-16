@@ -16,6 +16,15 @@ mod text;
 pub use approval::{ApprovalPolicy, ApprovalReviewer, BuiltInApprovalHook};
 pub use host::{HostEnvironment, Locale, PathStyle};
 pub use i18n::{Catalog, MessageKey};
+pub use interaction::{
+    AUTOMATION_SESSION_METADATA_KEY, AUTOMATION_SOURCE_TYPE, AUTOMATION_SYSTEM_PROMPT_ADDITION_ID,
+    AgentSessionRegistryOptions, AutomationCreateRequest, AutomationListRequest,
+    AutomationPromptInput, AutomationRecord, AutomationRequest, AutomationStatus, AutomationTarget,
+    AutomationTimeSchedule, AutomationTrigger, AutomationUpdateRequest,
+    GOAL_AUDIT_REASON_TOOL_UPDATE, GOAL_AUDIT_REASON_TURN_END, GOAL_AUDIT_SOURCE_TYPE,
+    GOAL_UPDATE_ALLOWED_STATUS_VALUES, GOAL_UPDATE_STATUS_ERROR, GoalAuditRecord, GoalRecord,
+    GoalSetRequest, GoalStatus, GoalStatusUpdateRequest,
+};
 pub use manifest::{
     AgentManifest, AgentSystemPrompt, BuiltInSystemPromptProfile, BuiltInToolName,
     FileEditToolPolicy, ManifestPatch, ManifestPatchProposal, ManifestProposalStore,
@@ -41,10 +50,10 @@ pub use system_prompt::{
 pub use tools::{
     APPLY_PATCH_TOOL_NAME, ApplyPatchTool, BuiltInToolOutputOverflowHook,
     DEFAULT_MAX_INLINE_TOOL_OUTPUT_BYTES, DEFAULT_TOOL_OUTPUT_PREVIEW_EDGE_BYTES,
-    FILE_EDIT_PERMISSION_CAPABILITY, FileEditManager, HostExecListTool, HostExecReadTool,
-    HostExecStartTool, HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool,
-    ManifestPatchProposalTool, SubagentController, SubagentFinalOutput, SubagentListTool,
-    SubagentResult, SubagentResultTool, SubagentSpawnRequest, SubagentSpawnTool, SubagentSummary,
-    SubagentWaitOutcome, SubagentWaitTool, ToolOutputOverflowConfig, WRITE_FILE_TOOL_NAME,
-    WriteFileTool,
+    FILE_EDIT_PERMISSION_CAPABILITY, FileEditManager, GOAL_PERMISSION_CAPABILITY, GoalController,
+    GoalUpdateRequest, GoalUpdateTool, HostExecListTool, HostExecReadTool, HostExecStartTool,
+    HostExecTerminateTool, HostExecWaitTool, HostExecWriteTool, ManifestPatchProposalTool,
+    SubagentController, SubagentFinalOutput, SubagentListTool, SubagentResult, SubagentResultTool,
+    SubagentSpawnRequest, SubagentSpawnTool, SubagentSummary, SubagentWaitOutcome,
+    SubagentWaitTool, ToolOutputOverflowConfig, WRITE_FILE_TOOL_NAME, WriteFileTool,
 };

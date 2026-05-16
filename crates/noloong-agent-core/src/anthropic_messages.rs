@@ -288,7 +288,8 @@ impl ModelProvider for AnthropicMessagesProvider {
                     }
                 })
                 .await?;
-            let tool_names = ProviderToolNameCodec::new(&request.tools);
+            let tool_names =
+                ProviderToolNameCodec::new_with_message_history(&request.tools, &request.messages);
             let payload = build_anthropic_payload(&self.config, &tool_names, &request)?;
             let headers = headers_from_config(&self.config)?;
             let api_key = self.api_key()?;
