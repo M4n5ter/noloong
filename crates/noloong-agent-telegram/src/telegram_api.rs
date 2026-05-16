@@ -536,7 +536,17 @@ pub struct TelegramSendMessageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parse_mode: Option<TelegramParseMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_parameters: Option<TelegramReplyParameters>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<TelegramInlineKeyboardMarkup>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TelegramReplyParameters {
+    pub message_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_sending_without_reply: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -671,6 +681,7 @@ pub struct TelegramMediaMessageOptions {
     pub message_thread_id: Option<i64>,
     pub caption: Option<String>,
     pub parse_mode: Option<TelegramParseMode>,
+    pub reply_parameters: Option<TelegramReplyParameters>,
     pub reply_markup: Option<TelegramInlineKeyboardMarkup>,
 }
 
@@ -684,6 +695,7 @@ macro_rules! impl_media_request {
                     input: self.$field,
                     caption: self.options.caption,
                     parse_mode: self.options.parse_mode,
+                    reply_parameters: self.options.reply_parameters,
                     reply_markup: self.options.reply_markup,
                 }
             }
@@ -704,6 +716,7 @@ struct TelegramSendMediaRequest {
     input: TelegramInputFile,
     caption: Option<String>,
     parse_mode: Option<TelegramParseMode>,
+    reply_parameters: Option<TelegramReplyParameters>,
     reply_markup: Option<TelegramInlineKeyboardMarkup>,
 }
 
@@ -943,6 +956,12 @@ fn media_json_body(
     if let Some(parse_mode) = &request.parse_mode {
         body.insert("parse_mode".into(), parse_mode.as_str().into());
     }
+    if let Some(reply_parameters) = &request.reply_parameters {
+        body.insert(
+            "reply_parameters".into(),
+            serialize_value(reply_parameters)?,
+        );
+    }
     if let Some(reply_markup) = &request.reply_markup {
         body.insert("reply_markup".into(), serialize_value(reply_markup)?);
     }
@@ -962,6 +981,9 @@ async fn media_multipart_form(
     }
     if let Some(parse_mode) = request.parse_mode {
         form = form.text("parse_mode", parse_mode.as_str());
+    }
+    if let Some(reply_parameters) = request.reply_parameters {
+        form = form.text("reply_parameters", serialize_string(&reply_parameters)?);
     }
     if let Some(reply_markup) = request.reply_markup {
         form = form.text("reply_markup", serialize_string(&reply_markup)?);
@@ -1039,8 +1061,8 @@ mod tests {
     use super::{
         TelegramApiError, TelegramApiResponse, TelegramChatAction, TelegramEditMessageTextRequest,
         TelegramInlineKeyboardButton, TelegramInlineKeyboardMarkup, TelegramInputFile,
-        TelegramParseMode, TelegramSendChatActionRequest, TelegramSendMediaRequest,
-        TelegramSendMessageRequest, TelegramSentMessage, media_json_body,
+        TelegramParseMode, TelegramReplyParameters, TelegramSendChatActionRequest,
+        TelegramSendMediaRequest, TelegramSendMessageRequest, TelegramSentMessage, media_json_body,
         parse_telegram_error_bytes,
     };
     use serde_json::json;
@@ -1052,6 +1074,10 @@ mod tests {
             message_thread_id: Some(5),
             text: "hello".into(),
             parse_mode: Some(TelegramParseMode::MarkdownV2),
+            reply_parameters: Some(TelegramReplyParameters {
+                message_id: 9,
+                allow_sending_without_reply: Some(true),
+            }),
             reply_markup: Some(TelegramInlineKeyboardMarkup {
                 inline_keyboard: vec![vec![TelegramInlineKeyboardButton {
                     text: "Allow".into(),
@@ -1069,6 +1095,10 @@ mod tests {
                 "message_thread_id": 5,
                 "text": "hello",
                 "parse_mode": "MarkdownV2",
+                "reply_parameters": {
+                    "message_id": 9,
+                    "allow_sending_without_reply": true
+                },
                 "reply_markup": {
                     "inline_keyboard": [[{
                         "text": "Allow",
@@ -1128,6 +1158,10 @@ mod tests {
             input: TelegramInputFile::file_id("file-1"),
             caption: Some("report".into()),
             parse_mode: Some(TelegramParseMode::MarkdownV2),
+            reply_parameters: Some(TelegramReplyParameters {
+                message_id: 8,
+                allow_sending_without_reply: Some(true),
+            }),
             reply_markup: None,
         };
 
@@ -1138,7 +1172,11 @@ mod tests {
                 "message_thread_id": 9,
                 "document": "file-1",
                 "caption": "report",
-                "parse_mode": "MarkdownV2"
+                "parse_mode": "MarkdownV2",
+                "reply_parameters": {
+                    "message_id": 8,
+                    "allow_sending_without_reply": true
+                }
             })
         );
     }

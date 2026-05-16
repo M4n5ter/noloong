@@ -302,10 +302,12 @@ pub enum DisplayEvent {
         reason: Value,
     },
     AssistantMessageDelta {
+        run_id: String,
         display_message_id: String,
         text: String,
     },
     AssistantMessageFinal {
+        run_id: String,
         display_message_id: String,
         message: AgentMessage,
         #[serde(default)]

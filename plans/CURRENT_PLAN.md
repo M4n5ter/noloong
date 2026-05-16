@@ -1,270 +1,288 @@
-# Implementation Plan: SQLite 运行状态统一化
+# Implementation Plan: Telegram Reply-Aware Interaction
 
 ## Overview
 
-将 noloong 的可恢复运行状态统一落到本地 SQLite，默认使用 `~/.agents/noloong/state.sqlite`。本轮不保留历史兼容包袱：旧的默认 memory store、Telegram offset JSON 默认路径、示例里的显式 memory 配置都清理掉；显式非 SQLite backend 只在仍有当前价值时保留。ChatGPT token、Models.dev cache、Telegram 下载媒体、tool overflow 临时文件不是运行状态，不迁入 SQLite。
+让 Telegram bridge 同时理解“用户回复的是哪条 Telegram 消息”和“agent 最终回答应回复哪条触发消息”。本轮不保留历史兼容包袱：直接更新 interaction display wire shape、Telegram API request shape、测试 fixture 和文档；不保留旧 `DisplayEvent` 反推 `runId` 的路径，也不为旧 Telegram payload 行为写兼容 shim。
 
 ## Architecture Decisions
 
-- 默认运行状态库是统一 SQLite 文件：`~/.agents/noloong/state.sqlite`。
-- `NOLOONG_STATE_DATABASE_URL` 是唯一的全局默认状态库覆盖入口，接受现有 SQLite URL 形状。
-- 省略 `registryStore` 和 profile `eventStore` 时都使用统一 SQLite；显式配置才走 memory/postgres/object。
-- core `runId` 必须 session 命名空间化，否则多个 session 共用同一个 event table 时都会从 `run-1` 开始并产生主键冲突。
-- Telegram polling offset 是可恢复运行状态，默认进统一 SQLite；删除默认 JSON checkpoint 逻辑。
-- 没有兼容负担：旧默认、旧示例和不再需要的配置分支应直接删除或收敛，不新增兼容 shim。
-- Toasty 相关依赖同步升级到 `0.6.0`；`rusqlite` 保持当前最新 `0.39.0`，除非 resolver 要求调整。
+- 输入语义分两层：`reply_to_message` 是用户回复的历史消息上下文，当前 inbound `message_id` 是本次任务的触发消息。
+- agent 可见上下文必须进用户 message content；metadata 只作为结构化追踪和后续工具/UI 使用，不能替代模型可见内容。
+- Telegram 最终 UX 只让 agent run 的 assistant preview/final 回复触发消息；命令、审批、工具状态、提交错误继续保持普通消息，避免聊天流过度引用。
+- 回复发送使用 Telegram Bot API `reply_parameters`，并设置 `allow_sending_without_reply = true`，避免触发消息被删除时阻断最终回答。
+- batching 按 reply target 分组：不同 reply target 不能合并，同一 reply target 的连续文本可以合并；最终输出回复批次最后一条触发消息。
+- follow-up 进入正在运行的 session 时只进入队列，不重绑定当前 run 的 Telegram reply target，避免一个 run 的 preview/final 引用在运行中被后续输入改写。
 
 ## Task List
 
-### Phase 1: SQLite 默认状态库基础
+### Phase 1: 输入 reply context 建模
 
-#### Task 1: 定义统一状态数据库解析
+#### Task 1: 新增 Telegram reply context 类型与提取逻辑
 
-**Description:** 增加 host 侧状态数据库解析入口，负责从默认路径或 `NOLOONG_STATE_DATABASE_URL` 得到 SQLite URL，并确保文件型 SQLite 的父目录存在。这个入口会被 registry、event store 和 Telegram offset 复用。
+**Description:** 从 polling 已反序列化的 `reply_to_message` 中提取稳定、紧凑的 reply context，挂到 `TelegramInboundContext` 和 `TelegramTextInput`。只使用 update payload 内已有内容，不反查 Telegram 历史消息。
 
 **Acceptance criteria:**
-- [ ] 未设置环境变量时返回 `sqlite:~/.agents/noloong/state.sqlite` 展开后的文件 URL。
-- [ ] 设置 `NOLOONG_STATE_DATABASE_URL` 时完全使用该值。
-- [ ] 文件型 SQLite 连接前会创建父目录。
+- [ ] `TelegramReplyContext` 包含 replied message id、chat/thread、sender user id/username、文本预览和媒体类型摘要。
+- [ ] text/caption 使用同一预览逻辑，预览限制为 512 UTF-16 units。
+- [ ] photo/document/audio/voice/video 都能产出媒体摘要；没有 reply 时字段为 `None`。
 
 **Verification:**
-- [ ] 单元测试覆盖默认路径、环境变量覆盖、空环境变量回退、父目录创建。
-- [ ] `cargo test -p noloong config state_database`
+- [ ] 单元测试覆盖文本 reply、caption reply、媒体 reply、无 reply。
+- [ ] 单元测试覆盖 reply-to-bot gating 仍能工作。
+- [ ] `cargo test -p noloong-agent-telegram input`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `src/config.rs`
-- `src/host.rs`
+- `crates/noloong-agent-telegram/src/input.rs`
+- `crates/noloong-agent-telegram/src/access.rs`
+- `crates/noloong-agent-telegram/src/polling.rs`
+
+**Estimated scope:** M
+
+#### Task 2: 将 reply context 注入 agent user message
+
+**Description:** 更新 `telegram_user_message`，把 reply context 同时写入结构化 metadata 和模型可见的 `<telegram_reply_context>` 文本块。可见块插在用户原始文本前；媒体输入同样可见该上下文。
+
+**Acceptance criteria:**
+- [ ] 无 reply context 时 message content 与现状等价，不插入空块。
+- [ ] 有 reply context 时，第一段文本包含稳定标记块和 compact 字段。
+- [ ] metadata.telegram 增加 `replyTo`，字段命名使用 camelCase，与现有 Telegram metadata 风格一致。
+
+**Verification:**
+- [ ] bridge 单元测试覆盖纯文本和媒体输入的 content 顺序。
+- [ ] bridge 单元测试断言 metadata.telegram.replyTo 的结构。
+- [ ] `cargo test -p noloong-agent-telegram bridge`
+
+**Dependencies:** Task 1
+
+**Files likely touched:**
+- `crates/noloong-agent-telegram/src/bridge.rs`
+- `crates/noloong-agent-telegram/src/input.rs`
 
 **Estimated scope:** S
 
-#### Task 2: 将 registryStore 默认改为 SQLite
+#### Task 3: 按 reply target 调整 Telegram 文本批处理
 
-**Description:** 把 root profile config 的 `registryStore` 从必填/默认 memory 收敛为“省略即统一 SQLite”。显式 memory 仍允许用于测试，但示例不再默认使用 memory。
+**Description:** 修改 `TelegramTextBatchKey`，把 reply target 纳入批处理键。连续消息只有 chat/thread/user/reply target 都一致时才合并；合并后保留批次最后一条消息作为最终 Telegram reply trigger。
 
 **Acceptance criteria:**
-- [ ] `HostProfileConfig` 省略 `registryStore` 时构建 SQLite registry store。
-- [ ] 显式 `registryStore.type = memory/sqlite/postgres/object_fs` 仍按配置构建。
-- [ ] 普通示例配置删除显式 memory registry store。
+- [ ] 相同 reply target 的连续文本仍合并。
+- [ ] 不同 reply target 的连续文本不会合并。
+- [ ] 无 reply 与有 reply 不会合并。
 
 **Verification:**
-- [ ] 配置测试覆盖省略 registryStore、显式 memory、显式 sqlite。
-- [ ] SQLite registry reload 测试证明 session/goal/automation 可跨 registry rebuild 恢复。
-- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
+- [ ] batching 单元测试覆盖相同 reply、不同 reply、无 reply 混合场景。
+- [ ] `cargo test -p noloong-agent-telegram text_batching`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
-- `src/config.rs`
-- `src/host.rs`
-- `examples/profile-configs/*.json`
+- `crates/noloong-agent-telegram/src/input.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-#### Task 3: 将 profile eventStore 默认改为 SQLite
+### Checkpoint: 输入语义
 
-**Description:** 把 profile `eventStore` 的默认值从 memory 改为统一 SQLite。事件日志是 paused approval resume、事件 replay 和诊断的运行状态，默认不能再是进程本地。
+- [ ] Telegram inbound reply 信息完整进入 `AgentMessage`。
+- [ ] 模型能在请求内容中看到被回复消息摘要。
+- [ ] 批处理不会混淆不同 reply 目标。
 
-**Acceptance criteria:**
-- [ ] 省略 profile `eventStore` 时构建统一 SQLite event store。
-- [ ] 显式 memory 仅作为显式测试/临时运行选择保留。
-- [ ] 现有 SQLite event store schema 初始化行为保持清晰，不新增旧 memory fallback。
+### Phase 2: Telegram delivery 支持 reply_parameters
 
-**Verification:**
-- [ ] profile build 测试覆盖省略 eventStore 后写入并 reload event。
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
-- [ ] `cargo test -p noloong-agent openai_wiring`
+#### Task 4: 为 Telegram API request 增加 reply_parameters
 
-**Dependencies:** Task 1
-
-**Files likely touched:**
-- `src/config.rs`
-- `src/host.rs`
-- `schemas/profile-config.schema.json`
-
-**Estimated scope:** M
-
-### Checkpoint: 默认状态库基础
-
-- [ ] 省略 registryStore/eventStore 的 profile 能启动。
-- [ ] session snapshot 和 core event 都写入同一个 SQLite 文件。
-- [ ] 示例配置不再把正常运行路径固定到 memory。
-
-### Phase 2: Run ID 命名空间化
-
-#### Task 4: 给 AgentRuntime 增加 run id 前缀
-
-**Description:** 在 core runtime builder 增加 run id prefix 配置，并让 `next_run_id()` 生成带 session 命名空间的 id，例如 `run-<session-fingerprint>-1`。这是共享 SQLite event store 的前置安全条件。
+**Description:** 新增 `TelegramReplyParameters`，挂到 `sendMessage` 和所有现有 native media request options。JSON 和 multipart 两条发送路径都要序列化 `reply_parameters`。
 
 **Acceptance criteria:**
-- [ ] 默认 builder 在未设置 prefix 时仍能生成有效 run id。
-- [ ] 设置 prefix 后所有新 run id 都包含该 prefix。
-- [ ] run id 只包含 provider/tool/event/display 安全字符。
+- [ ] `TelegramSendMessageRequest` 支持 `reply_parameters`。
+- [ ] `TelegramMediaMessageOptions` 支持 `reply_parameters`，并传入 file_id JSON 和 multipart form。
+- [ ] `allow_sending_without_reply` 默认由调用方显式设置，不在 API 层隐藏默认。
 
 **Verification:**
-- [ ] core runtime 单测覆盖默认 run id 和带 prefix run id。
-- [ ] 事件 append/load 使用新 run id 成功。
+- [ ] API serialization 单元测试覆盖 sendMessage、media JSON、media multipart。
+- [ ] `cargo test -p noloong-agent-telegram telegram_api`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent-core/src/runtime/builder.rs`
-- `crates/noloong-agent-core/src/runtime/run_loop.rs`
+- `crates/noloong-agent-telegram/src/telegram_api.rs`
 
 **Estimated scope:** S
 
-#### Task 5: 从 AgentSession 注入稳定 run id 前缀
+#### Task 5: 为 agent delivery 增加 reply-aware 发送路径
 
-**Description:** host session 在构建 runtime 时基于 `sessionId` 生成稳定 fingerprint，并注入 core runtime。这样不同 session 即使共用同一个 event store，也不会在 `(run_id, sequence)` 主键上冲突。
+**Description:** 在 delivery 层增加 agent 专用发送 options，让 assistant preview/final 可以携带触发消息 reply target。普通 `send_text` 保持无 reply 默认，避免控制类消息被误改。
 
 **Acceptance criteria:**
-- [ ] 同一个 session 重建后生成相同 run id prefix。
-- [ ] 不同 session 的 run id prefix 不同。
-- [ ] approval id、display id、goal audit metadata 等自然使用新 run id，不保留旧 `run-1` 假设。
+- [ ] assistant delta 第一次 preview `sendMessage` 带 `reply_parameters.message_id = trigger_message_id`。
+- [ ] final 无 preview、edit 失败 fallback、media-only final 的第一条实际发送消息带 reply。
+- [ ] preview edit 路径不重复发送 reply；多段拆分文本和额外媒体不重复 reply。
 
 **Verification:**
-- [ ] registry 测试中两个 session 各跑一次，不出现 event store 主键冲突。
-- [ ] paused approval resume 使用新 run id 能恢复。
-- [ ] `cargo test -p noloong-agent --test interaction_registry`
+- [ ] delivery 单元测试覆盖 preview、final no-preview、edit fallback、media-only final。
+- [ ] 现有 command/control 发送测试断言不带 reply_parameters。
+- [ ] `cargo test -p noloong-agent-telegram delivery`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
-- `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/src/interaction/registry.rs`
-- `crates/noloong-agent/tests/interaction_registry.rs`
+- `crates/noloong-agent-telegram/src/delivery.rs`
+- `crates/noloong-agent-telegram/src/display.rs`
 
 **Estimated scope:** M
 
-### Checkpoint: 共享 event store 安全性
+### Checkpoint: 输出发送能力
 
-- [ ] 多 session 共用统一 SQLite event store 无 run id 冲突。
-- [ ] approval resume、goal audit、display event 不依赖旧 run id 形状。
-- [ ] `cargo test -p noloong-agent --test interaction_registry --test interaction_control`
+- [ ] Telegram API 层能发送 reply-aware 文本和媒体。
+- [ ] agent 输出路径能选择性引用触发消息。
+- [ ] 非 agent 控制消息未被 reply 行为污染。
 
-### Phase 3: Telegram offset 迁入 SQLite
+### Phase 3: run 与触发消息绑定
 
-#### Task 6: 实现 SQLite Telegram offset store
+#### Task 6: 在 DisplayEvent 中显式携带 runId
 
-**Description:** 为 Telegram polling offset 增加 SQLite store，表结构为 `telegram_offsets(bot_fingerprint primary key, offset, updated_at_ms)`。offset 属于 bridge 运行恢复状态，应和其他 host 状态保存在同一个 DB。
-
-**Acceptance criteria:**
-- [ ] SQLite offset store 支持 load/save。
-- [ ] store 以 bot token fingerprint 为 key，不保存 bot token 明文。
-- [ ] schema 初始化和统一状态 DB 使用同一连接策略。
-
-**Verification:**
-- [ ] 单元测试覆盖新 offset store 的空读、写入、覆盖、重建后读取。
-- [ ] `cargo test -p noloong-agent-telegram telegram_offset`
-
-**Dependencies:** Task 1
-
-**Files likely touched:**
-- `crates/noloong-agent-telegram/src/polling.rs`
-- `src/main.rs`
-
-**Estimated scope:** M
-
-#### Task 7: 删除默认 JSON offset checkpoint 路径
-
-**Description:** 默认 bridge 不再生成 `~/.agents/noloong/telegram/*.offset.json`。删除默认路径函数和相关文档。若仍保留 `FileTelegramOffsetStore`，只作为显式 CLI/env 诊断路径使用；如果实现后没有当前用途，则直接删除。
+**Description:** 更新 interaction display wire shape，让 assistant delta/final 事件显式包含 `runId`。display sender 不再依赖 `displayMessageId` 的字符串形状来识别 run。
 
 **Acceptance criteria:**
-- [ ] 未传 `--telegram-offset-checkpoint` 时使用 SQLite offset store。
-- [ ] 不再存在默认 JSON checkpoint path。
-- [ ] 文档不再建议默认 JSON checkpoint。
+- [ ] `AssistantMessageDelta` 和 `AssistantMessageFinal` 都有 `runId`。
+- [ ] `DisplayProjector` 直接填入 event.run_id。
+- [ ] 所有测试 fixture 更新为新 shape，不保留旧字段兼容。
 
 **Verification:**
-- [ ] bridge config 测试覆盖默认 SQLite offset 和显式 checkpoint 行为。
-- [ ] `cargo test -p noloong-agent-telegram`
-
-**Dependencies:** Task 6
-
-**Files likely touched:**
-- `src/main.rs`
-- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
-
-**Estimated scope:** S
-
-### Checkpoint: Telegram 恢复状态
-
-- [ ] Telegram bridge 默认 offset 存入统一 SQLite。
-- [ ] 重启 bridge 不会 replay 已处理 update。
-- [ ] 不再创建默认 `.offset.json` 文件。
-
-### Phase 4: 依赖升级和清理
-
-#### Task 8: 升级 Toasty 相关依赖
-
-**Description:** 将 Toasty 生态升级到当前版本，并按最小必要改动适配 SQL registry store 和 SQLite event store。不要顺带做无关重构。
-
-**Acceptance criteria:**
-- [ ] `toasty`, `toasty-driver-sqlite`, `toasty-driver-postgresql` 升到 `0.6.0`。
-- [ ] `Cargo.lock` 只包含升级所需变更。
-- [ ] SQL store 和 event store 编译通过。
-
-**Verification:**
-- [ ] `cargo update -p toasty -p toasty-driver-sqlite -p toasty-driver-postgresql`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
-- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
+- [ ] interaction_control display projection 测试通过。
+- [ ] Telegram display 测试全部更新并通过。
+- [ ] `cargo test -p noloong-agent --test interaction_control`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `Cargo.toml`
-- `Cargo.lock`
-- SQL store files only if Toasty 0.6 API requires it.
-
-**Estimated scope:** S
-
-#### Task 9: 清理配置 schema、文档和示例
-
-**Description:** 把文档从“memory 默认、SQLite 可选”改成“SQLite 默认、memory 显式临时”。删除历史妥协措辞和过时示例，确保 schema 与新默认一致。
-
-**Acceptance criteria:**
-- [ ] profile schema 反映 `registryStore` 和 `eventStore` 可省略。
-- [ ] architecture/interaction/telegram 文档说明统一 state DB。
-- [ ] 示例配置不保留无意义 memory 默认。
-
-**Verification:**
-- [ ] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
-- [ ] `cargo test -p noloong schema`
-
-**Dependencies:** Tasks 2, 3, 7
-
-**Files likely touched:**
-- `schemas/profile-config.schema.json`
-- `crates/noloong-agent/docs/ARCHITECTURE.md`
-- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
+- `crates/noloong-agent/src/interaction/wire.rs`
+- `crates/noloong-agent/src/interaction/control.rs`
+- `crates/noloong-agent-telegram/src/display.rs`
 
 **Estimated scope:** M
 
-### Checkpoint: 完整回归
+#### Task 7: 在 TelegramBridge 中记录 run trigger reply target
 
+**Description:** 在发起 `agent/prompt` 前登记当前 Telegram trigger message；收到该 session 的 `RunStarted` display event 时，将 pending trigger 绑定到 `runId`。run settled 后清理绑定。
+
+**Acceptance criteria:**
+- [ ] 新 run 的 trigger message id 能绑定到对应 runId。
+- [ ] request 失败时不会留下 pending trigger。
+- [ ] RunCompleted/RunFailed/RunPaused 清理或保留策略明确：Completed/Failed 清理，Paused 保留到后续 resume 输出完成。
+
+**Verification:**
+- [ ] bridge 单元测试覆盖 prompt 成功、prompt 失败、RunStarted 绑定、settled 清理。
+- [ ] display delivery 测试覆盖有绑定时 assistant 输出带 reply，无绑定时保持普通输出。
+- [ ] `cargo test -p noloong-agent-telegram bridge display`
+
+**Dependencies:** Tasks 5, 6
+
+**Files likely touched:**
+- `crates/noloong-agent-telegram/src/bridge.rs`
+- `crates/noloong-agent-telegram/src/display.rs`
+
+**Estimated scope:** M
+
+#### Task 8: 明确 follow-up 和 queued input 的 reply 行为
+
+**Description:** 对正在运行或 paused session 的 Telegram input 保持现有 follow-up/queue 语义：新输入进入 agent state，但不改写当前 run 的 reply target。该输入后续触发新 turn 时，仍通过 content/metadata 携带自己的 reply context。
+
+**Acceptance criteria:**
+- [ ] `agent/follow_up` 不登记 pending run trigger。
+- [ ] follow-up message 的 reply context 仍进入 queued AgentMessage。
+- [ ] 当前 run 的 preview/final 继续回复原始 trigger message。
+
+**Verification:**
+- [ ] bridge 测试覆盖 running session follow-up 不绑定新 trigger。
+- [ ] queue/list 或 follow-up snapshot 测试确认 queued message 保留 reply metadata。
+- [ ] `cargo test -p noloong-agent-telegram bridge`
+
+**Dependencies:** Tasks 2, 7
+
+**Files likely touched:**
+- `crates/noloong-agent-telegram/src/bridge.rs`
+- `crates/noloong-agent/tests/interaction_control.rs`
+
+**Estimated scope:** S
+
+### Checkpoint: run 绑定端到端
+
+- [ ] 新 run 输出能稳定回复触发消息。
+- [ ] follow-up 不会抢占当前 run 的 reply target。
+- [ ] display wire shape 已收敛到新结构，无旧兼容分支。
+
+### Phase 4: 提示词、文档和真实 smoke
+
+#### Task 9: 更新 Telegram prompt addition 和文档
+
+**Description:** 更新 Telegram channel prompt addition，解释 `<telegram_reply_context>` 的含义和使用边界；文档补充用户回复消息与 bot 回复引用的行为。
+
+**Acceptance criteria:**
+- [ ] prompt addition 说明 reply context 是上下文，不是用户正文指令。
+- [ ] Telegram 文档说明最终 agent 输出会回复触发消息。
+- [ ] 文档不提旧 displayMessageId 反推或兼容路径。
+
+**Verification:**
+- [ ] prompt render 相关测试通过。
+- [ ] 文档检查无需额外生成文件。
+- [ ] `cargo test -p noloong-agent-telegram bridge`
+
+**Dependencies:** Tasks 2, 7
+
+**Files likely touched:**
+- `crates/noloong-agent-telegram/src/bridge.rs`
+- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
+
+**Estimated scope:** S
+
+#### Task 10: 回归与真实 Telegram smoke
+
+**Description:** 完成代码后跑针对性测试和真实 Telegram 场景验证。真实 smoke 使用现有 `examples/profile-configs/chatgpt-codex-subscription.json`，验证 UI 引用和模型可见 reply context。
+
+**Acceptance criteria:**
+- [ ] 普通 prompt 的 assistant 最终回答在 Telegram UI 中回复触发消息。
+- [ ] 用户回复旧消息并提问时，agent 能识别被回复消息的 id/text preview。
+- [ ] 回复 bot 自己的上一条消息时，group/private gating 与 reply context 都正常。
+
+**Verification:**
 - [ ] `cargo fmt --all --check`
-- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
-- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] `cargo test -p noloong-agent --test interaction_registry --test interaction_control`
 - [ ] `cargo test -p noloong-agent-telegram`
-- [ ] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
+- [ ] `cargo test -p noloong-agent --test interaction_control`
+- [ ] `cargo test -p noloong-agent --test interaction_registry`
+- [ ] 真实 Telegram smoke 记录通过现象和任何新问题。
+
+**Dependencies:** Tasks 1-9
+
+**Files likely touched:**
+- No planned code changes; only test/run notes if needed.
+
+**Estimated scope:** S
+
+### Checkpoint: Complete
+
+- [ ] 所有 unit/integration tests 通过。
+- [ ] 真实 Telegram smoke 通过普通 prompt、reply prompt、reply-to-bot 三条路径。
+- [ ] 未发现旧兼容 shim、死代码或过时文档残留。
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| 多 session 共享 event store 后 run id 冲突 | High | 先完成 run id 命名空间化，再启用默认 SQLite eventStore。 |
-| Toasty 0.6 API 破坏 SQL store 编译 | Medium | 依赖升级独立成任务，先跑最小 SQL/event 测试再扩大回归。 |
-| 默认 SQLite 目录权限或路径不可用 | Medium | 统一入口创建父目录并给出明确错误，不回退 memory。 |
-| Telegram offset 迁移遗漏导致 update replay | Medium | 默认 SQLite offset store 必须有重启读取测试和一次真实 Telegram smoke。 |
-| 示例仍显式 memory 误导后续使用 | Low | 清理普通示例，只在测试/隔离 smoke 中保留 memory。 |
+| Display event 与 prompt 请求之间存在竞态 | High | prompt 前登记 pending trigger，RunStarted 按 session FIFO 绑定；请求失败立即回滚 pending。 |
+| Telegram reply target 消息被删除 | Medium | 使用 `allow_sending_without_reply=true`，发送失败不应阻断最终回答。 |
+| reply context 被模型当成用户正文 | Medium | 使用稳定 XML-like 标记块，并在 Telegram prompt addition 中明确其语义。 |
+| follow-up 期间用户发新消息导致引用混乱 | Medium | follow-up 不重绑定当前 run；新消息只作为 queued user input 保留自身 reply context。 |
+| 媒体 final 多条消息都引用触发消息造成刷屏 | Low | 只让第一条实际发送的 final/preview 带 reply，后续拆分消息不重复引用。 |
 
 ## Parallelization Opportunities
 
-- Task 8 依赖升级可和 Task 1-3 并行，但最终需要统一回归。
-- Task 6 的 SQLite offset store 可在 Task 1 的状态 DB helper 定稿后并行实现。
-- Task 9 文档/schema 必须等实现形状稳定后再做。
+- Task 1-3 依赖输入模型，适合一个 agent 顺序完成。
+- Task 4 可独立并行完成；Task 5 等 Task 4 后接入 delivery。
+- Task 6 可与 Task 1-4 并行，但 Task 7 需要 Task 5 和 Task 6 完成后实施。
+- Task 9 可在核心代码稳定后独立完成；Task 10 必须最后执行。
 
 ## Open Questions
 
-- 无。当前决策是：没有兼容负担，默认统一 SQLite，旧默认 memory/JSON checkpoint 路径直接清理。
+- None. 当前默认选择已锁定：agent run 输出回复触发消息、reply context 同时可见和结构化、batching 按 reply target 分组。

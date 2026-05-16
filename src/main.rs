@@ -49,7 +49,7 @@ use noloong_agent_telegram::{
         TelegramUnsupportedMediaFallbackPolicy,
     },
     delivery::{TelegramDelivery, TelegramMessageTarget},
-    display::{TelegramDisplayState, cleanup_display_messages, deliver_display_event},
+    display::{TelegramDisplayState, cleanup_display_messages, deliver_display_event_with_reply},
     i18n::{
         MANIFEST_PROPOSAL_DISPLAY_LIMIT, TelegramManifestCard, TelegramStatusCard,
         TelegramUiCatalog,
@@ -456,14 +456,18 @@ async fn run_display_delivery(
         let Some(key) = bridge.session_key_for_display(&display.session_id) else {
             continue;
         };
+        let reply_to = bridge
+            .observe_display_reply_target(key, &display.event)
+            .map(noloong_agent_telegram::delivery::TelegramReplyTarget::new);
         let cleanup = {
             let state = display_state_for(&display_states, key).await;
             let mut state = state.lock().await;
-            match deliver_display_event(
+            match deliver_display_event_with_reply(
                 &mut state,
                 &delivery,
                 TelegramMessageTarget::new(key.chat_id, key.thread_id),
                 display,
+                reply_to,
                 show_tool_status,
                 edit_throttle,
                 catalog,
@@ -1187,6 +1191,7 @@ impl BridgeUpdateHandler {
                         message_thread_id: target.message_thread_id,
                         caption: Some(self.catalog.process_output_attached(&output.job_id)),
                         parse_mode: None,
+                        reply_parameters: None,
                         reply_markup: None,
                     },
                 })
@@ -3822,6 +3827,7 @@ mod tests {
             message_id: 2,
             text: text.into(),
             is_reply_to_bot: false,
+            reply_to: None,
         }
     }
 
@@ -3833,6 +3839,7 @@ mod tests {
             user_id: Some(621),
             message_id,
             is_reply_to_bot: false,
+            reply_to: None,
         }
     }
 

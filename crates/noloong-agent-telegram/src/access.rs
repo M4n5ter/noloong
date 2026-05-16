@@ -84,6 +84,7 @@ pub struct TelegramTextInput {
     pub message_id: i64,
     pub text: String,
     pub is_reply_to_bot: bool,
+    pub reply_to: Option<TelegramReplyContext>,
 }
 
 impl TelegramTextInput {
@@ -98,6 +99,40 @@ impl TelegramTextInput {
             return self.text.trim().to_owned();
         };
         telegram_text_without_username_mention(&self.text, username)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramReplyContext {
+    pub message_id: i64,
+    pub chat_id: i64,
+    pub thread_id: Option<i64>,
+    pub user_id: Option<u64>,
+    pub username: Option<String>,
+    pub text_preview: Option<String>,
+    pub media_kinds: Vec<TelegramReplyMediaKind>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramReplyMediaKind {
+    Photo,
+    Document,
+    Audio,
+    Voice,
+    Video,
+}
+
+impl TelegramReplyMediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Photo => "photo",
+            Self::Document => "document",
+            Self::Audio => "audio",
+            Self::Voice => "voice",
+            Self::Video => "video",
+        }
     }
 }
 
@@ -197,6 +232,7 @@ mod tests {
             message_id: 1,
             text: "hello".into(),
             is_reply_to_bot: false,
+            reply_to: None,
         };
 
         assert!(policy.accepts_text(&input, Some("noloong_bot")));
@@ -213,6 +249,7 @@ mod tests {
             message_id: 1,
             text: "hello".into(),
             is_reply_to_bot: false,
+            reply_to: None,
         };
 
         assert!(!policy.accepts_text(&input, Some("noloong_bot")));

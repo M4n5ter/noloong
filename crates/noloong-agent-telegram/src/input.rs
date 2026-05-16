@@ -1,7 +1,8 @@
 use crate::{
     access::{
-        TelegramChatKind, TelegramTextInput, telegram_text_mentions_username,
-        telegram_text_without_username_mention, telegram_username_matches,
+        TelegramChatKind, TelegramReplyContext, TelegramReplyMediaKind, TelegramTextInput,
+        telegram_text_mentions_username, telegram_text_without_username_mention,
+        telegram_username_matches,
     },
     polling::{
         TelegramAudio, TelegramDocument, TelegramMessage, TelegramMessageEntity, TelegramPhotoSize,
@@ -10,6 +11,8 @@ use crate::{
     text::{DEFAULT_TELEGRAM_TEXT_LIMIT_UTF16_UNITS, telegram_utf16_units},
 };
 use std::collections::BTreeMap;
+
+const TELEGRAM_REPLY_TEXT_PREVIEW_LIMIT_UTF16_UNITS: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TelegramInboundUpdate {
@@ -61,6 +64,7 @@ impl TelegramInboundMessage {
             message_id: self.context.message_id,
             text: self.text?,
             is_reply_to_bot: self.context.is_reply_to_bot,
+            reply_to: self.context.reply_to,
         })
     }
 
@@ -112,6 +116,7 @@ pub struct TelegramInboundContext {
     pub user_id: Option<u64>,
     pub message_id: i64,
     pub is_reply_to_bot: bool,
+    pub reply_to: Option<TelegramReplyContext>,
 }
 
 impl TelegramInboundContext {
@@ -123,6 +128,10 @@ impl TelegramInboundContext {
             user_id: message.from.as_ref().map(|user| user.id),
             message_id: message.message_id,
             is_reply_to_bot: message_is_reply_to_bot(message, bot_username),
+            reply_to: message
+                .reply_to_message
+                .as_deref()
+                .map(telegram_reply_context),
         }
     }
 
@@ -134,6 +143,7 @@ impl TelegramInboundContext {
             user_id: input.user_id,
             message_id: input.message_id,
             is_reply_to_bot: input.is_reply_to_bot,
+            reply_to: input.reply_to.clone(),
         }
     }
 }
@@ -267,6 +277,7 @@ struct TelegramTextBatchKey {
     chat_id: i64,
     thread_id: Option<i64>,
     user_id: Option<u64>,
+    reply_to_message_id: Option<i64>,
 }
 
 impl TelegramTextBatchKey {
@@ -275,6 +286,7 @@ impl TelegramTextBatchKey {
             chat_id: input.chat_id,
             thread_id: input.thread_id,
             user_id: input.user_id,
+            reply_to_message_id: input.reply_to.as_ref().map(|reply| reply.message_id),
         }
     }
 }
@@ -322,6 +334,57 @@ fn telegram_attachments(message: &TelegramMessage) -> Vec<TelegramAttachment> {
         attachments.push(TelegramAttachment::from_video(video));
     }
     attachments
+}
+
+fn telegram_reply_context(message: &TelegramMessage) -> TelegramReplyContext {
+    TelegramReplyContext {
+        message_id: message.message_id,
+        chat_id: message.chat.id,
+        thread_id: message.message_thread_id,
+        user_id: message.from.as_ref().map(|user| user.id),
+        username: message.from.as_ref().and_then(|user| user.username.clone()),
+        text_preview: telegram_reply_text_preview(message),
+        media_kinds: telegram_reply_media_kinds(message),
+    }
+}
+
+fn telegram_reply_text_preview(message: &TelegramMessage) -> Option<String> {
+    message_text(message.text.clone(), message.caption.clone())
+        .map(|text| truncate_utf16_units(&text, TELEGRAM_REPLY_TEXT_PREVIEW_LIMIT_UTF16_UNITS))
+}
+
+fn telegram_reply_media_kinds(message: &TelegramMessage) -> Vec<TelegramReplyMediaKind> {
+    let mut kinds = Vec::new();
+    if !message.photo.is_empty() {
+        kinds.push(TelegramReplyMediaKind::Photo);
+    }
+    if message.document.is_some() {
+        kinds.push(TelegramReplyMediaKind::Document);
+    }
+    if message.audio.is_some() {
+        kinds.push(TelegramReplyMediaKind::Audio);
+    }
+    if message.voice.is_some() {
+        kinds.push(TelegramReplyMediaKind::Voice);
+    }
+    if message.video.is_some() {
+        kinds.push(TelegramReplyMediaKind::Video);
+    }
+    kinds
+}
+
+fn truncate_utf16_units(text: &str, max_units: usize) -> String {
+    let mut units = 0;
+    let mut truncated = String::new();
+    for ch in text.chars() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units {
+            break;
+        }
+        truncated.push(ch);
+        units += ch_units;
+    }
+    truncated
 }
 
 fn best_photo_size(photo: &[TelegramPhotoSize]) -> Option<&TelegramPhotoSize> {
@@ -508,10 +571,12 @@ mod tests {
         TelegramAttachmentKind, TelegramInboundUpdate, TelegramTextBatcher,
         TelegramTextBatcherConfig,
     };
-    use crate::access::{TelegramChatKind, TelegramTextInput};
+    use crate::access::{
+        TelegramChatKind, TelegramReplyContext, TelegramReplyMediaKind, TelegramTextInput,
+    };
     use crate::polling::{
-        TelegramChat, TelegramMessage, TelegramMessageEntity, TelegramMessageEntityKind,
-        TelegramPhotoSize,
+        TelegramChat, TelegramDocument, TelegramMessage, TelegramMessageEntity,
+        TelegramMessageEntityKind, TelegramPhotoSize, TelegramUser,
     };
 
     #[test]
@@ -535,6 +600,26 @@ mod tests {
 
         assert!(batcher.ready_batches(1_999).is_empty());
         assert_eq!(batcher.ready_batches(2_000).len(), 1);
+    }
+
+    #[test]
+    fn text_batching_separates_different_reply_targets() {
+        let mut batcher = TelegramTextBatcher::new(TelegramTextBatcherConfig::default());
+        let mut first = input("first", 1);
+        first.reply_to = Some(reply_context(10));
+        let mut second = input("second", 2);
+        second.reply_to = Some(reply_context(11));
+        let mut third = input("third", 3);
+        third.reply_to = Some(reply_context(10));
+
+        batcher.push(first, 0);
+        batcher.push(second, 100);
+        batcher.push(third, 200);
+        let ready = batcher.ready_batches(800);
+
+        assert_eq!(ready.len(), 2);
+        assert!(ready.iter().any(|batch| batch.input.text == "first\nthird"));
+        assert!(ready.iter().any(|batch| batch.input.text == "second"));
     }
 
     #[test]
@@ -593,6 +678,93 @@ mod tests {
         );
         assert_eq!(message.attachments[0].file.file_id, "large");
         assert!(message.into_text_input().is_none());
+    }
+
+    #[test]
+    fn inbound_message_extracts_reply_context() {
+        let update = TelegramInboundUpdate::from_message(
+            TelegramMessage {
+                message_id: 9,
+                message_thread_id: Some(3),
+                chat: TelegramChat {
+                    id: -100,
+                    kind: "supergroup".into(),
+                },
+                from: None,
+                text: Some("what about this?".into()),
+                caption: None,
+                entities: Vec::new(),
+                caption_entities: Vec::new(),
+                photo: Vec::new(),
+                document: None,
+                audio: None,
+                voice: None,
+                video: None,
+                reply_to_message: Some(Box::new(TelegramMessage {
+                    message_id: 7,
+                    message_thread_id: Some(3),
+                    chat: TelegramChat {
+                        id: -100,
+                        kind: "supergroup".into(),
+                    },
+                    from: Some(TelegramUser {
+                        id: 55,
+                        username: Some("alice".into()),
+                    }),
+                    text: None,
+                    caption: Some("see attached".into()),
+                    entities: Vec::new(),
+                    caption_entities: Vec::new(),
+                    photo: vec![TelegramPhotoSize {
+                        file_id: "photo".into(),
+                        file_unique_id: "photo-unique".into(),
+                        width: 640,
+                        height: 480,
+                        file_size: Some(100),
+                    }],
+                    document: Some(TelegramDocument {
+                        file_id: "doc".into(),
+                        file_unique_id: "doc-unique".into(),
+                        file_name: Some("report.pdf".into()),
+                        mime_type: Some("application/pdf".into()),
+                        file_size: Some(200),
+                    }),
+                    audio: None,
+                    voice: None,
+                    video: None,
+                    reply_to_message: None,
+                })),
+            },
+            Some("noloong_bot"),
+        )
+        .unwrap();
+
+        let TelegramInboundUpdate::Message(message) = update else {
+            panic!("expected inbound message");
+        };
+        let reply = message.context.reply_to.as_ref().unwrap();
+        assert_eq!(reply.message_id, 7);
+        assert_eq!(reply.chat_id, -100);
+        assert_eq!(reply.thread_id, Some(3));
+        assert_eq!(reply.user_id, Some(55));
+        assert_eq!(reply.username.as_deref(), Some("alice"));
+        assert_eq!(reply.text_preview.as_deref(), Some("see attached"));
+        assert_eq!(
+            reply.media_kinds,
+            [
+                TelegramReplyMediaKind::Photo,
+                TelegramReplyMediaKind::Document
+            ]
+        );
+        assert_eq!(
+            message
+                .into_text_input()
+                .unwrap()
+                .reply_to
+                .unwrap()
+                .message_id,
+            7
+        );
     }
 
     #[test]
@@ -705,6 +877,19 @@ mod tests {
             message_id,
             text: text.into(),
             is_reply_to_bot: false,
+            reply_to: None,
+        }
+    }
+
+    fn reply_context(message_id: i64) -> TelegramReplyContext {
+        TelegramReplyContext {
+            message_id,
+            chat_id: 42,
+            thread_id: None,
+            user_id: Some(7),
+            username: Some("alice".into()),
+            text_preview: Some(format!("reply {message_id}")),
+            media_kinds: Vec::new(),
         }
     }
 }

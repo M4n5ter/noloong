@@ -988,6 +988,7 @@ impl DisplayProjector {
             } => {
                 if self.ux.stream_text {
                     vec![DisplayEvent::AssistantMessageDelta {
+                        run_id: event.run_id.clone(),
                         display_message_id: display_message_id(&event.run_id),
                         text: truncate_text_for_ux(&text, &self.ux).0,
                     }]
@@ -1000,6 +1001,7 @@ impl DisplayProjector {
             } if matches!(message.role, noloong_agent_core::MessageRole::Assistant) => {
                 let (message, truncated) = truncate_message_for_ux(message, &self.ux);
                 vec![DisplayEvent::AssistantMessageFinal {
+                    run_id: event.run_id.clone(),
                     display_message_id: display_message_id(&event.run_id),
                     message,
                     truncated,

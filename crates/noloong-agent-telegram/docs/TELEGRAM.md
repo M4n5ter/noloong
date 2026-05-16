@@ -133,6 +133,15 @@ Supported registry stores:
 - Public interaction bind addresses require a bearer token.
 - Bot tokens and API keys should come from environment variables, not JSON config.
 
+## Reply Semantics
+
+Telegram replies carry two separate meanings:
+
+- The inbound `reply_to_message` describes the older Telegram message that the user replied to. The bridge summarizes that message into a `<telegram_reply_context>` block in the submitted user message and also records structured `metadata.telegram.replyTo`.
+- The inbound message itself is the trigger for the agent run. Assistant preview/final output for that run is sent with Telegram `reply_parameters.message_id` pointing at the trigger message, so Telegram shows the final answer as a reply to the user message that started the task.
+
+Only assistant output for an agent run uses this reply target. Command cards, approval cards, tool status messages, and submission-error notices are sent as normal Telegram messages to avoid noisy reply chains. If a user sends follow-up input while a run is already active, that input keeps its own reply context in the queued user message but does not rewrite the active run's Telegram reply target.
+
 Bridge environment variables:
 
 - `TELEGRAM_BOT_TOKEN`
@@ -210,6 +219,8 @@ Minimal smoke:
 - Start the bridge with either the OpenRouter free or ChatGPT subscription command above.
 - Send `/status`.
 - Send one text prompt and wait for the final reply.
+- Reply to an older message and ask what was replied to; verify the agent can use the summarized reply context.
+- Verify the assistant final reply is visually attached to the user message that triggered the run.
 
 Extended regression:
 

@@ -4,9 +4,9 @@ use crate::{
         TelegramApi, TelegramApiError, TelegramChatAction, TelegramDeleteMessageRequest,
         TelegramEditMessageTextRequest, TelegramInlineKeyboardMarkup, TelegramInputFile,
         TelegramMediaMessageOptions, TelegramMessageHandle, TelegramParseMode,
-        TelegramSendAudioRequest, TelegramSendChatActionRequest, TelegramSendDocumentRequest,
-        TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramSendVideoRequest,
-        TelegramSendVoiceRequest,
+        TelegramReplyParameters, TelegramSendAudioRequest, TelegramSendChatActionRequest,
+        TelegramSendDocumentRequest, TelegramSendMessageRequest, TelegramSendPhotoRequest,
+        TelegramSendVideoRequest, TelegramSendVoiceRequest,
     },
     text::{split_telegram_text_with_continuation, telegram_utf16_units},
 };
@@ -39,6 +39,29 @@ impl TelegramMessageTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelegramReplyTarget {
+    pub message_id: i64,
+}
+
+impl TelegramReplyTarget {
+    pub fn new(message_id: i64) -> Self {
+        Self { message_id }
+    }
+
+    fn into_parameters(self) -> TelegramReplyParameters {
+        TelegramReplyParameters {
+            message_id: self.message_id,
+            allow_sending_without_reply: Some(true),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TelegramAgentMessageOptions {
+    pub reply_to: Option<TelegramReplyTarget>,
+}
+
 #[derive(Clone)]
 pub struct TelegramDelivery {
     api: Arc<dyn TelegramApi>,
@@ -64,9 +87,28 @@ impl TelegramDelivery {
         target: TelegramMessageTarget,
         message: &AgentMessage,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
+        self.send_agent_message_with_options(
+            target,
+            message,
+            TelegramAgentMessageOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn send_agent_message_with_options(
+        &self,
+        target: TelegramMessageTarget,
+        message: &AgentMessage,
+        options: TelegramAgentMessageOptions,
+    ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
         if !agent_message_has_media(message) {
             return self
-                .send_text(target, &render_agent_message_text(message), None)
+                .send_text_with_reply(
+                    target,
+                    &render_agent_message_text(message),
+                    None,
+                    options.reply_to,
+                )
                 .await;
         }
 
@@ -74,6 +116,7 @@ impl TelegramDelivery {
             .await;
         let mut sent = Vec::new();
         let mut pending_text = String::new();
+        let mut reply_to = options.reply_to;
         for block in &message.content {
             match block {
                 ContentBlock::Media { media } => {
@@ -81,29 +124,40 @@ impl TelegramDelivery {
                         PendingCaption::None => None,
                         PendingCaption::Caption(caption) => Some(caption),
                         PendingCaption::Flush(text) => {
-                            sent.extend(self.send_text(target, &text, None).await?);
+                            sent.extend(
+                                self.send_text_with_reply(target, &text, None, reply_to.take())
+                                    .await?,
+                            );
                             None
                         }
                     };
-                    sent.push(self.send_media_or_fallback(target, media, caption).await?);
+                    sent.push(
+                        self.send_media_or_fallback(target, media, caption, reply_to.take())
+                            .await?,
+                    );
                 }
                 _ => push_pending_text(&mut pending_text, block),
             }
         }
         if !pending_text.trim().is_empty() {
-            sent.extend(self.send_text(target, pending_text.trim(), None).await?);
+            sent.extend(
+                self.send_text_with_reply(target, pending_text.trim(), None, reply_to.take())
+                    .await?,
+            );
         }
         Ok(sent)
     }
 
-    pub(crate) async fn send_agent_final_message(
+    pub(crate) async fn send_agent_final_message_with_options(
         &self,
         target: TelegramMessageTarget,
         preview: Option<TelegramPreviewMessage>,
         message: &AgentMessage,
+        options: TelegramAgentMessageOptions,
     ) -> TelegramDeliveryResult<()> {
         let Some(preview) = preview else {
-            self.send_agent_message(target, message).await?;
+            self.send_agent_message_with_options(target, message, options)
+                .await?;
             return Ok(());
         };
 
@@ -119,7 +173,8 @@ impl TelegramDelivery {
                 .await
                 .is_err()
             {
-                self.send_text(target, &text, None).await?;
+                self.send_text_with_reply(target, &text, None, options.reply_to)
+                    .await?;
             }
             return Ok(());
         }
@@ -132,7 +187,8 @@ impl TelegramDelivery {
                 .await
                 .is_err()
         {
-            self.send_agent_message(target, message).await?;
+            self.send_agent_message_with_options(target, message, options)
+                .await?;
             return Ok(());
         }
         self.send_media_blocks(target, message).await?;
@@ -145,17 +201,29 @@ impl TelegramDelivery {
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
     ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
+        self.send_text_with_reply(target, text, reply_markup, None)
+            .await
+    }
+
+    pub(crate) async fn send_text_with_reply(
+        &self,
+        target: TelegramMessageTarget,
+        text: &str,
+        reply_markup: Option<TelegramInlineKeyboardMarkup>,
+        reply_to: Option<TelegramReplyTarget>,
+    ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
         let chunks = split_telegram_text_with_continuation(text, self.max_message_units);
         let mut sent = Vec::with_capacity(chunks.len());
+        let mut reply_to = reply_to;
         for chunk in chunks {
             if chunk.trim().is_empty() {
                 continue;
             }
             sent.push(
-                self.send_one_text(target, &chunk, reply_markup.clone())
+                self.send_one_text(target, &chunk, reply_markup.clone(), reply_to.take())
                     .await?,
             );
         }
@@ -253,7 +321,9 @@ impl TelegramDelivery {
         target: TelegramMessageTarget,
         text: &str,
         reply_markup: Option<TelegramInlineKeyboardMarkup>,
+        reply_to: Option<TelegramReplyTarget>,
     ) -> TelegramDeliveryResult<TelegramMessageHandle> {
+        let reply_parameters = reply_to.map(TelegramReplyTarget::into_parameters);
         let rendered = render_markdown_v2(text);
         match self
             .api
@@ -262,6 +332,7 @@ impl TelegramDelivery {
                 message_thread_id: target.message_thread_id,
                 text: rendered,
                 parse_mode: Some(TelegramParseMode::MarkdownV2),
+                reply_parameters: reply_parameters.clone(),
                 reply_markup: reply_markup.clone(),
             })
             .await
@@ -274,6 +345,7 @@ impl TelegramDelivery {
                     message_thread_id: target.message_thread_id,
                     text: text.into(),
                     parse_mode: None,
+                    reply_parameters,
                     reply_markup,
                 })
                 .await
@@ -287,12 +359,16 @@ impl TelegramDelivery {
         target: TelegramMessageTarget,
         media: &MediaBlock,
         caption: Option<String>,
+        reply_to: Option<TelegramReplyTarget>,
     ) -> TelegramDeliveryResult<TelegramMessageHandle> {
-        match self.send_media_native(target, media, caption.clone()).await {
+        match self
+            .send_media_native(target, media, caption.clone(), reply_to)
+            .await
+        {
             Ok(message) => Ok(message),
             Err(error) => {
                 let text = media_fallback_text(media, Some(error.to_string()), caption);
-                self.send_one_text(target, &text, None).await
+                self.send_one_text(target, &text, None, reply_to).await
             }
         }
     }
@@ -309,7 +385,10 @@ impl TelegramDelivery {
             let ContentBlock::Media { media } = block else {
                 continue;
             };
-            sent.push(self.send_media_or_fallback(target, media, None).await?);
+            sent.push(
+                self.send_media_or_fallback(target, media, None, None)
+                    .await?,
+            );
         }
         Ok(sent)
     }
@@ -337,12 +416,14 @@ impl TelegramDelivery {
         target: TelegramMessageTarget,
         media: &MediaBlock,
         caption: Option<String>,
+        reply_to: Option<TelegramReplyTarget>,
     ) -> TelegramDeliveryResult<TelegramMessageHandle> {
         let input = telegram_input_file(media)?;
         let options = TelegramMediaMessageOptions {
             message_thread_id: target.message_thread_id,
             caption,
             parse_mode: None,
+            reply_parameters: reply_to.map(TelegramReplyTarget::into_parameters),
             reply_markup: None,
         };
         match TelegramNativeMediaKind::for_media_kind(&media.kind) {
@@ -603,7 +684,10 @@ fn media_fallback_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramDelivery, TelegramMessageTarget, TelegramPreviewMessage};
+    use super::{
+        TelegramAgentMessageOptions, TelegramDelivery, TelegramMessageTarget,
+        TelegramPreviewMessage, TelegramReplyTarget,
+    };
     use crate::{
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramChatAction, TelegramDeleteMessageRequest,
@@ -697,6 +781,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_text_reply_target_applies_to_first_chunk_only() {
+        let api = Arc::new(FakeTelegramApi::normal());
+        let delivery = TelegramDelivery::new(api.clone(), 8);
+
+        delivery
+            .send_agent_message_with_options(
+                TelegramMessageTarget::chat(42),
+                &assistant_message(vec![ContentBlock::Text {
+                    text: "hello world".into(),
+                }]),
+                TelegramAgentMessageOptions {
+                    reply_to: Some(TelegramReplyTarget::new(7)),
+                },
+            )
+            .await
+            .unwrap();
+
+        let calls = api.sent_calls.lock().unwrap().clone();
+        assert!(calls.len() > 1);
+        assert_eq!(
+            calls[0]
+                .reply_parameters
+                .as_ref()
+                .map(|reply| reply.message_id),
+            Some(7)
+        );
+        assert!(
+            calls[1..]
+                .iter()
+                .all(|call| call.reply_parameters.is_none())
+        );
+    }
+
+    #[tokio::test]
     async fn send_text_skips_empty_chunks() {
         let api = Arc::new(FakeTelegramApi::normal());
         let delivery = TelegramDelivery::new(api.clone(), 3900);
@@ -721,7 +839,7 @@ mod tests {
         let delivery = TelegramDelivery::new(api.clone(), 3900);
 
         delivery
-            .send_agent_final_message(
+            .send_agent_final_message_with_options(
                 TelegramMessageTarget::chat(42),
                 Some(TelegramPreviewMessage {
                     message_id: 9,
@@ -734,6 +852,7 @@ mod tests {
                         arguments: serde_json::json!({"command": "sleep 90"}),
                     },
                 }]),
+                TelegramAgentMessageOptions::default(),
             )
             .await
             .unwrap();
@@ -799,6 +918,34 @@ mod tests {
         assert_eq!(
             api.chat_actions.lock().unwrap()[0].action,
             TelegramChatAction::UploadPhoto
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_media_reply_target_applies_to_first_media() {
+        let api = Arc::new(FakeTelegramApi::normal());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let media = MediaBlock::inline_base64(MediaKind::Image, "YWJj");
+
+        delivery
+            .send_agent_message_with_options(
+                TelegramMessageTarget::chat(42),
+                &assistant_message(vec![ContentBlock::Media { media }]),
+                TelegramAgentMessageOptions {
+                    reply_to: Some(TelegramReplyTarget::new(7)),
+                },
+            )
+            .await
+            .unwrap();
+
+        let photo_calls = api.photo_calls.lock().unwrap().clone();
+        assert_eq!(
+            photo_calls[0]
+                .options
+                .reply_parameters
+                .as_ref()
+                .map(|reply| reply.message_id),
+            Some(7)
         );
     }
 

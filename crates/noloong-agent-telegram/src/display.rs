@@ -2,7 +2,8 @@ use crate::{
     approval::{TelegramApprovalSelection, TelegramApprovalStore, render_approval_request},
     bridge::InteractionDisplayNotification,
     delivery::{
-        TelegramDelivery, TelegramDeliveryResult, TelegramMessageTarget, TelegramPreviewMessage,
+        TelegramAgentMessageOptions, TelegramDelivery, TelegramDeliveryResult,
+        TelegramMessageTarget, TelegramPreviewMessage, TelegramReplyTarget,
     },
     i18n::TelegramUiCatalog,
     telegram_api::{TelegramChatAction, TelegramMessageHandle},
@@ -84,9 +85,33 @@ pub async fn deliver_display_event(
     edit_throttle: Duration,
     catalog: TelegramUiCatalog,
 ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
+    deliver_display_event_with_reply(
+        state,
+        delivery,
+        target,
+        notification,
+        None,
+        show_tool_status,
+        edit_throttle,
+        catalog,
+    )
+    .await
+}
+
+pub async fn deliver_display_event_with_reply(
+    state: &mut TelegramDisplayState,
+    delivery: &TelegramDelivery,
+    target: TelegramMessageTarget,
+    notification: InteractionDisplayNotification,
+    reply_to: Option<TelegramReplyTarget>,
+    show_tool_status: bool,
+    edit_throttle: Duration,
+    catalog: TelegramUiCatalog,
+) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
     let mut cleanup = Vec::new();
     match notification.event {
         DisplayEvent::AssistantMessageDelta {
+            run_id: _,
             display_message_id,
             text,
         } => {
@@ -103,7 +128,7 @@ pub async fn deliver_display_event(
                     )
                     .await;
                     let Some(sent) = delivery
-                        .send_text(target, &text, None)
+                        .send_text_with_reply(target, &text, None, reply_to)
                         .await?
                         .into_iter()
                         .next()
@@ -130,6 +155,7 @@ pub async fn deliver_display_event(
             }
         }
         DisplayEvent::AssistantMessageFinal {
+            run_id: _,
             display_message_id,
             message,
             ..
@@ -139,7 +165,12 @@ pub async fn deliver_display_event(
                 .remove(&display_message_id)
                 .and_then(preview_from_display_state);
             delivery
-                .send_agent_final_message(target, preview, &message)
+                .send_agent_final_message_with_options(
+                    target,
+                    preview,
+                    &message,
+                    TelegramAgentMessageOptions { reply_to },
+                )
                 .await?;
         }
         DisplayEvent::ApprovalRequested { approval } => {
@@ -373,10 +404,13 @@ fn should_edit(last_edit_at: Option<Instant>, now: Instant, edit_throttle: Durat
 
 #[cfg(test)]
 mod tests {
-    use super::{TelegramDisplayState, cleanup_display_messages, deliver_display_event};
+    use super::{
+        TelegramDisplayState, cleanup_display_messages, deliver_display_event,
+        deliver_display_event_with_reply,
+    };
     use crate::{
         bridge::InteractionDisplayNotification,
-        delivery::{TelegramDelivery, TelegramMessageTarget},
+        delivery::{TelegramDelivery, TelegramMessageTarget, TelegramReplyTarget},
         i18n::TelegramUiCatalog,
         telegram_api::{
             TelegramApi, TelegramApiError, TelegramChatAction, TelegramDeleteMessageRequest,
@@ -409,6 +443,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: "hello".into(),
             }),
@@ -423,6 +458,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: " world".into(),
             }),
@@ -444,6 +480,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn display_delta_can_reply_to_trigger_message() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event_with_reply(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
+                display_message_id: "m1".into(),
+                text: "hello".into(),
+            }),
+            Some(TelegramReplyTarget::new(77)),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::En),
+        )
+        .await
+        .unwrap();
+
+        let calls = api.sent.lock().unwrap().clone();
+        assert_eq!(
+            calls[0]
+                .reply_parameters
+                .as_ref()
+                .map(|reply| reply.message_id),
+            Some(77)
+        );
+    }
+
+    #[tokio::test]
     async fn display_empty_delta_waits_for_visible_text() {
         let api = Arc::new(FakeTelegramApi::default());
         let delivery = TelegramDelivery::new(api.clone(), 3900);
@@ -454,6 +523,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: String::new(),
             }),
@@ -468,6 +538,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: "hello".into(),
             }),
@@ -494,6 +565,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: "hello".into(),
             }),
@@ -508,6 +580,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: " world".into(),
             }),
@@ -533,6 +606,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: "draft".into(),
             }),
@@ -547,6 +621,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageFinal {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 message: AgentMessage::assistant(
                     "a1",
@@ -706,6 +781,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: "draft".into(),
             }),
@@ -720,6 +796,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageFinal {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 message: AgentMessage::assistant(
                     "a1",
@@ -757,6 +834,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 text: "final".into(),
             }),
@@ -771,6 +849,7 @@ mod tests {
             &delivery,
             target(),
             notification(DisplayEvent::AssistantMessageFinal {
+                run_id: "run-1".into(),
                 display_message_id: "m1".into(),
                 message: AgentMessage::assistant(
                     "a1",
