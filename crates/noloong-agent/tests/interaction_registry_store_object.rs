@@ -1,8 +1,8 @@
 #![cfg(feature = "registry-store-object")]
 
 use noloong_agent::{
-    AgentManifest, AgentSession, AutomationRecord, AutomationTarget, AutomationTimeSchedule,
-    AutomationTrigger, GoalRecord,
+    AgentManifest, AgentSession, AutomationRecord, AutomationStatus, AutomationTarget,
+    AutomationTimeSchedule, AutomationTrigger, GoalRecord,
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionRecord,
         AgentSessionRegistry, AgentSessionRegistryStore, InteractionError, InteractionFuture,
@@ -100,6 +100,33 @@ async fn object_store_persists_goal_and_automation_records() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn object_store_scans_and_updates_automation_schedule_index() {
+    let store = object_store("automation-schedule");
+    let due = automation_record_with_schedule("due", AutomationStatus::Active, Some(90));
+    let future = automation_record_with_schedule("future", AutomationStatus::Active, Some(150));
+    let paused = automation_record_with_schedule("paused", AutomationStatus::Paused, Some(80));
+    store.insert_automation(due.clone()).await.unwrap();
+    store.insert_automation(future.clone()).await.unwrap();
+    store.insert_automation(paused).await.unwrap();
+
+    let scan = store.scan_automation_schedule(100).await.unwrap();
+    assert_eq!(scan.due_automation_ids, vec!["due"]);
+    assert_eq!(scan.next_fire_at_ms, Some(150));
+
+    let mut due_later = due;
+    due_later.next_fire_at_ms = Some(175);
+    store.save_automation(due_later).await.unwrap();
+    store
+        .remove_automation(&future.automation_id)
+        .await
+        .unwrap();
+
+    let scan = store.scan_automation_schedule(100).await.unwrap();
+    assert!(scan.due_automation_ids.is_empty());
+    assert_eq!(scan.next_fire_at_ms, Some(175));
 }
 
 #[tokio::test]
@@ -222,19 +249,27 @@ fn record(session_id: &str) -> AgentSessionRecord {
 }
 
 fn automation_record(automation_id: &str) -> AutomationRecord {
-    AutomationRecord::new(
+    automation_record_with_schedule(automation_id, AutomationStatus::Active, Some(123))
+}
+
+fn automation_record_with_schedule(
+    automation_id: &str,
+    status: AutomationStatus,
+    next_fire_at_ms: Option<u64>,
+) -> AutomationRecord {
+    let mut automation = AutomationRecord::new(
         automation_id,
         AutomationTarget::ExistingSession {
             session_id: "root".into(),
         },
         AutomationTrigger::Time {
-            schedule: AutomationTimeSchedule {
-                once_at_ms: Some(123),
-                interval_seconds: None,
-            },
+            schedule: AutomationTimeSchedule::Once { at_ms: 123 },
         },
         AgentMessage::user("automation-prompt", "hello"),
-    )
+    );
+    automation.status = status;
+    automation.next_fire_at_ms = next_fire_at_ms;
+    automation
 }
 
 fn text_profile(profile_id: &str) -> Arc<dyn AgentRuntimeProfile> {

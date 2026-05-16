@@ -32,7 +32,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
 
 const INTERRUPTED_RUNNING_SESSION_ERROR: &str =
@@ -156,18 +156,25 @@ pub struct AgentSessionListFilter {
 pub struct AgentSessionRegistryOptions {
     #[serde(default = "default_automation_runner_enabled")]
     pub automation_runner_enabled: bool,
+    #[serde(default = "default_automation_runner_max_concurrency")]
+    pub automation_runner_max_concurrency: usize,
 }
 
 impl Default for AgentSessionRegistryOptions {
     fn default() -> Self {
         Self {
             automation_runner_enabled: true,
+            automation_runner_max_concurrency: default_automation_runner_max_concurrency(),
         }
     }
 }
 
 fn default_automation_runner_enabled() -> bool {
     true
+}
+
+fn default_automation_runner_max_concurrency() -> usize {
+    4
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +246,7 @@ struct AgentSessionRegistryInner {
     firing_automations: Mutex<BTreeSet<String>>,
     session_changes: Notify,
     automation_changes: Arc<Notify>,
+    automation_runner_semaphore: Arc<Semaphore>,
     counter: AtomicU64,
 }
 
@@ -323,6 +331,11 @@ impl AgentSessionRegistry {
                 "default runtime profile not found: {default_profile_id}"
             )));
         }
+        if options.automation_runner_max_concurrency == 0 {
+            return Err(InteractionError::invalid_params(
+                "automationRunnerMaxConcurrency must be greater than zero",
+            ));
+        }
         let registry = Self {
             inner: Arc::new(AgentSessionRegistryInner {
                 profiles: profiles_by_id,
@@ -333,6 +346,9 @@ impl AgentSessionRegistry {
                 firing_automations: Mutex::new(BTreeSet::new()),
                 session_changes: Notify::new(),
                 automation_changes: Arc::new(Notify::new()),
+                automation_runner_semaphore: Arc::new(Semaphore::new(
+                    options.automation_runner_max_concurrency,
+                )),
                 counter: AtomicU64::new(0),
             }),
         };
@@ -792,7 +808,17 @@ impl AgentSessionRegistry {
         automation_id: &str,
         mode: AutomationFireMode,
     ) -> Result<AutomationRecord, InteractionError> {
-        let _reservation = self.reserve_automation_fire(automation_id)?;
+        let reservation = self.reserve_automation_fire(automation_id)?;
+        self.fire_automation_with_reservation(automation_id, mode, reservation)
+            .await
+    }
+
+    async fn fire_automation_with_reservation(
+        &self,
+        automation_id: &str,
+        mode: AutomationFireMode,
+        _reservation: AutomationFireReservation,
+    ) -> Result<AutomationRecord, InteractionError> {
         let mut automation = self
             .inner
             .store
@@ -1328,8 +1354,8 @@ async fn automation_runner_loop(registry: Weak<AgentSessionRegistryInner>) {
         };
         let notify = Arc::clone(&inner.automation_changes);
         let now_ms = current_unix_ms();
-        let automations = match inner.store.list_automations().await {
-            Ok(automations) => automations,
+        let scan = match inner.store.scan_automation_schedule(now_ms).await {
+            Ok(scan) => scan,
             Err(_) => {
                 drop(inner);
                 sleep(Duration::from_secs(1)).await;
@@ -1339,31 +1365,30 @@ async fn automation_runner_loop(registry: Weak<AgentSessionRegistryInner>) {
         let registry_handle = AgentSessionRegistry {
             inner: Arc::clone(&inner),
         };
-        let mut nearest_fire_at_ms = None;
-        for automation in automations {
-            if automation.status != AutomationStatus::Active {
-                continue;
-            }
-            let Some(next_fire_at_ms) = automation.next_fire_at_ms else {
-                continue;
+        for automation_id in scan.due_automation_ids {
+            let permit = match Arc::clone(&inner.automation_runner_semaphore).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => break,
             };
-            if next_fire_at_ms <= now_ms {
-                let _ = registry_handle
-                    .fire_automation_with_mode(
-                        &automation.automation_id,
+            let reservation = match registry_handle.reserve_automation_fire(&automation_id) {
+                Ok(reservation) => reservation,
+                Err(_) => continue,
+            };
+            let fire_registry = registry_handle.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let _ = fire_registry
+                    .fire_automation_with_reservation(
+                        &automation_id,
                         AutomationFireMode::Triggered,
+                        reservation,
                     )
                     .await;
-            } else {
-                nearest_fire_at_ms = Some(
-                    nearest_fire_at_ms
-                        .map(|current: u64| current.min(next_fire_at_ms))
-                        .unwrap_or(next_fire_at_ms),
-                );
-            }
+            });
         }
         let now_ms = current_unix_ms();
-        let delay_ms = nearest_fire_at_ms
+        let delay_ms = scan
+            .next_fire_at_ms
             .map(|fire_at| fire_at.saturating_sub(now_ms).clamp(10, 60_000))
             .unwrap_or(60_000);
         drop(registry_handle);

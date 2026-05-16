@@ -19,11 +19,11 @@ pub use i18n::{Catalog, MessageKey};
 pub use interaction::{
     AUTOMATION_SESSION_METADATA_KEY, AUTOMATION_SOURCE_TYPE, AUTOMATION_SYSTEM_PROMPT_ADDITION_ID,
     AgentSessionRegistryOptions, AutomationCreateRequest, AutomationListRequest,
-    AutomationPromptInput, AutomationRecord, AutomationRequest, AutomationStatus, AutomationTarget,
-    AutomationTimeSchedule, AutomationTrigger, AutomationUpdateRequest,
-    GOAL_AUDIT_REASON_TOOL_UPDATE, GOAL_AUDIT_REASON_TURN_END, GOAL_AUDIT_SOURCE_TYPE,
-    GOAL_UPDATE_ALLOWED_STATUS_VALUES, GOAL_UPDATE_STATUS_ERROR, GoalAuditRecord, GoalRecord,
-    GoalSetRequest, GoalStatus, GoalStatusUpdateRequest,
+    AutomationPromptInput, AutomationRecord, AutomationRequest, AutomationScheduleScan,
+    AutomationStatus, AutomationTarget, AutomationTimeSchedule, AutomationTrigger,
+    AutomationUpdateRequest, GOAL_AUDIT_REASON_TOOL_UPDATE, GOAL_AUDIT_REASON_TURN_END,
+    GOAL_AUDIT_SOURCE_TYPE, GOAL_UPDATE_ALLOWED_STATUS_VALUES, GOAL_UPDATE_STATUS_ERROR,
+    GoalAuditRecord, GoalRecord, GoalSetRequest, GoalStatus, GoalStatusUpdateRequest,
 };
 pub use manifest::{
     AgentManifest, AgentSystemPrompt, BuiltInSystemPromptProfile, BuiltInToolName,

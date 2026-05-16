@@ -1,4 +1,4 @@
-use super::{AgentSessionRecord, AutomationRecord, GoalRecord};
+use super::{AgentSessionRecord, AutomationRecord, AutomationScheduleScan, GoalRecord};
 use crate::interaction::{InteractionError, InteractionFuture};
 
 pub trait AgentSessionRegistryStore: Send + Sync {
@@ -35,6 +35,11 @@ pub trait AgentSessionRegistryStore: Send + Sync {
     ) -> InteractionFuture<'a, Option<AutomationRecord>>;
 
     fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>>;
+
+    fn scan_automation_schedule<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> InteractionFuture<'a, AutomationScheduleScan>;
 
     fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()>;
 }

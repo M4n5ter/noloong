@@ -12,11 +12,12 @@ mod registry;
 mod store;
 mod wire;
 
+pub(crate) use automation::AutomationScheduleScanBuilder;
 pub use automation::{
     AUTOMATION_SESSION_METADATA_KEY, AUTOMATION_SOURCE_TYPE, AUTOMATION_SYSTEM_PROMPT_ADDITION_ID,
-    AutomationPromptInput, AutomationRecord, AutomationStatus, AutomationTarget,
-    AutomationTimeSchedule, AutomationTrigger, automation_identity_prompt, automation_message,
-    automation_session_metadata, existing_session_automation_message,
+    AutomationPromptInput, AutomationRecord, AutomationScheduleScan, AutomationStatus,
+    AutomationTarget, AutomationTimeSchedule, AutomationTrigger, automation_identity_prompt,
+    automation_message, automation_session_metadata, existing_session_automation_message,
     session_ready_for_direct_prompt,
 };
 #[cfg(feature = "interaction-client")]

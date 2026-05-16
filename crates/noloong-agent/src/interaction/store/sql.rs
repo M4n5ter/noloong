@@ -1,7 +1,8 @@
 use super::codec::{decode_record_json, encode_record_json};
 use super::{
-    AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, GoalRecord,
-    duplicate_automation_error, duplicate_session_error, missing_automation_error,
+    AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, AutomationScheduleScan,
+    AutomationScheduleScanBuilder, GoalRecord, duplicate_automation_error, duplicate_session_error,
+    missing_automation_error,
 };
 use crate::interaction::{AutomationStatus, GoalStatus, InteractionError, InteractionFuture};
 use noloong_agent_core::RunStatus;
@@ -298,6 +299,49 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
                 .await
                 .map_err(to_store_error)?;
             rows.into_iter().map(decode_automation_row).collect()
+        })
+    }
+
+    fn scan_automation_schedule<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> InteractionFuture<'a, AutomationScheduleScan> {
+        Box::pin(async move {
+            let mut db = self.db.clone();
+            let active_status = automation_status_type(&AutomationStatus::Active).to_string();
+            let due_rows = Query::<List<StoredAutomation>>::filter(
+                StoredAutomation::fields()
+                    .status()
+                    .eq(active_status.clone())
+                    .and(
+                        StoredAutomation::fields()
+                            .next_fire_at_ms()
+                            .le(Some(now_ms)),
+                    ),
+            )
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+            let mut scan = AutomationScheduleScanBuilder::default();
+            for row in due_rows {
+                scan.include(row.automation_id, true, row.next_fire_at_ms, now_ms);
+            }
+
+            let future_rows = Query::<List<StoredAutomation>>::filter(
+                StoredAutomation::fields().status().eq(active_status).and(
+                    StoredAutomation::fields()
+                        .next_fire_at_ms()
+                        .gt(Some(now_ms)),
+                ),
+            )
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+            for row in future_rows {
+                scan.include(row.automation_id, true, row.next_fire_at_ms, now_ms);
+            }
+
+            Ok(scan.finish())
         })
     }
 

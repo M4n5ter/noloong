@@ -11,7 +11,7 @@ Build two separate host-level capabilities in `noloong-agent`: **Goal** tracks o
 - Goal audit is turn-end only. There is no scheduled goal audit and no time-based goal wakeup.
 - Goal audit uses the existing steering queue: a `TurnCompleted` listener injects a `goal_audit` observation, allowing the same run loop to continue into an audit turn.
 - Goal status changes are explicit through a model-callable built-in tool and interaction API; free-text assistant output alone must not mark a goal complete.
-- Automation is trigger-agnostic. MVP trigger kind is `time`, with `onceAtMs` and `intervalSeconds`; daily/weekly/cron/webhook are not in MVP.
+- Automation is trigger-agnostic. MVP trigger kind is `time`, with typed `once` and `interval` schedules; daily/weekly/cron/webhook are not in MVP.
 - Automation delivery to an existing running/paused session uses steering observation, not follow-up. Idle/completed sessions may be prompted immediately.
 - Pure automation sessions receive a system prompt addition that explains they are automation tasks and may be woken by triggers.
 - Persistence uses the interaction registry store boundary, but goal and automation records are separate from `AgentSessionRecord`.
@@ -259,8 +259,8 @@ Build two separate host-level capabilities in `noloong-agent`: **Goal** tracks o
 **Description:** Implement deterministic calculation for MVP `time` triggers. Keep schedule logic isolated so future daily/weekly/cron/webhook work does not affect delivery.
 
 **Acceptance criteria:**
-- [x] `onceAtMs` fires once, then becomes completed or inactive.
-- [x] `intervalSeconds` computes next fire from actual fire time, not from process wake time.
+- [x] `{"type":"once","atMs":...}` fires once, then becomes completed or inactive.
+- [x] `{"type":"interval","intervalSeconds":...}` computes next fire from actual fire time, not from process wake time.
 - [x] Invalid schedules are rejected at create/update.
 - [x] Trigger calculation is pure and covered by unit tests.
 

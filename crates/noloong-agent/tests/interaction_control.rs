@@ -493,7 +493,7 @@ async fn interaction_control_creates_and_fires_automation() {
                     "target": {"type": "existing_session", "sessionId": "root"},
                     "trigger": {
                         "type": "time",
-                        "schedule": {"onceAtMs": 4102444800000u64}
+                        "schedule": {"type": "once", "atMs": 4102444800000u64}
                     },
                     "prompt": {"type": "text", "text": "automation ping"}
                 }),
@@ -542,7 +542,7 @@ async fn interaction_control_validates_automation_inputs_and_status() {
                     "target": {"type": "existing_session", "sessionId": "missing"},
                     "trigger": {
                         "type": "time",
-                        "schedule": {"onceAtMs": 4102444800000u64}
+                        "schedule": {"type": "once", "atMs": 4102444800000u64}
                     },
                     "prompt": {"type": "text", "text": "automation ping"}
                 }),
@@ -555,7 +555,7 @@ async fn interaction_control_validates_automation_inputs_and_status() {
                     "target": {"type": "new_session", "profileId": "default"},
                     "trigger": {
                         "type": "time",
-                        "schedule": {"intervalSeconds": 0}
+                        "schedule": {"type": "interval", "intervalSeconds": 0}
                     },
                     "prompt": {"type": "text", "text": "automation ping"}
                 }),
@@ -569,7 +569,7 @@ async fn interaction_control_validates_automation_inputs_and_status() {
                     "target": {"type": "existing_session", "sessionId": "root"},
                     "trigger": {
                         "type": "time",
-                        "schedule": {"onceAtMs": 4102444800000u64}
+                        "schedule": {"type": "once", "atMs": 4102444800000u64}
                     },
                     "prompt": {"type": "text", "text": "automation ping"}
                 }),

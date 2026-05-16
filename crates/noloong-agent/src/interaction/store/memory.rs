@@ -1,7 +1,7 @@
 use super::{
-    AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, GoalRecord,
-    duplicate_automation_error, duplicate_session_error, missing_automation_error,
-    missing_session_error,
+    AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, AutomationScheduleScan,
+    AutomationScheduleScanBuilder, GoalRecord, duplicate_automation_error, duplicate_session_error,
+    missing_automation_error, missing_session_error,
 };
 use crate::interaction::InteractionFuture;
 use std::{
@@ -172,6 +172,28 @@ impl AgentSessionRegistryStore for InMemoryAgentSessionRegistryStore {
                 .values()
                 .cloned()
                 .collect())
+        })
+    }
+
+    fn scan_automation_schedule<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> InteractionFuture<'a, AutomationScheduleScan> {
+        Box::pin(async move {
+            let automations = self
+                .automations
+                .lock()
+                .expect("interaction automation store lock poisoned");
+            let mut scan = AutomationScheduleScanBuilder::default();
+            for automation in automations.values() {
+                scan.include(
+                    automation.automation_id.clone(),
+                    automation.is_active(),
+                    automation.next_fire_at_ms,
+                    now_ms,
+                );
+            }
+            Ok(scan.finish())
         })
     }
 

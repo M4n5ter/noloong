@@ -1,9 +1,9 @@
 use noloong_agent::{
     AUTOMATION_SESSION_METADATA_KEY, AUTOMATION_SYSTEM_PROMPT_ADDITION_ID, AgentManifest,
     AgentSession, AgentSessionRegistryOptions, AgentSystemPrompt, AutomationCreateRequest,
-    AutomationPromptInput, AutomationRecord, AutomationTarget, AutomationTimeSchedule,
-    AutomationTrigger, BuiltInToolName, GOAL_AUDIT_SOURCE_TYPE, GoalRecord, GoalSetRequest,
-    ManifestPatch, SystemPromptAddition,
+    AutomationPromptInput, AutomationRecord, AutomationScheduleScan, AutomationStatus,
+    AutomationTarget, AutomationTimeSchedule, AutomationTrigger, BuiltInToolName,
+    GOAL_AUDIT_SOURCE_TYPE, GoalRecord, GoalSetRequest, ManifestPatch, SystemPromptAddition,
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
         AgentSessionDeleteOptions, AgentSessionListFilter, AgentSessionQueueSnapshot,
@@ -23,9 +23,12 @@ use noloong_agent_core::{
 };
 use serde_json::Map;
 use serde_json::json;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    num::NonZeroU64,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::time::{Duration, sleep};
 
@@ -1174,6 +1177,45 @@ async fn interaction_registry_fires_automation_to_existing_session() {
 }
 
 #[tokio::test]
+async fn interaction_registry_interval_automation_reschedules_after_fire() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("interval-target".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-interval".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "interval-target".into(),
+            },
+            trigger: interval_trigger(5),
+            prompt: AutomationPromptInput::Text {
+                text: "interval work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    let automation = registry
+        .fire_automation("automation-interval")
+        .await
+        .unwrap();
+
+    assert_eq!(automation.status, AutomationStatus::Active);
+    assert_eq!(
+        automation.next_fire_at_ms,
+        automation
+            .last_fired_at_ms
+            .map(|fired_at_ms| fired_at_ms + 5000)
+    );
+}
+
+#[tokio::test]
 async fn interaction_registry_fires_automation_to_busy_session_as_steering() {
     let registry = AgentSessionRegistry::new(blocking_profile("blocking")).unwrap();
     registry
@@ -1315,6 +1357,174 @@ async fn interaction_registry_time_runner_fires_due_automation() {
 }
 
 #[tokio::test]
+async fn interaction_registry_time_runner_does_not_block_ready_due_automation() {
+    let registry = AgentSessionRegistry::with_store(
+        "text",
+        vec![text_profile("text"), blocking_profile("blocking")],
+        Arc::new(InMemoryAgentSessionRegistryStore::default())
+            as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("runner-blocking-target".into()),
+            profile_id: Some("blocking".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("runner-ready-target".into()),
+            profile_id: Some("text".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let due_at = current_unix_ms_for_test();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-a-blocking".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "runner-blocking-target".into(),
+            },
+            trigger: once_trigger(due_at),
+            prompt: AutomationPromptInput::Text {
+                text: "blocking work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-b-ready".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "runner-ready-target".into(),
+            },
+            trigger: once_trigger(due_at),
+            prompt: AutomationPromptInput::Text {
+                text: "ready work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    wait_until_status(
+        &registry,
+        "runner-blocking-target",
+        InteractionSessionStatus::Running,
+    )
+    .await;
+    wait_until_status(
+        &registry,
+        "runner-ready-target",
+        InteractionSessionStatus::Completed,
+    )
+    .await;
+
+    registry
+        .delete_session(
+            "runner-blocking-target",
+            AgentSessionDeleteOptions { force_abort: true },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn interaction_registry_time_runner_respects_concurrency_limit() {
+    let registry = AgentSessionRegistry::with_store_and_options(
+        "text",
+        vec![text_profile("text"), blocking_profile("blocking")],
+        Arc::new(InMemoryAgentSessionRegistryStore::default())
+            as Arc<dyn AgentSessionRegistryStore>,
+        AgentSessionRegistryOptions {
+            automation_runner_max_concurrency: 1,
+            ..AgentSessionRegistryOptions::default()
+        },
+    )
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("limited-blocking-target".into()),
+            profile_id: Some("blocking".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("limited-ready-target".into()),
+            profile_id: Some("text".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let due_at = current_unix_ms_for_test();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-a-limited-blocking".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "limited-blocking-target".into(),
+            },
+            trigger: once_trigger(due_at),
+            prompt: AutomationPromptInput::Text {
+                text: "blocking work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+    registry
+        .create_automation(AutomationCreateRequest {
+            automation_id: Some("automation-b-limited-ready".into()),
+            target: AutomationTarget::ExistingSession {
+                session_id: "limited-ready-target".into(),
+            },
+            trigger: once_trigger(due_at),
+            prompt: AutomationPromptInput::Text {
+                text: "ready work".into(),
+            },
+            metadata: Map::new(),
+        })
+        .await
+        .unwrap();
+
+    wait_until_status(
+        &registry,
+        "limited-blocking-target",
+        InteractionSessionStatus::Running,
+    )
+    .await;
+    sleep(Duration::from_millis(50)).await;
+    assert!(
+        registry
+            .get_automation("automation-b-limited-ready")
+            .await
+            .unwrap()
+            .unwrap()
+            .last_fired_at_ms
+            .is_none()
+    );
+
+    registry
+        .delete_session(
+            "limited-blocking-target",
+            AgentSessionDeleteOptions { force_abort: true },
+        )
+        .await
+        .unwrap();
+    wait_until_status(
+        &registry,
+        "limited-ready-target",
+        InteractionSessionStatus::Completed,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn interaction_registry_can_disable_automation_runner() {
     let registry = AgentSessionRegistry::with_store_and_options(
         "default",
@@ -1323,6 +1533,7 @@ async fn interaction_registry_can_disable_automation_runner() {
             as Arc<dyn AgentSessionRegistryStore>,
         AgentSessionRegistryOptions {
             automation_runner_enabled: false,
+            ..AgentSessionRegistryOptions::default()
         },
     )
     .unwrap();
@@ -1356,6 +1567,75 @@ async fn interaction_registry_can_disable_automation_runner() {
         .unwrap()
         .unwrap();
     assert!(automation.last_fired_at_ms.is_none());
+}
+
+#[tokio::test]
+async fn interaction_registry_rejects_zero_automation_runner_concurrency() {
+    let result = AgentSessionRegistry::with_store_and_options(
+        "default",
+        vec![text_profile("default")],
+        Arc::new(InMemoryAgentSessionRegistryStore::default())
+            as Arc<dyn AgentSessionRegistryStore>,
+        AgentSessionRegistryOptions {
+            automation_runner_max_concurrency: 0,
+            ..AgentSessionRegistryOptions::default()
+        },
+    );
+
+    let Err(error) = result else {
+        panic!("zero concurrency should fail");
+    };
+    assert!(error.message.contains("must be greater than zero"));
+}
+
+#[tokio::test]
+async fn in_memory_store_scans_automation_schedule() {
+    let store = InMemoryAgentSessionRegistryStore::default();
+    store
+        .insert_automation(automation_record_for_schedule_scan(
+            "due-b",
+            AutomationStatus::Active,
+            Some(90),
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_automation(automation_record_for_schedule_scan(
+            "future",
+            AutomationStatus::Active,
+            Some(150),
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_automation(automation_record_for_schedule_scan(
+            "paused-due",
+            AutomationStatus::Paused,
+            Some(80),
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_automation(automation_record_for_schedule_scan(
+            "due-a",
+            AutomationStatus::Active,
+            Some(80),
+        ))
+        .await
+        .unwrap();
+    store
+        .insert_automation(automation_record_for_schedule_scan(
+            "unscheduled",
+            AutomationStatus::Active,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let scan = store.scan_automation_schedule(100).await.unwrap();
+
+    assert_eq!(scan.due_automation_ids, vec!["due-a", "due-b"]);
+    assert_eq!(scan.next_fire_at_ms, Some(150));
 }
 
 #[tokio::test]
@@ -1464,11 +1744,34 @@ async fn wait_until_status(
 
 fn once_trigger(once_at_ms: u64) -> AutomationTrigger {
     AutomationTrigger::Time {
-        schedule: AutomationTimeSchedule {
-            once_at_ms: Some(once_at_ms),
-            interval_seconds: None,
+        schedule: AutomationTimeSchedule::Once { at_ms: once_at_ms },
+    }
+}
+
+fn interval_trigger(interval_seconds: u64) -> AutomationTrigger {
+    AutomationTrigger::Time {
+        schedule: AutomationTimeSchedule::Interval {
+            interval_seconds: NonZeroU64::new(interval_seconds).unwrap(),
         },
     }
+}
+
+fn automation_record_for_schedule_scan(
+    automation_id: &str,
+    status: AutomationStatus,
+    next_fire_at_ms: Option<u64>,
+) -> AutomationRecord {
+    let mut automation = AutomationRecord::new(
+        automation_id,
+        AutomationTarget::ExistingSession {
+            session_id: "scan-target".into(),
+        },
+        once_trigger(next_fire_at_ms.unwrap_or(0)),
+        AgentMessage::user(format!("{automation_id}-prompt"), "scan"),
+    );
+    automation.status = status;
+    automation.next_fire_at_ms = next_fire_at_ms;
+    automation
 }
 
 fn current_unix_ms_for_test() -> u64 {
@@ -1739,6 +2042,13 @@ impl AgentSessionRegistryStore for CountingSaveStore {
         self.inner.list_automations()
     }
 
+    fn scan_automation_schedule<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> InteractionFuture<'a, AutomationScheduleScan> {
+        self.inner.scan_automation_schedule(now_ms)
+    }
+
     fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()> {
         self.inner.remove_automation(automation_id)
     }
@@ -1815,6 +2125,13 @@ impl AgentSessionRegistryStore for FailingSaveStore {
 
     fn list_automations<'a>(&'a self) -> InteractionFuture<'a, Vec<AutomationRecord>> {
         self.inner.list_automations()
+    }
+
+    fn scan_automation_schedule<'a>(
+        &'a self,
+        now_ms: u64,
+    ) -> InteractionFuture<'a, AutomationScheduleScan> {
+        self.inner.scan_automation_schedule(now_ms)
     }
 
     fn remove_automation<'a>(&'a self, automation_id: &'a str) -> InteractionFuture<'a, ()> {

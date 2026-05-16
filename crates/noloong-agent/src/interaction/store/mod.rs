@@ -12,7 +12,8 @@ mod snapshot;
 mod sql;
 mod traits;
 
-pub use crate::interaction::{AutomationRecord, GoalRecord};
+pub(crate) use crate::interaction::AutomationScheduleScanBuilder;
+pub use crate::interaction::{AutomationRecord, AutomationScheduleScan, GoalRecord};
 pub use memory::InMemoryAgentSessionRegistryStore;
 #[cfg(feature = "registry-store-object")]
 pub use object::{OpenDalAgentSessionRegistryStore, OpenDalAgentSessionRegistryStoreConfig};

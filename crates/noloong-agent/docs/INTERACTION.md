@@ -151,12 +151,12 @@ Model-callable audit update:
 
 ## Automations
 
-Automation is trigger-agnostic. The MVP trigger kind is `time` with either `onceAtMs` or `intervalSeconds`; future webhook or external triggers can reuse the same delivery path. Existing idle/completed sessions receive automation prompts as direct `agent/prompt` input. Existing running/paused sessions receive them as steering observations. Dedicated automation sessions are created with metadata and a system prompt addition explaining that they are automation tasks that may be woken by triggers.
+Automation is trigger-agnostic. The MVP trigger kind is `time` with a typed schedule: `{"type":"once","atMs":...}` or `{"type":"interval","intervalSeconds":...}`. Future webhook or external triggers can reuse the same delivery path. Existing idle/completed sessions receive automation prompts as direct `agent/prompt` input. Existing running/paused sessions receive them as steering observations. Dedicated automation sessions are created with metadata and a system prompt addition explaining that they are automation tasks that may be woken by triggers.
 
 Create and manually fire an automation for an existing session:
 
 ```json
-{"jsonrpc":"2.0","id":30,"method":"automation/create","params":{"automationId":"nightly-summary","target":{"type":"existing_session","sessionId":"root"},"trigger":{"type":"time","schedule":{"intervalSeconds":86400}},"prompt":{"type":"text","text":"Summarize progress since the previous automation run."}}}
+{"jsonrpc":"2.0","id":30,"method":"automation/create","params":{"automationId":"nightly-summary","target":{"type":"existing_session","sessionId":"root"},"trigger":{"type":"time","schedule":{"type":"interval","intervalSeconds":86400}},"prompt":{"type":"text","text":"Summarize progress since the previous automation run."}}}
 {"jsonrpc":"2.0","id":31,"method":"automation/list","params":{"status":"active"}}
 {"jsonrpc":"2.0","id":32,"method":"automation/fire","params":{"automationId":"nightly-summary"}}
 ```
@@ -164,7 +164,7 @@ Create and manually fire an automation for an existing session:
 Create a pure automation session on first fire:
 
 ```json
-{"jsonrpc":"2.0","id":33,"method":"automation/create","params":{"target":{"type":"new_session","profileId":"default"},"trigger":{"type":"time","schedule":{"onceAtMs":4102444800000}},"prompt":{"type":"text","text":"Run the one-shot maintenance task."}}}
+{"jsonrpc":"2.0","id":33,"method":"automation/create","params":{"target":{"type":"new_session","profileId":"default"},"trigger":{"type":"time","schedule":{"type":"once","atMs":4102444800000}},"prompt":{"type":"text","text":"Run the one-shot maintenance task."}}}
 ```
 
 ## Agent Runs and Queues

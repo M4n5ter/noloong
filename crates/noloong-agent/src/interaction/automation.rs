@@ -2,6 +2,7 @@ use super::{InteractionError, store::current_unix_ms};
 use noloong_agent_core::{AgentMessage, ContentBlock, MessageRole, RunStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::num::NonZeroU64;
 
 pub const AUTOMATION_SOURCE_TYPE: &str = "automation";
 pub const AUTOMATION_SESSION_METADATA_KEY: &str = "automation";
@@ -134,49 +135,42 @@ impl AutomationTrigger {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AutomationTimeSchedule {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub once_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_seconds: Option<u64>,
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AutomationTimeSchedule {
+    Once { at_ms: u64 },
+    Interval { interval_seconds: NonZeroU64 },
 }
 
 impl AutomationTimeSchedule {
     pub fn validate(&self) -> Result<(), InteractionError> {
-        match (self.once_at_ms, self.interval_seconds) {
-            (Some(_), None) => Ok(()),
-            (None, Some(interval)) if interval > 0 => Ok(()),
-            (None, Some(_)) => Err(InteractionError::invalid_params(
-                "intervalSeconds must be greater than zero",
-            )),
-            (None, None) => Err(InteractionError::invalid_params(
-                "time trigger requires onceAtMs or intervalSeconds",
-            )),
-            (Some(_), Some(_)) => Err(InteractionError::invalid_params(
-                "time trigger cannot contain both onceAtMs and intervalSeconds",
-            )),
-        }
+        Ok(())
     }
 
     pub fn next_fire_after_create(&self, now_ms: u64) -> Option<u64> {
-        if let Some(once_at_ms) = self.once_at_ms {
-            return Some(once_at_ms);
+        match self {
+            Self::Once { at_ms } => Some(*at_ms),
+            Self::Interval { interval_seconds } => {
+                Some(now_ms.saturating_add(interval_seconds.get().saturating_mul(1000)))
+            }
         }
-        self.interval_seconds
-            .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1000)))
     }
 
     pub fn after_fire(&self, fired_at_ms: u64) -> AutomationTriggerAfterFire {
-        if let Some(seconds) = self.interval_seconds {
-            return AutomationTriggerAfterFire {
+        match self {
+            Self::Once { .. } => AutomationTriggerAfterFire {
+                status: AutomationStatus::Completed,
+                next_fire_at_ms: None,
+            },
+            Self::Interval { interval_seconds } => AutomationTriggerAfterFire {
                 status: AutomationStatus::Active,
-                next_fire_at_ms: Some(fired_at_ms.saturating_add(seconds.saturating_mul(1000))),
-            };
-        }
-        AutomationTriggerAfterFire {
-            status: AutomationStatus::Completed,
-            next_fire_at_ms: None,
+                next_fire_at_ms: Some(
+                    fired_at_ms.saturating_add(interval_seconds.get().saturating_mul(1000)),
+                ),
+            },
         }
     }
 }
@@ -185,6 +179,52 @@ impl AutomationTimeSchedule {
 pub struct AutomationTriggerAfterFire {
     pub status: AutomationStatus,
     pub next_fire_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AutomationScheduleScan {
+    pub due_automation_ids: Vec<String>,
+    pub next_fire_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AutomationScheduleScanBuilder {
+    due: Vec<(u64, String)>,
+    next_fire_at_ms: Option<u64>,
+}
+
+impl AutomationScheduleScanBuilder {
+    pub(crate) fn include(
+        &mut self,
+        automation_id: impl Into<String>,
+        active: bool,
+        next_fire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        if !active {
+            return;
+        }
+        let Some(fire_at_ms) = next_fire_at_ms else {
+            return;
+        };
+        if fire_at_ms <= now_ms {
+            self.due.push((fire_at_ms, automation_id.into()));
+        } else {
+            self.next_fire_at_ms = Some(
+                self.next_fire_at_ms
+                    .map(|current| current.min(fire_at_ms))
+                    .unwrap_or(fire_at_ms),
+            );
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> AutomationScheduleScan {
+        self.due.sort();
+        AutomationScheduleScan {
+            due_automation_ids: self.due.into_iter().map(|(_, id)| id).collect(),
+            next_fire_at_ms: self.next_fire_at_ms,
+        }
+    }
 }
 
 pub fn automation_message(
@@ -308,10 +348,7 @@ mod tests {
                 session_id: "session-1".into(),
             },
             AutomationTrigger::Time {
-                schedule: AutomationTimeSchedule {
-                    once_at_ms: Some(123),
-                    interval_seconds: None,
-                },
+                schedule: AutomationTimeSchedule::Once { at_ms: 123 },
             },
             text_prompt("prompt-1", "hello"),
         );
@@ -325,9 +362,8 @@ mod tests {
 
     #[test]
     fn interval_schedule_computes_next_fire() {
-        let schedule = AutomationTimeSchedule {
-            once_at_ms: None,
-            interval_seconds: Some(5),
+        let schedule = AutomationTimeSchedule::Interval {
+            interval_seconds: NonZeroU64::new(5).unwrap(),
         };
         assert_eq!(schedule.next_fire_after_create(100), Some(5100));
         let after = schedule.after_fire(200);
@@ -336,11 +372,52 @@ mod tests {
     }
 
     #[test]
-    fn once_schedule_completes_after_fire() {
-        let schedule = AutomationTimeSchedule {
-            once_at_ms: Some(100),
-            interval_seconds: None,
+    fn time_schedule_serde_round_trips() {
+        let once = AutomationTimeSchedule::Once { at_ms: 123 };
+        assert_eq!(
+            serde_json::to_value(&once).unwrap(),
+            json!({"type": "once", "atMs": 123})
+        );
+        assert_eq!(
+            serde_json::from_value::<AutomationTimeSchedule>(json!({
+                "type": "once",
+                "atMs": 123
+            }))
+            .unwrap(),
+            once
+        );
+
+        let interval = AutomationTimeSchedule::Interval {
+            interval_seconds: NonZeroU64::new(5).unwrap(),
         };
+        assert_eq!(
+            serde_json::to_value(&interval).unwrap(),
+            json!({"type": "interval", "intervalSeconds": 5})
+        );
+        assert_eq!(
+            serde_json::from_value::<AutomationTimeSchedule>(json!({
+                "type": "interval",
+                "intervalSeconds": 5
+            }))
+            .unwrap(),
+            interval
+        );
+    }
+
+    #[test]
+    fn interval_schedule_rejects_zero_seconds() {
+        let error = serde_json::from_value::<AutomationTimeSchedule>(json!({
+            "type": "interval",
+            "intervalSeconds": 0
+        }))
+        .expect_err("zero interval should not deserialize");
+
+        assert!(error.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn once_schedule_completes_after_fire() {
+        let schedule = AutomationTimeSchedule::Once { at_ms: 100 };
         let after = schedule.after_fire(100);
         assert_eq!(after.status, AutomationStatus::Completed);
         assert_eq!(after.next_fire_at_ms, None);
@@ -354,10 +431,7 @@ mod tests {
                 session_id: "session-1".into(),
             },
             AutomationTrigger::Time {
-                schedule: AutomationTimeSchedule {
-                    once_at_ms: Some(123),
-                    interval_seconds: None,
-                },
+                schedule: AutomationTimeSchedule::Once { at_ms: 123 },
             },
             text_prompt("prompt-1", "hello"),
         );
