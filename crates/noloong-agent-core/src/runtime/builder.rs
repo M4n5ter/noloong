@@ -51,6 +51,7 @@ pub struct AgentRuntimeBuilder {
     context_compaction: Option<ContextCompactionRegistration>,
     stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
+    run_id_prefix: Option<String>,
 }
 
 impl Default for AgentRuntimeBuilder {
@@ -71,11 +72,17 @@ impl Default for AgentRuntimeBuilder {
             context_compaction: None,
             stdio_extensions: Vec::new(),
             max_turns: 8,
+            run_id_prefix: None,
         }
     }
 }
 
 impl AgentRuntimeBuilder {
+    pub fn with_run_id_prefix(mut self, prefix: impl AsRef<str>) -> Self {
+        self.run_id_prefix = safe_run_id_prefix(prefix.as_ref());
+        self
+    }
+
     pub fn with_event_store(mut self, event_store: Arc<dyn EventStore>) -> Self {
         self.event_store = event_store;
         self
@@ -453,10 +460,27 @@ impl AgentRuntimeBuilder {
             context_compaction,
             _stdio_extensions: self.stdio_extensions,
             max_turns: self.max_turns,
+            run_id_prefix: self.run_id_prefix,
             run_counter: Arc::new(AtomicU64::new(0)),
             event_counter: Arc::new(AtomicU64::new(0)),
         })
     }
+}
+
+fn safe_run_id_prefix(value: &str) -> Option<String> {
+    let prefix = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    (!prefix.is_empty()).then_some(prefix)
 }
 
 fn default_phases() -> Vec<Arc<dyn PhaseNode>> {

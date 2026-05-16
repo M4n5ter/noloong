@@ -1,353 +1,270 @@
-# Implementation Plan: Goal and Trigger-Agnostic Automation
+# Implementation Plan: SQLite 运行状态统一化
 
 ## Overview
 
-Build two separate host-level capabilities in `noloong-agent`: **Goal** tracks one long-running objective for a session and audits it only at agent turn boundaries; **Automation** stores trigger-driven prompts and delivers them to target sessions when triggers fire. Automation must not be modeled as "cron only": the MVP implements a `time` trigger, but the data model and runner are trigger-agnostic so future webhook or external event triggers can reuse the same delivery path.
+将 noloong 的可恢复运行状态统一落到本地 SQLite，默认使用 `~/.agents/noloong/state.sqlite`。本轮不保留历史兼容包袱：旧的默认 memory store、Telegram offset JSON 默认路径、示例里的显式 memory 配置都清理掉；显式非 SQLite backend 只在仍有当前价值时保留。ChatGPT token、Models.dev cache、Telegram 下载媒体、tool overflow 临时文件不是运行状态，不迁入 SQLite。
 
 ## Architecture Decisions
 
-- Goal and Automation live in `noloong-agent` host/interaction layer, not in `noloong-agent-core`.
-- Each session has at most one active goal. Setting a new goal replaces the previous active goal.
-- Goal audit is turn-end only. There is no scheduled goal audit and no time-based goal wakeup.
-- Goal audit uses the existing steering queue: a `TurnCompleted` listener injects a `goal_audit` observation, allowing the same run loop to continue into an audit turn.
-- Goal status changes are explicit through a model-callable built-in tool and interaction API; free-text assistant output alone must not mark a goal complete.
-- Automation is trigger-agnostic. MVP trigger kind is `time`, with typed `once` and `interval` schedules; daily/weekly/cron/webhook are not in MVP.
-- Automation delivery to an existing running/paused session uses steering observation, not follow-up. Idle/completed sessions may be prompted immediately.
-- Pure automation sessions receive a system prompt addition that explains they are automation tasks and may be woken by triggers.
-- Persistence uses the interaction registry store boundary, but goal and automation records are separate from `AgentSessionRecord`.
+- 默认运行状态库是统一 SQLite 文件：`~/.agents/noloong/state.sqlite`。
+- `NOLOONG_STATE_DATABASE_URL` 是唯一的全局默认状态库覆盖入口，接受现有 SQLite URL 形状。
+- 省略 `registryStore` 和 profile `eventStore` 时都使用统一 SQLite；显式配置才走 memory/postgres/object。
+- core `runId` 必须 session 命名空间化，否则多个 session 共用同一个 event table 时都会从 `run-1` 开始并产生主键冲突。
+- Telegram polling offset 是可恢复运行状态，默认进统一 SQLite；删除默认 JSON checkpoint 逻辑。
+- 没有兼容负担：旧默认、旧示例和不再需要的配置分支应直接删除或收敛，不新增兼容 shim。
+- Toasty 相关依赖同步升级到 `0.6.0`；`rusqlite` 保持当前最新 `0.39.0`，除非 resolver 要求调整。
 
 ## Task List
 
-### Phase 1: Shared Models and Persistence
+### Phase 1: SQLite 默认状态库基础
 
-#### Task 1: Define Goal and Automation domain models
+#### Task 1: 定义统一状态数据库解析
 
-**Description:** Add the typed records, enums, metadata keys, and store contracts that all later slices depend on. Keep trigger and target shapes extensible without coupling automation to time schedules.
+**Description:** 增加 host 侧状态数据库解析入口，负责从默认路径或 `NOLOONG_STATE_DATABASE_URL` 得到 SQLite URL，并确保文件型 SQLite 的父目录存在。这个入口会被 registry、event store 和 Telegram offset 复用。
 
 **Acceptance criteria:**
-- [x] `GoalRecord` supports `sessionId`, `objective`, `status`, optional `tokenBudget`, `lastAudit`, `createdAtMs`, and `updatedAtMs`.
-- [x] `AutomationRecord` supports `automationId`, `status`, `target`, `trigger`, `prompt`, `metadata`, `lastFiredAtMs`, and `nextFireAtMs`.
-- [x] `AutomationTrigger` is a tagged enum with MVP `time`; `AutomationTarget` distinguishes existing session vs new automation session.
-- [x] Shared message metadata constants exist for `source.type = automation` and `source.type = goal_audit`.
+- [ ] 未设置环境变量时返回 `sqlite:~/.agents/noloong/state.sqlite` 展开后的文件 URL。
+- [ ] 设置 `NOLOONG_STATE_DATABASE_URL` 时完全使用该值。
+- [ ] 文件型 SQLite 连接前会创建父目录。
 
 **Verification:**
-- [x] Unit tests cover serde round-trips for goal records, automation records, time triggers, and targets.
-- [x] `cargo test -p noloong-agent goal automation`
+- [ ] 单元测试覆盖默认路径、环境变量覆盖、空环境变量回退、父目录创建。
+- [ ] `cargo test -p noloong config state_database`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/goal.rs`
-- `crates/noloong-agent/src/interaction/automation.rs`
-- `crates/noloong-agent/src/interaction/store/traits.rs`
+- `src/config.rs`
+- `src/host.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-#### Task 2: Persist Goal and Automation records in registry stores
+#### Task 2: 将 registryStore 默认改为 SQLite
 
-**Description:** Extend memory, object, SQLite, and Postgres registry stores to persist goal and automation records through the same store abstraction used by session snapshots.
+**Description:** 把 root profile config 的 `registryStore` 从必填/默认 memory 收敛为“省略即统一 SQLite”。显式 memory 仍允许用于测试，但示例不再默认使用 memory。
 
 **Acceptance criteria:**
-- [x] Memory store implements CRUD/list for goals and automations.
-- [x] Object store writes records under stable prefixes such as `goals/` and `automations/`.
-- [x] SQL store persists JSON payload plus indexed identifiers needed for lookup/list: id, session id, status, next fire time.
-- [x] Store errors follow existing `InteractionError` conventions.
+- [ ] `HostProfileConfig` 省略 `registryStore` 时构建 SQLite registry store。
+- [ ] 显式 `registryStore.type = memory/sqlite/postgres/object_fs` 仍按配置构建。
+- [ ] 普通示例配置删除显式 memory registry store。
 
 **Verification:**
-- [x] Store tests cover insert/get/list/save/delete for memory, object, SQLite, and Postgres-gated tests.
-- [x] `cargo test -p noloong-agent --test interaction_registry_store_object --test interaction_registry_store_sqlite --test interaction_registry_store_postgres`
+- [ ] 配置测试覆盖省略 registryStore、显式 memory、显式 sqlite。
+- [ ] SQLite registry reload 测试证明 session/goal/automation 可跨 registry rebuild 恢复。
+- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/memory.rs`
-- `crates/noloong-agent/src/interaction/store/object.rs`
-- `crates/noloong-agent/src/interaction/store/sql.rs`
+- `src/config.rs`
+- `src/host.rs`
+- `examples/profile-configs/*.json`
 
 **Estimated scope:** M
 
-### Checkpoint: Persistence Foundation
+#### Task 3: 将 profile eventStore 默认改为 SQLite
 
-- [x] Domain serde tests pass.
-- [x] Registry store tests pass for enabled store backends.
-- [x] No changes required in `noloong-agent-core`.
-
-### Phase 2: Goal Lifecycle and Turn-End Audit
-
-#### Task 3: Add Goal management APIs to interaction control
-
-**Description:** Expose session-scoped goal lifecycle operations through JSON-RPC. This is the management surface that UI clients and future Telegram commands will wrap.
+**Description:** 把 profile `eventStore` 的默认值从 memory 改为统一 SQLite。事件日志是 paused approval resume、事件 replay 和诊断的运行状态，默认不能再是进程本地。
 
 **Acceptance criteria:**
-- [x] Add authority capability `goal.manage`.
-- [x] Add methods `goal/set`, `goal/get`, `goal/pause`, `goal/resume`, `goal/clear`, and `goal/update`.
-- [x] `goal/set` creates or replaces the active goal for a session.
-- [x] Paused, cleared, achieved, unmet, and budget-limited goals are not considered pursuing.
+- [ ] 省略 profile `eventStore` 时构建统一 SQLite event store。
+- [ ] 显式 memory 仅作为显式测试/临时运行选择保留。
+- [ ] 现有 SQLite event store schema 初始化行为保持清晰，不新增旧 memory fallback。
 
 **Verification:**
-- [x] Interaction tests cover create, replace, read, pause, resume, clear, update, and missing session errors.
-- [x] `cargo test -p noloong-agent --test interaction_control goal`
+- [ ] profile build 测试覆盖省略 eventStore 后写入并 reload event。
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+- [ ] `cargo test -p noloong-agent openai_wiring`
 
-**Dependencies:** Tasks 1-2
+**Dependencies:** Task 1
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/control.rs`
-- `crates/noloong-agent/src/interaction/wire.rs`
-- `crates/noloong-agent/tests/interaction_control.rs`
+- `src/config.rs`
+- `src/host.rs`
+- `schemas/profile-config.schema.json`
 
 **Estimated scope:** M
 
-#### Task 4: Add model-callable Goal update tool
+### Checkpoint: 默认状态库基础
 
-**Description:** Add a built-in host tool so the agent can explicitly update the current session's goal status during an audit turn. This avoids parsing free-form assistant text to decide whether a goal is complete.
+- [ ] 省略 registryStore/eventStore 的 profile 能启动。
+- [ ] session snapshot 和 core event 都写入同一个 SQLite 文件。
+- [ ] 示例配置不再把正常运行路径固定到 memory。
+
+### Phase 2: Run ID 命名空间化
+
+#### Task 4: 给 AgentRuntime 增加 run id 前缀
+
+**Description:** 在 core runtime builder 增加 run id prefix 配置，并让 `next_run_id()` 生成带 session 命名空间的 id，例如 `run-<session-fingerprint>-1`。这是共享 SQLite event store 的前置安全条件。
 
 **Acceptance criteria:**
-- [x] Add built-in tool `agent.goal.update`, mounted only when the session has a pursuing goal and a goal controller is available.
-- [x] Tool input supports `status: pursuing|achieved|unmet|budget_limited`, plus optional `summary` and `evidence`.
-- [x] Tool can update only the current session's active goal.
-- [x] Tool output returns the updated goal record as JSON.
+- [ ] 默认 builder 在未设置 prefix 时仍能生成有效 run id。
+- [ ] 设置 prefix 后所有新 run id 都包含该 prefix。
+- [ ] run id 只包含 provider/tool/event/display 安全字符。
 
 **Verification:**
-- [x] Tool unit tests cover valid update, invalid status, no active goal, and cross-session denial.
-- [x] `cargo test -p noloong-agent --test goal_tools`
+- [ ] core runtime 单测覆盖默认 run id 和带 prefix run id。
+- [ ] 事件 append/load 使用新 run id 成功。
 
-**Dependencies:** Task 3
+**Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/src/tools/goal.rs`
-- `crates/noloong-agent/tests/goal_tools.rs`
+- `crates/noloong-agent-core/src/runtime/builder.rs`
+- `crates/noloong-agent-core/src/runtime/run_loop.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-#### Task 5: Inject turn-end Goal audit steering
+#### Task 5: 从 AgentSession 注入稳定 run id 前缀
 
-**Description:** Wire goal audit into session runtime events. When a pursuing goal exists and a turn completes, inject a steering observation that asks the agent to audit progress and call `agent.goal.update` if the goal status changed.
+**Description:** host session 在构建 runtime 时基于 `sessionId` 生成稳定 fingerprint，并注入 core runtime。这样不同 session 即使共用同一个 event store，也不会在 `(run_id, sequence)` 主键上冲突。
 
 **Acceptance criteria:**
-- [x] `TurnCompleted` for sessions with pursuing goals injects one `goal_audit` steering observation.
-- [x] Audit is skipped for paused, achieved, unmet, budget-limited, or cleared goals.
-- [x] Audit message metadata includes `source.type`, `goalId/sessionId`, and `auditReason: turn_end`.
-- [x] Audit injection does not create a timer and does not wake idle sessions by time.
+- [ ] 同一个 session 重建后生成相同 run id prefix。
+- [ ] 不同 session 的 run id prefix 不同。
+- [ ] approval id、display id、goal audit metadata 等自然使用新 run id，不保留旧 `run-1` 假设。
 
 **Verification:**
-- [x] Registry/session tests prove a normal turn with a pursuing goal produces an audit turn.
-- [x] Tests prove non-pursuing statuses do not inject audit.
-- [x] `cargo test -p noloong-agent --test interaction_registry goal`
+- [ ] registry 测试中两个 session 各跑一次，不出现 event store 主键冲突。
+- [ ] paused approval resume 使用新 run id 能恢复。
+- [ ] `cargo test -p noloong-agent --test interaction_registry`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/registry.rs`
 - `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/src/interaction/registry.rs`
 - `crates/noloong-agent/tests/interaction_registry.rs`
 
 **Estimated scope:** M
 
-### Checkpoint: Goal Path
+### Checkpoint: 共享 event store 安全性
 
-- [x] `goal/set` plus one agent run can trigger a goal-audit turn.
-- [x] Agent can update goal status through `agent.goal.update`.
-- [x] No scheduled goal audit exists.
-- [x] `cargo test -p noloong-agent --test interaction_control --test interaction_registry --test goal_tools`
+- [ ] 多 session 共用统一 SQLite event store 无 run id 冲突。
+- [ ] approval resume、goal audit、display event 不依赖旧 run id 形状。
+- [ ] `cargo test -p noloong-agent --test interaction_registry --test interaction_control`
 
-### Phase 3: Automation CRUD and Delivery
+### Phase 3: Telegram offset 迁入 SQLite
 
-#### Task 6: Add Automation management APIs
+#### Task 6: 实现 SQLite Telegram offset store
 
-**Description:** Expose trigger-agnostic automation CRUD through JSON-RPC. The API should describe triggers generically even though MVP only ships `time`.
+**Description:** 为 Telegram polling offset 增加 SQLite store，表结构为 `telegram_offsets(bot_fingerprint primary key, offset, updated_at_ms)`。offset 属于 bridge 运行恢复状态，应和其他 host 状态保存在同一个 DB。
 
 **Acceptance criteria:**
-- [x] Add authority capability `automation.manage`.
-- [x] Add methods `automation/create`, `automation/get`, `automation/list`, `automation/update`, `automation/delete`, and `automation/fire`.
-- [x] `automation/create` validates target session/profile references and computes initial `nextFireAtMs` for `time` triggers.
-- [x] `automation/fire` manually fires any active automation through the same delivery path as trigger fires.
+- [ ] SQLite offset store 支持 load/save。
+- [ ] store 以 bot token fingerprint 为 key，不保存 bot token 明文。
+- [ ] schema 初始化和统一状态 DB 使用同一连接策略。
 
 **Verification:**
-- [x] Interaction tests cover CRUD, manual fire, paused automation behavior, invalid target, and invalid trigger.
-- [x] `cargo test -p noloong-agent --test interaction_control automation`
+- [ ] 单元测试覆盖新 offset store 的空读、写入、覆盖、重建后读取。
+- [ ] `cargo test -p noloong-agent-telegram telegram_offset`
 
-**Dependencies:** Tasks 1-2
+**Dependencies:** Task 1
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/control.rs`
-- `crates/noloong-agent/src/interaction/automation.rs`
-- `crates/noloong-agent/tests/interaction_control.rs`
+- `crates/noloong-agent-telegram/src/polling.rs`
+- `src/main.rs`
 
 **Estimated scope:** M
 
-#### Task 7: Implement Automation delivery semantics
+#### Task 7: 删除默认 JSON offset checkpoint 路径
 
-**Description:** Implement the shared delivery path that turns an automation record into a session message. Existing sessions and pure automation sessions must receive different context.
+**Description:** 默认 bridge 不再生成 `~/.agents/noloong/telegram/*.offset.json`。删除默认路径函数和相关文档。若仍保留 `FileTelegramOffsetStore`，只作为显式 CLI/env 诊断路径使用；如果实现后没有当前用途，则直接删除。
 
 **Acceptance criteria:**
-- [x] Existing idle/completed target sessions receive `Agent::prompt(AgentInput::Message)`.
-- [x] Existing running/paused target sessions receive a steering observation and snapshot save.
-- [x] Delivered messages include automation source metadata, automation id, trigger type, and fired timestamp.
-- [x] Missing target sessions fail the fire attempt without corrupting automation state.
+- [ ] 未传 `--telegram-offset-checkpoint` 时使用 SQLite offset store。
+- [ ] 不再存在默认 JSON checkpoint path。
+- [ ] 文档不再建议默认 JSON checkpoint。
 
 **Verification:**
-- [x] Tests cover idle prompt, running steering, paused steering, missing session, and metadata shape.
-- [x] `cargo test -p noloong-agent --test automation_delivery`
+- [ ] bridge config 测试覆盖默认 SQLite offset 和显式 checkpoint 行为。
+- [ ] `cargo test -p noloong-agent-telegram`
 
 **Dependencies:** Task 6
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/automation.rs`
-- `crates/noloong-agent/src/interaction/registry.rs`
-- `crates/noloong-agent/tests/automation_delivery.rs`
-
-**Estimated scope:** M
-
-#### Task 8: Support pure automation sessions
-
-**Description:** Let automation create or target a dedicated automation session. These sessions need explicit prompt context saying they are automation tasks that may be woken by triggers.
-
-**Acceptance criteria:**
-- [x] New automation session target can create a session using selected/default profile.
-- [x] Automation session records include metadata marking automation ownership.
-- [x] Automation sessions receive a system prompt addition explaining automation identity and trigger wakeups.
-- [x] Existing non-automation sessions are not given the automation identity prompt.
-
-**Verification:**
-- [x] Tests cover session creation, metadata, manifest/system prompt addition, and normal session non-regression.
-- [x] `cargo test -p noloong-agent --test interaction_registry automation_session`
-
-**Dependencies:** Task 7
-
-**Files likely touched:**
-- `crates/noloong-agent/src/interaction/registry.rs`
-- `crates/noloong-agent/src/session.rs`
-- `crates/noloong-agent/tests/interaction_registry.rs`
-
-**Estimated scope:** M
-
-### Checkpoint: Manual Automation
-
-- [x] Automation CRUD works through interaction JSON-RPC.
-- [x] `automation/fire` works for existing and pure automation sessions.
-- [x] Busy-session delivery uses steering observation, not follow-up.
-- [x] `cargo test -p noloong-agent --test interaction_control --test automation_delivery --test interaction_registry`
-
-### Phase 4: Time Trigger Runner
-
-#### Task 9: Add trigger runner lifecycle
-
-**Description:** Add a host-side runner that scans active automations, fires due triggers, and updates `lastFiredAtMs` / `nextFireAtMs`. The runner is generic over trigger kind even though only `time` can become due in MVP.
-
-**Acceptance criteria:**
-- [x] Runner starts with the interaction registry and can be disabled in tests/config.
-- [x] Runner wakes on nearest `nextFireAtMs`, fires due active automations, and persists updated fire state.
-- [x] Concurrent runner ticks do not double-fire the same automation.
-- [x] Failed fire attempts are recorded in automation metadata or last error without disabling the automation.
-
-**Verification:**
-- [x] Time-controlled tests cover once, interval, paused, failure, and no double-fire.
-- [x] `cargo test -p noloong-agent --test automation_runner`
-
-**Dependencies:** Tasks 6-8
-
-**Files likely touched:**
-- `crates/noloong-agent/src/interaction/automation.rs`
-- `crates/noloong-agent/src/interaction/registry.rs`
-- `crates/noloong-agent/tests/automation_runner.rs`
-
-**Estimated scope:** M
-
-#### Task 10: Implement MVP time trigger calculations
-
-**Description:** Implement deterministic calculation for MVP `time` triggers. Keep schedule logic isolated so future daily/weekly/cron/webhook work does not affect delivery.
-
-**Acceptance criteria:**
-- [x] `{"type":"once","atMs":...}` fires once, then becomes completed or inactive.
-- [x] `{"type":"interval","intervalSeconds":...}` computes next fire from actual fire time, not from process wake time.
-- [x] Invalid schedules are rejected at create/update.
-- [x] Trigger calculation is pure and covered by unit tests.
-
-**Verification:**
-- [x] Unit tests cover due/not due, next fire, invalid interval, and once completion.
-- [x] `cargo test -p noloong-agent automation_time`
-
-**Dependencies:** Task 9
-
-**Files likely touched:**
-- `crates/noloong-agent/src/interaction/automation.rs`
-- `crates/noloong-agent/tests/automation_runner.rs`
+- `src/main.rs`
+- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
 
 **Estimated scope:** S
 
-### Checkpoint: Time Automation
+### Checkpoint: Telegram 恢复状态
 
-- [x] Time-triggered automation fires without manual `automation/fire`.
-- [x] Runner survives fire failures and keeps processing other automations.
-- [x] No Goal audit is scheduled by the runner.
-- [x] `cargo test -p noloong-agent --test automation_runner --test automation_delivery`
+- [ ] Telegram bridge 默认 offset 存入统一 SQLite。
+- [ ] 重启 bridge 不会 replay 已处理 update。
+- [ ] 不再创建默认 `.offset.json` 文件。
 
-### Phase 5: Contracts, Docs, and Regression
+### Phase 4: 依赖升级和清理
 
-#### Task 11: Update docs and schemas
+#### Task 8: 升级 Toasty 相关依赖
 
-**Description:** Document the new interaction methods, capabilities, trigger model, metadata conventions, and the explicit distinction between Goal and Automation.
+**Description:** 将 Toasty 生态升级到当前版本，并按最小必要改动适配 SQL registry store 和 SQLite event store。不要顺带做无关重构。
 
 **Acceptance criteria:**
-- [x] Interaction docs list `goal/*` and `automation/*` methods with example payloads.
-- [x] Conformance matrix includes Goal and Automation coverage.
-- [x] Profile/config schema changes are included only if runner configuration is exposed.
-- [x] Docs state that Goal has no scheduled audit.
+- [ ] `toasty`, `toasty-driver-sqlite`, `toasty-driver-postgresql` 升到 `0.6.0`。
+- [ ] `Cargo.lock` 只包含升级所需变更。
+- [ ] SQL store 和 event store 编译通过。
 
 **Verification:**
-- [x] Documentation examples are syntactically valid JSON.
-- [x] `cargo test -p noloong-agent --test interaction_control`
+- [ ] `cargo update -p toasty -p toasty-driver-sqlite -p toasty-driver-postgresql`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
 
-**Dependencies:** Tasks 3-10
+**Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent/docs/INTERACTION.md`
-- `crates/noloong-agent/docs/CONFORMANCE_MATRIX.md`
+- `Cargo.toml`
+- `Cargo.lock`
+- SQL store files only if Toasty 0.6 API requires it.
+
+**Estimated scope:** S
+
+#### Task 9: 清理配置 schema、文档和示例
+
+**Description:** 把文档从“memory 默认、SQLite 可选”改成“SQLite 默认、memory 显式临时”。删除历史妥协措辞和过时示例，确保 schema 与新默认一致。
+
+**Acceptance criteria:**
+- [ ] profile schema 反映 `registryStore` 和 `eventStore` 可省略。
+- [ ] architecture/interaction/telegram 文档说明统一 state DB。
+- [ ] 示例配置不保留无意义 memory 默认。
+
+**Verification:**
+- [ ] `cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json`
+- [ ] `cargo test -p noloong schema`
+
+**Dependencies:** Tasks 2, 3, 7
+
+**Files likely touched:**
 - `schemas/profile-config.schema.json`
+- `crates/noloong-agent/docs/ARCHITECTURE.md`
+- `crates/noloong-agent-telegram/docs/TELEGRAM.md`
 
-**Estimated scope:** S
+**Estimated scope:** M
 
-#### Task 12: Full regression and live smoke hooks
+### Checkpoint: 完整回归
 
-**Description:** Run focused and workspace-level validation, then prepare smoke paths for future Telegram/CLI wrappers without implementing those wrappers in MVP.
-
-**Acceptance criteria:**
-- [x] Focused tests pass for goal, automation delivery, automation runner, and interaction control.
-- [x] Workspace tests pass.
-- [x] A manual smoke recipe exists: create session, set goal, run prompt, observe audit, create automation, manually fire, then interval-fire.
-
-**Verification:**
-- [x] `cargo fmt --check`
-- [x] `cargo clippy --workspace --all-targets -- -D warnings`
-- [x] `cargo test -p noloong-agent`
-- [x] `cargo test --workspace`
-
-**Dependencies:** Tasks 1-11
-
-**Files likely touched:**
-- `crates/noloong-agent/docs/INTERACTION.md`
-- `plans/CURRENT_PLAN.md`
-
-**Estimated scope:** S
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo test -p noloong-agent-core --features sqlite-store --test sqlite_store`
+- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
+- [ ] `cargo test -p noloong-agent --test interaction_registry --test interaction_control`
+- [ ] `cargo test -p noloong-agent-telegram`
+- [ ] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Goal audit loops forever | High | Audit only for pursuing goals; `agent.goal.update` can mark achieved/unmet/budget-limited; tests assert no audit for terminal statuses. |
-| Automation becomes cron-shaped | Medium | Keep `trigger` as tagged enum and isolate time calculations in trigger-specific code. |
-| Busy session automation changes user intent | Medium | Deliver as steering observation, never follow-up, and mark source metadata clearly. |
-| Store expansion becomes too broad | Medium | Add goal/automation CRUD alongside existing registry store patterns; avoid changing `AgentSessionRecord`. |
-| Runner double-fires after restart or concurrent ticks | High | Persist `lastFiredAtMs` and `nextFireAtMs`; update fire state atomically per store as far as each backend supports. |
+| 多 session 共享 event store 后 run id 冲突 | High | 先完成 run id 命名空间化，再启用默认 SQLite eventStore。 |
+| Toasty 0.6 API 破坏 SQL store 编译 | Medium | 依赖升级独立成任务，先跑最小 SQL/event 测试再扩大回归。 |
+| 默认 SQLite 目录权限或路径不可用 | Medium | 统一入口创建父目录并给出明确错误，不回退 memory。 |
+| Telegram offset 迁移遗漏导致 update replay | Medium | 默认 SQLite offset store 必须有重启读取测试和一次真实 Telegram smoke。 |
+| 示例仍显式 memory 误导后续使用 | Low | 清理普通示例，只在测试/隔离 smoke 中保留 memory。 |
 
 ## Parallelization Opportunities
 
-- Tasks 3-5 must be sequential after persistence because Goal API, tool, and audit depend on each other.
-- Tasks 6-8 can run after persistence and mostly parallelize with Goal work if store contracts are stable.
-- Tasks 9-10 must wait for Automation delivery.
-- Task 11 docs can start once API shapes in Tasks 3 and 6 are fixed.
+- Task 8 依赖升级可和 Task 1-3 并行，但最终需要统一回归。
+- Task 6 的 SQLite offset store 可在 Task 1 的状态 DB helper 定稿后并行实现。
+- Task 9 文档/schema 必须等实现形状稳定后再做。
 
 ## Open Questions
 
-- None for MVP. Daily/weekly schedules, cron/RRULE, webhook triggers, Telegram commands, and multi-goal sessions are explicitly deferred.
+- 无。当前决策是：没有兼容负担，默认统一 SQLite，旧默认 memory/JSON checkpoint 路径直接清理。

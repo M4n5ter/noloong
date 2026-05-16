@@ -195,26 +195,26 @@ runtime 由 Rust host 注册 `AgentRuntimeProfile`。外部 bridge 只能选择 
 
 `AgentSessionRegistryStore` 持久化的是 application session snapshot，不是 `noloong-agent-core` 的 append-only event store。它保存 `AgentManifest`、`AgentState`、steering/follow-up queue、profile id、parent/role/metadata 和时间戳，用于让 interaction registry 在进程重启后恢复 session 目录和按需重建 live runtime。Goal 和 Automation records 也在同一个 store boundary 下持久化，但与 `AgentSessionRecord` 分开存储，方便独立 CRUD、索引 automation next fire time，并避免把调度状态混进 transcript snapshot。
 
-profile 级 `eventStore` 是另一层：它保存 core `AgentEvent` append-only log，用于 run-level event replay、approval resume、tool permission audit 顺序和诊断。root `noloong` config 中，顶层 `registryStore` 选择 session snapshot backend；每个 profile 下的 `eventStore` 选择该 profile 构建 runtime 时注入的 core event log backend。两者不能互相替代：只有 registry store 时可以恢复 session descriptor 和 transcript snapshot，但 paused approval resume 这类需要 replay run events 的流程仍需要同一 profile 指向同一个持久 event store。
+profile 级 `eventStore` 是另一层：它保存 core `AgentEvent` append-only log，用于 run-level event replay、approval resume、tool permission audit 顺序和诊断。root `noloong` config 中，顶层 `registryStore` 选择 session snapshot backend；每个 profile 下的 `eventStore` 选择该 profile 构建 runtime 时注入的 core event log backend。两者不能互相替代：registry store 恢复 session descriptor 和 transcript snapshot，event store 恢复 run event replay 和 paused approval 继续所需的事件上下文。省略 `registryStore` 或 `eventStore` 时，host 都使用统一 SQLite state DB：默认 `~/.agents/noloong/state.sqlite`，也可以通过 `NOLOONG_STATE_DATABASE_URL` 覆盖。
 
 registry 支持 unloaded persisted session。`session/list` 和 `session/get` 可以直接从 store 中生成 descriptor，不会立即创建 provider、tool runtime 或后台进程管理器。只有 `agent/prompt`、`agent/continue`、queue/manifest mutation 等需要 live session 的操作才会触发 lazy restore：registry 用 snapshot 里的 `profileId` 查找当前 host 注册的 `AgentRuntimeProfile`，以 snapshot 中的 manifest 重建 `AgentRuntime`，再把 `AgentState` 和两类 queue 写回 core `Agent`。
 
 恢复策略是显式保守的：
 
 - `running` snapshot 说明上一进程在 run 中断，恢复时会被标记为 `failed`，并写回 store；不会自动继续调用模型或工具。
-- `paused` snapshot 会保持 paused 状态，用于 approval 或人工流程恢复；若需要跨进程继续 approval，profile 必须配置持久 `eventStore`，例如 SQLite file URL。
+- `paused` snapshot 会保持 paused 状态，用于 approval 或人工流程恢复；默认 SQLite event store 已支持跨进程继续 approval。
 - 如果当前 host 没有注册 snapshot 所需的 `profileId`，恢复会失败；这是 host/runtime profile 配置问题，不由外部 bridge 动态补 credential。
 - profile 的默认 manifest patch 只在创建 session 时应用；恢复时使用 snapshot 中已持久化的 manifest。
 
 内置 store backend：
 
-- 默认 `InMemoryAgentSessionRegistryStore` 只适合测试或单进程临时 session。
+- 省略 `registryStore` 时使用统一 SQLite state DB；`InMemoryAgentSessionRegistryStore` 只适合显式测试或单进程临时 session。
 - `registry-store-sqlite` 和 `registry-store-postgres` feature 启用 Toasty SQL backend。SQLite 支持 memory/file URL；PostgreSQL 支持 `postgres://` 和 `postgresql://` URL。SQL backend 适合需要强约束 session id、跨进程或多写者一致性的 registry。
 - `registry-store-object` feature 启用 OpenDAL backend。每个 session 是 prefix 下的一个 JSON object，session id 使用 URL-safe base64 编码成 object key。该 backend 是 single-writer snapshot store，不承诺多进程同时写同一 registry 的强一致语义；需要多写者时应使用 SQL backend。
 
 内置 event store backend：
 
-- profile `eventStore` 默认是 memory，只适合当前进程内的 run event replay。
+- 省略 profile `eventStore` 时使用统一 SQLite state DB。显式 `{"type":"memory"}` 只适合当前进程内的 run event replay。
 - root `noloong` v1 暴露 SQLite event store，配置形如 `{"type":"sqlite","databaseUrl":"sqlite:target/noloong-events.sqlite","migrateOnConnect":true}`。`migrateOnConnect` 默认 `true`；设为 `false` 时要求 schema 已存在。
 - `sqlite::memory:` 仍是进程本地，不适合跨进程恢复 paused approval。
 - PostgreSQL/object event store 不在 v1 中暴露；后续应作为 core `EventStore` backend 单独实现。

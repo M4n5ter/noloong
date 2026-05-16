@@ -51,6 +51,7 @@ struct AgentSessionInner {
     max_subagent_depth: usize,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
+    run_id_prefix: Option<String>,
     system_prompt_model_context: Mutex<Option<SystemPromptModelContext>>,
 }
 
@@ -66,6 +67,7 @@ pub struct AgentSessionBuilder {
     max_subagent_depth: usize,
     tool_output_overflow_config: ToolOutputOverflowConfig,
     approval_cache: ApprovalCache,
+    run_id_prefix: Option<String>,
 }
 
 impl Default for AgentSessionBuilder {
@@ -82,6 +84,7 @@ impl Default for AgentSessionBuilder {
             max_subagent_depth: 1,
             tool_output_overflow_config: ToolOutputOverflowConfig::default(),
             approval_cache: ApprovalCache::default(),
+            run_id_prefix: None,
         }
     }
 }
@@ -187,6 +190,9 @@ impl AgentSession {
                 BuiltInToolOutputOverflowHook::new(self.inner.tool_output_overflow_config.clone())
                     .with_catalog(catalog.clone()),
             ));
+        if let Some(prefix) = &self.inner.run_id_prefix {
+            builder = builder.with_run_id_prefix(prefix);
+        }
         for tool in self.tools_for_manifest(&manifest, &catalog) {
             builder = builder.with_tool(tool);
         }
@@ -508,6 +514,11 @@ impl AgentSessionBuilder {
         self
     }
 
+    pub fn with_run_id_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.run_id_prefix = Some(prefix.into());
+        self
+    }
+
     pub fn build(self) -> AgentSession {
         let environment = self
             .environment
@@ -527,6 +538,7 @@ impl AgentSessionBuilder {
                 max_subagent_depth: self.max_subagent_depth,
                 tool_output_overflow_config: self.tool_output_overflow_config,
                 approval_cache: self.approval_cache,
+                run_id_prefix: self.run_id_prefix,
                 system_prompt_model_context: Mutex::new(None),
             }),
         }

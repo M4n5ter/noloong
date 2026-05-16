@@ -5,10 +5,12 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::config::TelegramStartupUpdatePolicy;
 use crate::telegram_api::{TelegramApi, TelegramApiError};
+use rusqlite::OptionalExtension;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -265,6 +267,155 @@ impl TelegramOffsetStore for FileTelegramOffsetStore {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqliteTelegramOffsetStore {
+    database_url: String,
+    bot_fingerprint: String,
+}
+
+impl SqliteTelegramOffsetStore {
+    pub fn new(database_url: impl Into<String>, bot_fingerprint: impl Into<String>) -> Self {
+        Self {
+            database_url: database_url.into(),
+            bot_fingerprint: bot_fingerprint.into(),
+        }
+    }
+}
+
+impl TelegramOffsetStore for SqliteTelegramOffsetStore {
+    fn load<'a>(&'a self) -> TelegramOffsetStoreFuture<'a, Option<i64>> {
+        let database_url = self.database_url.clone();
+        let bot_fingerprint = self.bot_fingerprint.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || load_sqlite_offset(&database_url, &bot_fingerprint))
+                .await
+                .map_err(TelegramOffsetStoreError::sqlite)?
+        })
+    }
+
+    fn save<'a>(&'a self, offset: i64) -> TelegramOffsetStoreFuture<'a, ()> {
+        let database_url = self.database_url.clone();
+        let bot_fingerprint = self.bot_fingerprint.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                save_sqlite_offset(&database_url, &bot_fingerprint, offset)
+            })
+            .await
+            .map_err(TelegramOffsetStoreError::sqlite)?
+        })
+    }
+}
+
+fn load_sqlite_offset(
+    database_url: &str,
+    bot_fingerprint: &str,
+) -> Result<Option<i64>, TelegramOffsetStoreError> {
+    let connection = open_sqlite_offset_connection(database_url)?;
+    ensure_sqlite_offset_schema(&connection)?;
+    connection
+        .query_row(
+            "SELECT offset FROM telegram_offsets WHERE bot_fingerprint = ?1",
+            [bot_fingerprint],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(TelegramOffsetStoreError::sqlite)
+}
+
+fn save_sqlite_offset(
+    database_url: &str,
+    bot_fingerprint: &str,
+    offset: i64,
+) -> Result<(), TelegramOffsetStoreError> {
+    let connection = open_sqlite_offset_connection(database_url)?;
+    ensure_sqlite_offset_schema(&connection)?;
+    connection
+        .execute(
+            "INSERT INTO telegram_offsets (bot_fingerprint, offset, updated_at_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(bot_fingerprint) DO UPDATE SET
+                 offset = excluded.offset,
+                 updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![bot_fingerprint, offset, current_unix_ms()],
+        )
+        .map_err(TelegramOffsetStoreError::sqlite)?;
+    Ok(())
+}
+
+fn open_sqlite_offset_connection(
+    database_url: &str,
+) -> Result<rusqlite::Connection, TelegramOffsetStoreError> {
+    match sqlite_offset_database_path(database_url)? {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| TelegramOffsetStoreError::write(parent, error))?;
+            }
+            rusqlite::Connection::open(path).map_err(TelegramOffsetStoreError::sqlite)
+        }
+        None => rusqlite::Connection::open_in_memory().map_err(TelegramOffsetStoreError::sqlite),
+    }
+}
+
+fn ensure_sqlite_offset_schema(
+    connection: &rusqlite::Connection,
+) -> Result<(), TelegramOffsetStoreError> {
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS telegram_offsets (
+                bot_fingerprint TEXT PRIMARY KEY NOT NULL,
+                offset INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(TelegramOffsetStoreError::sqlite)?;
+    Ok(())
+}
+
+fn sqlite_offset_database_path(
+    database_url: &str,
+) -> Result<Option<PathBuf>, TelegramOffsetStoreError> {
+    match database_url {
+        "" => Err(TelegramOffsetStoreError::Sqlite(
+            "sqlite database url is empty".into(),
+        )),
+        "sqlite::memory:" | "sqlite://memory" | ":memory:" => Ok(None),
+        url if url.starts_with("sqlite://") => {
+            sqlite_offset_path_from_suffix(url.strip_prefix("sqlite://").unwrap_or_default())
+        }
+        url if url.starts_with("sqlite:") => {
+            sqlite_offset_path_from_suffix(url.strip_prefix("sqlite:").unwrap_or_default())
+        }
+        url if url.contains("://") => Err(TelegramOffsetStoreError::Sqlite(format!(
+            "telegram offset database URL must be sqlite, got: {url}"
+        ))),
+        path => Ok(Some(PathBuf::from(path))),
+    }
+}
+
+fn sqlite_offset_path_from_suffix(path: &str) -> Result<Option<PathBuf>, TelegramOffsetStoreError> {
+    if path.is_empty() {
+        return Err(TelegramOffsetStoreError::Sqlite(
+            "sqlite database path is empty".into(),
+        ));
+    }
+    if path == ":memory:" || path == "memory" {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(path)))
+}
+
+fn current_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct TelegramOffsetCheckpoint {
@@ -279,6 +430,8 @@ pub enum TelegramOffsetStoreError {
     Write(String),
     #[error("telegram offset checkpoint decode failed: {0}")]
     Decode(String),
+    #[error("telegram offset sqlite failed: {0}")]
+    Sqlite(String),
 }
 
 impl TelegramOffsetStoreError {
@@ -288,6 +441,10 @@ impl TelegramOffsetStoreError {
 
     fn write(path: &std::path::Path, error: std::io::Error) -> Self {
         Self::Write(format!("{}: {error}", path.display()))
+    }
+
+    fn sqlite(error: impl std::fmt::Display) -> Self {
+        Self::Sqlite(error.to_string())
     }
 }
 
@@ -477,9 +634,9 @@ fn network_backoff_seconds(retries: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TelegramMessageEntityKind, TelegramOffsetStore, TelegramOffsetStoreFuture,
-        TelegramPollOutcome, TelegramPoller, TelegramPollingError, TelegramUpdateHandler,
-        TelegramUpdateHandlerFuture,
+        SqliteTelegramOffsetStore, TelegramMessageEntityKind, TelegramOffsetStore,
+        TelegramOffsetStoreFuture, TelegramPollOutcome, TelegramPoller, TelegramPollingError,
+        TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     };
     use crate::{
         config::TelegramStartupUpdatePolicy,
@@ -492,8 +649,10 @@ mod tests {
     use std::{
         collections::VecDeque,
         future::Future,
+        path::PathBuf,
         pin::Pin,
         sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     #[tokio::test]
@@ -549,6 +708,24 @@ mod tests {
 
         assert_eq!(store.offset(), Some(9));
         assert_eq!(store.save_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_offset_store_round_trips_by_bot_fingerprint() {
+        let path = unique_sqlite_path("telegram-offset");
+        let url = format!("sqlite:{}", path.display());
+        let first = SqliteTelegramOffsetStore::new(&url, "bot-a");
+
+        assert_eq!(first.load().await.unwrap(), None);
+        first.save(42).await.unwrap();
+        first.save(43).await.unwrap();
+
+        let reloaded = SqliteTelegramOffsetStore::new(&url, "bot-a");
+        let other_bot = SqliteTelegramOffsetStore::new(&url, "bot-b");
+        assert_eq!(reloaded.load().await.unwrap(), Some(43));
+        assert_eq!(other_bot.load().await.unwrap(), None);
+
+        remove_sqlite_files(&path);
     }
 
     #[tokio::test]
@@ -973,6 +1150,23 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), TelegramApiError>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    fn unique_sqlite_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "noloong-{name}-{}-{nanos}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    fn remove_sqlite_files(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     }
 
     #[derive(Default)]

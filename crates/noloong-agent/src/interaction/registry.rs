@@ -992,6 +992,7 @@ impl AgentSessionRegistry {
         let active_goal = self.inner.store.get_goal(&record.session_id).await?;
         let session = AgentSession::builder()
             .with_manifest(record.manifest.clone())
+            .with_run_id_prefix(run_id_prefix_for_session(&record.session_id))
             .with_subagent_depth(subagent_depth_for_record(&record))
             .with_subagent_controller(Arc::new(RegistrySubagentController {
                 registry: Arc::downgrade(&self.inner),
@@ -1307,6 +1308,15 @@ fn summary_from_descriptor(descriptor: &InteractionSessionDescriptor) -> Subagen
 
 fn subagent_depth_for_record(record: &AgentSessionRecord) -> usize {
     usize::from(record.parent_session_id.is_some())
+}
+
+fn run_id_prefix_for_session(session_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in session_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("s{hash:016x}")
 }
 
 fn subagent_manifest_from_parent(

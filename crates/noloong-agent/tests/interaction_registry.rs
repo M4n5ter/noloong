@@ -705,11 +705,19 @@ async fn registry_restore_paused_session_can_resume_with_shared_event_store() {
         .await
         .unwrap()
         .expect("paused session restores");
+    let approval_id = restored
+        .agent()
+        .pending_tool_approvals()
+        .await
+        .keys()
+        .next()
+        .cloned()
+        .expect("paused session has pending approval");
 
     restored
         .agent()
         .resume_tool_approval(ToolApprovalResolution {
-            approval_id: "approval-run-1-1-host-exec-start-test-0".into(),
+            approval_id,
             decision: ToolPermissionDecision {
                 outcome: ToolPermissionOutcome::Allow,
                 reason: Some("approved".into()),
@@ -721,6 +729,68 @@ async fn registry_restore_paused_session_can_resume_with_shared_event_store() {
         .unwrap();
 
     assert_eq!(restored.agent().state().await.status, RunStatus::Completed);
+}
+
+#[tokio::test]
+async fn registry_sessions_namespace_run_ids_for_shared_event_store() {
+    let registry_store = Arc::new(InMemoryAgentSessionRegistryStore::default());
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![shared_event_store_profile(
+            "default",
+            Arc::new(TextModel),
+            Arc::clone(&event_store),
+        )],
+        registry_store as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+
+    for session_id in ["alpha", "beta"] {
+        registry
+            .create_session(AgentSessionCreateRequest {
+                session_id: Some(session_id.into()),
+                ..AgentSessionCreateRequest::default()
+            })
+            .await
+            .unwrap();
+        registry
+            .get(session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent()
+            .prompt("hello")
+            .await
+            .unwrap();
+    }
+
+    let alpha_run_id = registry
+        .get("alpha")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .state()
+        .await
+        .run_id
+        .expect("alpha run id");
+    let beta_run_id = registry
+        .get("beta")
+        .await
+        .unwrap()
+        .unwrap()
+        .agent()
+        .state()
+        .await
+        .run_id
+        .expect("beta run id");
+
+    assert_ne!(alpha_run_id, beta_run_id);
+    assert!(alpha_run_id.starts_with("run-s"));
+    assert!(beta_run_id.starts_with("run-s"));
+    assert!(!event_store.load(&alpha_run_id).await.unwrap().is_empty());
+    assert!(!event_store.load(&beta_run_id).await.unwrap().is_empty());
 }
 
 #[tokio::test]

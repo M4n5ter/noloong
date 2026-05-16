@@ -1065,53 +1065,81 @@ async fn interaction_control_lists_and_resolves_tool_approvals() {
         .unwrap();
     let handler =
         InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all());
-    let approval_id = "approval-run-1-1-host-exec-start-test-0";
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server);
+    let server = tokio::spawn(serve_jsonrpc(server_reader, server_writer, handler));
+    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let mut lines = BufReader::new(client_reader).lines();
 
-    let messages = run_jsonrpc(
-        handler,
-        vec![
-            rpc(
-                1,
-                "initialize",
-                json!({
-                    "name": "approval-client",
-                    "requestedAuthority": ["agent.run", "approval.resolve"]
-                }),
-            ),
-            rpc(
-                2,
-                "agent/prompt",
-                json!({
-                    "sessionId": "root",
-                    "input": {"type": "text", "text": "run command"}
-                }),
-            ),
-            rpc(3, "approval/list", json!({"sessionId": "root"})),
-            rpc(
-                4,
-                "approval/resolve",
-                json!({
-                    "sessionId": "root",
-                    "approvalId": approval_id,
-                    "decision": {
-                        "outcome": "allow",
-                        "reason": "test approval",
-                        "approver": "test",
-                        "metadata": {}
-                    }
-                }),
-            ),
-            rpc(5, "shutdown", json!({})),
-        ],
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "name": "approval-client",
+                "requestedAuthority": ["agent.run", "approval.resolve"]
+            }),
+        ),
     )
     .await;
+    read_message(&mut lines).await;
 
-    assert_eq!(response(&messages, 2)["result"]["status"], "paused");
-    assert_eq!(
-        response(&messages, 3)["result"][approval_id]["approvalId"],
-        approval_id
-    );
-    assert_eq!(response(&messages, 4)["result"]["status"], "completed");
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            2,
+            "agent/prompt",
+            json!({
+                "sessionId": "root",
+                "input": {"type": "text", "text": "run command"}
+            }),
+        ),
+    )
+    .await;
+    let prompt_response = read_message(&mut lines).await;
+    assert_eq!(prompt_response["result"]["status"], "paused");
+
+    write_rpc(
+        &mut client_writer,
+        rpc(3, "approval/list", json!({"sessionId": "root"})),
+    )
+    .await;
+    let list_response = read_message(&mut lines).await;
+    let approvals = list_response["result"]
+        .as_object()
+        .expect("approval/list result is an object");
+    let (approval_id, approval) = approvals
+        .iter()
+        .next()
+        .expect("approval/list returns one pending approval");
+    assert_eq!(approval["approvalId"], approval_id.as_str());
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            4,
+            "approval/resolve",
+            json!({
+                "sessionId": "root",
+                "approvalId": approval_id,
+                "decision": {
+                    "outcome": "allow",
+                    "reason": "test approval",
+                    "approver": "test",
+                    "metadata": {}
+                }
+            }),
+        ),
+    )
+    .await;
+    let resolve_response = read_message(&mut lines).await;
+    assert_eq!(resolve_response["result"]["status"], "completed");
+
+    write_rpc(&mut client_writer, rpc(5, "shutdown", json!({}))).await;
+    read_message(&mut lines).await;
+    drop(client_writer);
+    server.await.unwrap().unwrap();
 }
 
 async fn test_handler(profile_id: &str) -> InteractionControlHandler {

@@ -142,6 +142,7 @@ pub struct AgentRuntime {
     context_compaction: Option<ContextCompactionRuntime>,
     _stdio_extensions: Vec<Arc<StdioExtension>>,
     max_turns: u64,
+    run_id_prefix: Option<String>,
     run_counter: Arc<AtomicU64>,
     event_counter: Arc<AtomicU64>,
 }

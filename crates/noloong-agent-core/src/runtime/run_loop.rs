@@ -816,7 +816,10 @@ impl AgentRuntime {
 
     fn next_run_id(&self) -> String {
         let id = self.run_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        format!("run-{id}")
+        match &self.run_id_prefix {
+            Some(prefix) => format!("run-{prefix}-{id}"),
+            None => format!("run-{id}"),
+        }
     }
 
     pub(super) fn ensure_event_counter_after(&self, events: &[AgentEvent]) {

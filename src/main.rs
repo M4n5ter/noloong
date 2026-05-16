@@ -19,8 +19,9 @@ use crate::{
         DEFAULT_TELEGRAM_LOCALE_ENV, DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV,
         DEFAULT_TELEGRAM_PROXY_ENV, DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV,
         DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
-        DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV, HostProfileConfig, env_or_value,
-        parse_bool_env, parse_csv_i64, parse_csv_u64,
+        DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV, HostProfileConfig,
+        ensure_sqlite_database_parent, env_or_value, parse_bool_env, parse_csv_i64, parse_csv_u64,
+        resolve_state_database_url,
     },
     host::build_registry,
 };
@@ -60,8 +61,9 @@ use noloong_agent_telegram::{
         discover_fallback_addrs, network_resolution_mode,
     },
     polling::{
-        FileTelegramOffsetStore, TelegramCallbackQuery, TelegramPollOutcome, TelegramPoller,
-        TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
+        FileTelegramOffsetStore, SqliteTelegramOffsetStore, TelegramCallbackQuery,
+        TelegramPollOutcome, TelegramPoller, TelegramPollingError, TelegramUpdate,
+        TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
     process::{
         PROCESS_OUTPUT_INLINE_CHAR_LIMIT, process_output_document_bytes, process_output_filename,
@@ -342,14 +344,17 @@ async fn run_telegram_bridge_with_config(
         catalog,
         bot_username: config.bot_username.clone(),
     });
-    let offset_checkpoint_path = config
-        .offset_checkpoint_path
-        .clone()
-        .or_else(|| default_telegram_offset_checkpoint_path(&config.bot_token));
     let mut poller = TelegramPoller::new(Arc::clone(&handler.api), handler)
         .with_startup_update_policy(config.startup_update_policy);
-    if let Some(path) = offset_checkpoint_path {
+    if let Some(path) = config.offset_checkpoint_path.clone() {
         poller = poller.with_offset_store(Arc::new(FileTelegramOffsetStore::new(path)));
+    } else {
+        let state_database_url = resolve_state_database_url()?;
+        ensure_sqlite_database_parent(&state_database_url)?;
+        poller = poller.with_offset_store(Arc::new(SqliteTelegramOffsetStore::new(
+            state_database_url,
+            stable_fingerprint(&config.bot_token),
+        )));
     }
     poller.initialize().await.map_err(CliError::Polling)?;
     log::info!("telegram bridge initialized; polling started");
@@ -2270,16 +2275,6 @@ fn parse_config_optional_u64(
     value.trim().parse::<u64>().map(Some).map_err(|error| {
         config::CliConfigError::ParseConfig(format!("invalid {env_name}: {error}")).into()
     })
-}
-
-fn default_telegram_offset_checkpoint_path(bot_token: &str) -> Option<PathBuf> {
-    let home = env::var_os("HOME").map(PathBuf::from)?;
-    Some(
-        home.join(".agents")
-            .join("noloong")
-            .join("telegram")
-            .join(format!("{}.offset.json", stable_fingerprint(bot_token))),
-    )
 }
 
 fn stable_fingerprint(value: &str) -> String {

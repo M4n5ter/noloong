@@ -246,21 +246,19 @@ Agents cannot silently install plugins. They can only propose `register_plugin`,
 
 ## Session Stores
 
-The root `noloong` profile config has two separate persistence layers. `registryStore` is a host-level session snapshot store for `AgentManifest`, `AgentState`, steering/follow-up queues, profile ids, metadata, and session descriptors. Profile-level `eventStore` is the core run event log for `AgentEvent` replay, tool approval resume, permission audit ordering, and run-level diagnostics.
+The root `noloong` profile config has two separate persistence layers. `registryStore` is a host-level session snapshot store for `AgentManifest`, `AgentState`, steering/follow-up queues, profile ids, metadata, and session descriptors. Profile-level `eventStore` is the core run event log for `AgentEvent` replay, tool approval resume, permission audit ordering, and run-level diagnostics. When either field is omitted, the host uses the unified SQLite state database at `~/.agents/noloong/state.sqlite`, or `NOLOONG_STATE_DATABASE_URL` when set.
 
 ```json
 {
-  "registryStore": {"type": "sqlite", "databaseUrl": "sqlite:target/noloong-sessions.sqlite"},
   "profiles": [{
     "profileId": "default",
     "displayName": "Default",
-    "provider": {"type": "responses", "model": "gpt-5.4-mini"},
-    "eventStore": {"type": "sqlite", "databaseUrl": "sqlite:target/noloong-events.sqlite"}
+    "provider": {"type": "responses", "model": "gpt-5.4-mini"}
   }]
 }
 ```
 
-`eventStore` defaults to `{"type":"memory"}`. Use a SQLite file URL, not `sqlite::memory:`, when a profile needs paused approval resume or event replay across process restarts. A persisted event store does not make interrupted `running` sessions continue automatically; they are still marked failed on restore. `registryStore` tracks interaction sessions and profile bindings, while `eventStore` tracks agent events for replay/audit. Neither setting is the same as Responses `stateMode`: `stateMode` controls whether the upstream Responses service stores response items.
+Use explicit `memory` only for tests or throwaway local runs. A persisted event store does not make interrupted `running` sessions continue automatically; they are still marked failed on restore. `registryStore` tracks interaction sessions and profile bindings, while `eventStore` tracks agent events for replay/audit. Neither setting is the same as Responses `stateMode`: `stateMode` controls whether the upstream Responses service stores response items.
 
 ## Thinking
 

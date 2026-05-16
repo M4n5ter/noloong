@@ -89,7 +89,7 @@ Root profile config is documented by `schemas/profile-config.schema.json`. Gener
 
 Session descriptors may come from a persisted registry store without a live runtime loaded in memory. `session/get` and `session/list` are read-only descriptor operations: they can return SQLite/PostgreSQL/OpenDAL-backed snapshots without constructing a provider, tools, or background process runtime. Run and mutation methods restore the live session lazily from the snapshot using the currently registered `AgentRuntimeProfile` with the same `profileId`.
 
-The registry store is not the core event log. It stores application session snapshots for descriptors and lazy restore. Profile-level `eventStore` stores core `AgentEvent` entries for run replay, approval resume, permission audit ordering, and diagnostics. A bridge cannot provide an event store over interaction JSON-RPC; it is selected by the Rust host profile. Use a persistent SQLite file event store when a paused approval must survive a process restart. `sqlite::memory:` and the default memory event store are process-local.
+The registry store is not the core event log. It stores application session snapshots for descriptors and lazy restore. Profile-level `eventStore` stores core `AgentEvent` entries for run replay, approval resume, permission audit ordering, and diagnostics. A bridge cannot provide an event store over interaction JSON-RPC; it is selected by the Rust host profile. When `registryStore` or profile `eventStore` is omitted, the host uses the unified SQLite state database at `~/.agents/noloong/state.sqlite`, or `NOLOONG_STATE_DATABASE_URL` when set. Explicit `memory` and `sqlite::memory:` stores are process-local.
 
 If a persisted snapshot was `running` when the previous process stopped, the registry reports it as `failed` and writes that interrupted status back to the store. Persisted `paused` sessions remain paused so approval and human workflows can be resumed by the host.
 
@@ -217,7 +217,7 @@ Raw events are core `AgentEvent` values with `sessionId` and `subscriptionId`:
 Notification:
 
 ```json
-{"jsonrpc":"2.0","method":"agent/event","params":{"sessionId":"root","subscriptionId":"subscription-1","event":{"sequence":1,"runId":"run-1","turnId":null,"phase":null,"kind":{"type":"run_started"}}}}
+{"jsonrpc":"2.0","method":"agent/event","params":{"sessionId":"root","subscriptionId":"subscription-1","event":{"sequence":1,"runId":"run-s0123456789abcdef-1","turnId":null,"phase":null,"kind":{"type":"run_started"}}}}
 ```
 
 Display events are UI projections intended for bridges that do not want to render raw event logs:
@@ -229,7 +229,7 @@ Display events are UI projections intended for bridges that do not want to rende
 Notification:
 
 ```json
-{"jsonrpc":"2.0","method":"display/event","params":{"sessionId":"root","subscriptionId":"subscription-2","event":{"type":"assistant_message_delta","displayMessageId":"run-1:assistant","text":"hello"}}}
+{"jsonrpc":"2.0","method":"display/event","params":{"sessionId":"root","subscriptionId":"subscription-2","event":{"type":"assistant_message_delta","displayMessageId":"run-s0123456789abcdef-1:assistant","text":"hello"}}}
 ```
 
 Telegram-like bridges should request `streamText + editMessage` and update one external message by `displayMessageId`. WeChat/iLink-like bridges should request `displayEvents` with `streamText = false`, then render only `assistant_message_final`.
@@ -251,7 +251,7 @@ List pending approvals:
 Resolve one approval:
 
 ```json
-{"jsonrpc":"2.0","id":24,"method":"approval/resolve","params":{"sessionId":"root","approvalId":"approval-run-1-1-host-exec-start-test-0","decision":{"outcome":"allow","reason":"approved by user","approver":"telegram:user:123","metadata":{}}}}
+{"jsonrpc":"2.0","id":24,"method":"approval/resolve","params":{"sessionId":"root","approvalId":"approval-run-s0123456789abcdef-1-1-host-exec-start-test-0","decision":{"outcome":"allow","reason":"approved by user","approver":"telegram:user:123","metadata":{}}}}
 ```
 
 Resume timed-out approvals:

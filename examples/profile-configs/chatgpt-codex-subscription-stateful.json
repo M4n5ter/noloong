@@ -1,8 +1,5 @@
 {
   "defaultProfileId": "chatgpt-codex-stateful",
-  "registryStore": {
-    "type": "memory"
-  },
   "profiles": [
     {
       "profileId": "chatgpt-codex-stateful",

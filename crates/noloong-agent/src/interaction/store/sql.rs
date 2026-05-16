@@ -15,6 +15,13 @@ use toasty_driver_postgresql::PostgreSQL;
 #[cfg(feature = "registry-store-sqlite")]
 use toasty_driver_sqlite::Sqlite;
 
+#[cfg(feature = "registry-store-sqlite")]
+const SQLITE_REGISTRY_TABLES: &[&str] = &[
+    "stored_agent_sessions",
+    "stored_goals",
+    "stored_automations",
+];
+
 #[derive(Clone, Debug)]
 pub struct SqlAgentSessionRegistryStoreConfig {
     pub database_url: String,
@@ -62,10 +69,19 @@ impl SqlAgentSessionRegistryStore {
         config: SqlAgentSessionRegistryStoreConfig,
     ) -> Result<Self, InteractionError> {
         let location = SqlStoreLocation::parse(&config.database_url)?;
+        validate_schema_state(
+            &location,
+            config.migrate_on_connect,
+            config.table_name_prefix.as_deref(),
+        )?;
         let db = location
             .build_db(config.table_name_prefix.as_deref())
             .await?;
-        if config.migrate_on_connect {
+        if should_push_schema(
+            &location,
+            config.migrate_on_connect,
+            config.table_name_prefix.as_deref(),
+        )? {
             db.push_schema().await.map_err(to_store_error)?;
         }
         Ok(Self { db })
@@ -471,6 +487,93 @@ fn sqlite_path(url: &str, prefix: &str) -> Result<SqlStoreLocation, InteractionE
         Ok(SqlStoreLocation::SqliteInMemory)
     } else {
         Ok(SqlStoreLocation::SqliteFile(PathBuf::from(path)))
+    }
+}
+
+fn validate_schema_state(
+    location: &SqlStoreLocation,
+    migrate_on_connect: bool,
+    table_name_prefix: Option<&str>,
+) -> Result<(), InteractionError> {
+    if migrate_on_connect {
+        return Ok(());
+    }
+
+    match location {
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteInMemory => Err(InteractionError::internal(
+            "sqlite in-memory registry store requires migrate_on_connect=true",
+        )),
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteFile(path)
+            if sqlite_registry_schema_exists(path, table_name_prefix)? =>
+        {
+            Ok(())
+        }
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteFile(path) => Err(InteractionError::internal(format!(
+            "sqlite registry store schema is missing at {}; enable migrate_on_connect",
+            path.display()
+        ))),
+        #[cfg(feature = "registry-store-postgres")]
+        SqlStoreLocation::Postgres(_) => Ok(()),
+    }
+}
+
+fn should_push_schema(
+    location: &SqlStoreLocation,
+    migrate_on_connect: bool,
+    table_name_prefix: Option<&str>,
+) -> Result<bool, InteractionError> {
+    if !migrate_on_connect {
+        return Ok(false);
+    }
+
+    match location {
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteInMemory => Ok(true),
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteFile(path) => {
+            Ok(!sqlite_registry_schema_exists(path, table_name_prefix)?)
+        }
+        #[cfg(feature = "registry-store-postgres")]
+        SqlStoreLocation::Postgres(_) => Ok(true),
+    }
+}
+
+#[cfg(feature = "registry-store-sqlite")]
+fn sqlite_registry_schema_exists(
+    path: &Path,
+    table_name_prefix: Option<&str>,
+) -> Result<bool, InteractionError> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(to_store_error)?;
+    for table in SQLITE_REGISTRY_TABLES {
+        let table_name = registry_table_name(table_name_prefix, table);
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table_name],
+                |row| row.get(0),
+            )
+            .map_err(to_store_error)?;
+        if count == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "registry-store-sqlite")]
+fn registry_table_name(table_name_prefix: Option<&str>, table: &str) -> String {
+    match table_name_prefix {
+        Some(prefix) => format!("{prefix}{table}"),
+        None => table.to_owned(),
     }
 }
 

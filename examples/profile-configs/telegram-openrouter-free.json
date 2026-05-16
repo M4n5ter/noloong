@@ -1,8 +1,5 @@
 {
   "defaultProfileId": "telegram-openrouter-free",
-  "registryStore": {
-    "type": "memory"
-  },
   "profiles": [
     {
       "profileId": "telegram-openrouter-free",

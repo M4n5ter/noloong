@@ -6,9 +6,6 @@
   // are intentionally not profile settings. Configure them with CLI flags or
   // environment variables; see crates/noloong-agent-telegram/docs/TELEGRAM.md.
   "defaultProfileId": "telegram-openrouter-free",
-  "registryStore": {
-    "type": "memory",
-  },
   "profiles": [
     {
       "profileId": "telegram-openrouter-free",

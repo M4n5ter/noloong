@@ -1,8 +1,5 @@
 {
   "defaultProfileId": "chatgpt-codex",
-  "registryStore": {
-    "type": "memory"
-  },
   "profiles": [
     {
       "profileId": "chatgpt-codex",

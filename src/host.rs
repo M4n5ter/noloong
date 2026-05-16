@@ -2,7 +2,8 @@ use crate::config::{
     AnthropicProviderReasoningConfig, AnthropicProviderThinkingMode, BuiltInProviderConfig,
     ChatCompletionsReasoningConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig,
     HostProfileConfig, ProfileCompactionConfig, ProfileEventStoreConfig, RegistryStoreConfig,
-    ResponsesProviderReasoningConfig, RuntimeProfileConfig, resolve_chatgpt_token_file,
+    ResponsesProviderReasoningConfig, RuntimeProfileConfig, ensure_sqlite_database_parent,
+    resolve_chatgpt_token_file, resolve_state_database_url,
     validate_responses_reasoning_state_mode,
 };
 use crate::models_dev::ModelsDevRegistry;
@@ -43,6 +44,29 @@ pub async fn build_registry(
     config: &HostProfileConfig,
 ) -> Result<AgentSessionRegistry, HostBuildError> {
     config.validate()?;
+    let state_database_url = if config_uses_default_state_database(config) {
+        let state_database_url = resolve_state_database_url()?;
+        ensure_sqlite_database_parent(&state_database_url)?;
+        Some(state_database_url)
+    } else {
+        None
+    };
+    build_registry_with_optional_state_database_url(config, state_database_url.as_deref()).await
+}
+
+#[cfg(test)]
+async fn build_registry_with_state_database_url(
+    config: &HostProfileConfig,
+    state_database_url: &str,
+) -> Result<AgentSessionRegistry, HostBuildError> {
+    build_registry_with_optional_state_database_url(config, Some(state_database_url)).await
+}
+
+async fn build_registry_with_optional_state_database_url(
+    config: &HostProfileConfig,
+    state_database_url: Option<&str>,
+) -> Result<AgentSessionRegistry, HostBuildError> {
+    config.validate()?;
     let models_dev = if config.profiles.iter().any(profile_needs_models_dev) {
         let models_dev = ModelsDevRegistry::load_default().await;
         models_dev.refresh_cache_in_background();
@@ -50,19 +74,42 @@ pub async fn build_registry(
     } else {
         None
     };
+    let default_event_store = if config
+        .profiles
+        .iter()
+        .any(|profile| profile.event_store.is_none())
+    {
+        Some(build_event_store(None, state_database_url).await?)
+    } else {
+        None
+    };
     let mut profiles = Vec::with_capacity(config.profiles.len());
     for profile_config in &config.profiles {
         profiles.push(Arc::new(
-            RuntimeProfile::try_from_config(profile_config, models_dev.as_ref()).await?,
+            RuntimeProfile::try_from_config(
+                profile_config,
+                models_dev.as_ref(),
+                default_event_store.clone(),
+                state_database_url,
+            )
+            .await?,
         ) as Arc<dyn AgentRuntimeProfile>);
     }
     let default_profile_id = config
         .default_profile_id
         .clone()
         .unwrap_or_else(|| config.profiles[0].profile_id.clone());
-    let store = build_registry_store(&config.registry_store).await?;
+    let store = build_registry_store(config.registry_store.as_ref(), state_database_url).await?;
     AgentSessionRegistry::with_store(default_profile_id, profiles, store)
         .map_err(HostBuildError::Interaction)
+}
+
+fn config_uses_default_state_database(config: &HostProfileConfig) -> bool {
+    config.registry_store.is_none()
+        || config
+            .profiles
+            .iter()
+            .any(|profile| profile.event_store.is_none())
 }
 
 fn profile_needs_models_dev(config: &RuntimeProfileConfig) -> bool {
@@ -82,19 +129,37 @@ fn profile_needs_models_dev(config: &RuntimeProfileConfig) -> bool {
 }
 
 async fn build_registry_store(
-    config: &RegistryStoreConfig,
+    config: Option<&RegistryStoreConfig>,
+    state_database_url: Option<&str>,
 ) -> Result<Arc<dyn AgentSessionRegistryStore>, HostBuildError> {
     match config {
-        RegistryStoreConfig::Memory => Ok(Arc::new(InMemoryAgentSessionRegistryStore::default())),
-        RegistryStoreConfig::Sqlite { database_url }
-        | RegistryStoreConfig::Postgres { database_url } => {
+        None => {
+            let state_database_url = required_state_database_url(state_database_url)?;
+            let store = SqlAgentSessionRegistryStore::connect(
+                SqlAgentSessionRegistryStoreConfig::new(state_database_url),
+            )
+            .await?;
+            Ok(Arc::new(store))
+        }
+        Some(RegistryStoreConfig::Memory) => {
+            Ok(Arc::new(InMemoryAgentSessionRegistryStore::default()))
+        }
+        Some(RegistryStoreConfig::Sqlite { database_url }) => {
+            ensure_sqlite_database_parent(database_url)?;
             let store = SqlAgentSessionRegistryStore::connect(
                 SqlAgentSessionRegistryStoreConfig::new(database_url),
             )
             .await?;
             Ok(Arc::new(store))
         }
-        RegistryStoreConfig::ObjectMemory { prefix } => {
+        Some(RegistryStoreConfig::Postgres { database_url }) => {
+            let store = SqlAgentSessionRegistryStore::connect(
+                SqlAgentSessionRegistryStoreConfig::new(database_url),
+            )
+            .await?;
+            Ok(Arc::new(store))
+        }
+        Some(RegistryStoreConfig::ObjectMemory { prefix }) => {
             Ok(Arc::new(OpenDalAgentSessionRegistryStore::new(
                 Operator::new(Memory::default())
                     .map_err(opendal_error)?
@@ -102,7 +167,7 @@ async fn build_registry_store(
                 OpenDalAgentSessionRegistryStoreConfig::new(prefix),
             )))
         }
-        RegistryStoreConfig::ObjectFs { root, prefix } => {
+        Some(RegistryStoreConfig::ObjectFs { root, prefix }) => {
             let builder = Fs::default().root(root);
             Ok(Arc::new(OpenDalAgentSessionRegistryStore::new(
                 Operator::new(builder).map_err(opendal_error)?.finish(),
@@ -113,14 +178,22 @@ async fn build_registry_store(
 }
 
 async fn build_event_store(
-    config: &ProfileEventStoreConfig,
+    config: Option<&ProfileEventStoreConfig>,
+    state_database_url: Option<&str>,
 ) -> Result<Arc<dyn EventStore>, HostBuildError> {
     match config {
-        ProfileEventStoreConfig::Memory => Ok(Arc::new(InMemoryEventStore::new())),
-        ProfileEventStoreConfig::Sqlite {
+        None => {
+            let state_database_url = required_state_database_url(state_database_url)?;
+            let store =
+                SqliteEventStore::connect(SqliteEventStoreConfig::new(state_database_url)).await?;
+            Ok(Arc::new(store))
+        }
+        Some(ProfileEventStoreConfig::Memory) => Ok(Arc::new(InMemoryEventStore::new())),
+        Some(ProfileEventStoreConfig::Sqlite {
             database_url,
             migrate_on_connect,
-        } => {
+        }) => {
+            ensure_sqlite_database_parent(database_url)?;
             let mut config = SqliteEventStoreConfig::new(database_url);
             if !*migrate_on_connect {
                 config = config.without_migrations();
@@ -129,6 +202,15 @@ async fn build_event_store(
             Ok(Arc::new(store))
         }
     }
+}
+
+fn required_state_database_url(state_database_url: Option<&str>) -> Result<&str, HostBuildError> {
+    state_database_url.ok_or_else(|| {
+        HostBuildError::Config(CliConfigError::ParseConfig(
+            "profile config omitted registryStore or eventStore but no state database URL was resolved"
+                .into(),
+        ))
+    })
 }
 
 #[derive(Clone)]
@@ -143,6 +225,8 @@ impl RuntimeProfile {
     async fn try_from_config(
         config: &RuntimeProfileConfig,
         models_dev: Option<&ModelsDevRegistry>,
+        default_event_store: Option<Arc<dyn EventStore>>,
+        state_database_url: Option<&str>,
     ) -> Result<Self, HostBuildError> {
         let mut validated_manifest = AgentManifest::default();
         let mut default_manifest_patches = config
@@ -166,7 +250,15 @@ impl RuntimeProfile {
             provider.chatgpt_compact.as_ref(),
             models_dev,
         )?;
-        let event_store = build_event_store(&config.event_store).await?;
+        let event_store = match config.event_store.as_ref() {
+            Some(event_store_config) => {
+                build_event_store(Some(event_store_config), state_database_url).await?
+            }
+            None => match default_event_store {
+                Some(event_store) => event_store,
+                None => build_event_store(None, state_database_url).await?,
+            },
+        };
         Ok(Self {
             descriptor: InteractionProfileDescriptor {
                 profile_id: config.profile_id.clone(),
@@ -705,8 +797,10 @@ fn opendal_error(error: opendal::Error) -> HostBuildError {
 mod tests {
     use super::{
         HostBuildError, RuntimeProfile, apply_anthropic_reasoning,
-        apply_chat_completions_reasoning, apply_responses_reasoning, build_registry,
-        chat_completions_reasoning_extra_body, responses_reasoning_config,
+        apply_chat_completions_reasoning, apply_responses_reasoning,
+        build_registry_with_optional_state_database_url, build_registry_with_state_database_url,
+        chat_completions_reasoning_extra_body, config_uses_default_state_database,
+        responses_reasoning_config,
     };
     use crate::config::{
         AnthropicProviderReasoningConfig, AnthropicProviderReasoningEffort,
@@ -717,7 +811,8 @@ mod tests {
     };
     use crate::models_dev::ModelsDevRegistry;
     use noloong_agent::{
-        AgentManifest, AgentSession, ManifestPatch, interaction::AgentRuntimeProfile,
+        AgentManifest, AgentSession, ManifestPatch,
+        interaction::{AgentRuntimeProfile, AgentSessionCreateRequest},
     };
     use noloong_agent_core::{
         AgentEvent, AgentEventKind, AnthropicEffort, AnthropicMessagesProviderConfig,
@@ -741,7 +836,8 @@ mod tests {
         config: &RuntimeProfileConfig,
     ) -> Result<RuntimeProfile, HostBuildError> {
         let models_dev = models_dev_registry();
-        RuntimeProfile::try_from_config(config, Some(&models_dev)).await
+        RuntimeProfile::try_from_config(config, Some(&models_dev), None, Some("sqlite::memory:"))
+            .await
     }
 
     fn models_dev_registry() -> ModelsDevRegistry {
@@ -769,15 +865,58 @@ mod tests {
                 "profiles": [{
                     "profileId": "default",
                     "displayName": "Default",
-                    "provider": {"type": "chat_completions", "model": "gpt-5.4-mini"}
+                    "provider": {"type": "chat_completions", "model": "gpt-5.4-mini"},
+                    "eventStore": {"type": "memory"}
                 }]
             }"#,
         )
         .unwrap();
 
-        let registry = build_registry(&config).await.unwrap();
+        assert!(!config_uses_default_state_database(&config));
+        let registry = build_registry_with_optional_state_database_url(&config, None)
+            .await
+            .unwrap();
 
         assert_eq!(registry.profile_descriptors()[0].profile_id, "default");
+    }
+
+    #[tokio::test]
+    async fn profile_config_omits_registry_store_and_uses_state_database() {
+        let db = TempSqliteDb::new("default-registry-store");
+        let config = serde_json::from_str::<HostProfileConfig>(
+            r#"{
+                "profiles": [{
+                    "profileId": "default",
+                    "displayName": "Default",
+                    "provider": {"type": "chat_completions", "model": "gpt-5.4-mini"}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let database_url = sqlite_database_url(&db.path);
+
+        let first_registry = build_registry_with_state_database_url(&config, &database_url)
+            .await
+            .unwrap();
+        first_registry
+            .create_session(AgentSessionCreateRequest {
+                session_id: Some("root".into()),
+                ..AgentSessionCreateRequest::default()
+            })
+            .await
+            .unwrap();
+        drop(first_registry);
+
+        let second_registry = build_registry_with_state_database_url(&config, &database_url)
+            .await
+            .unwrap();
+        let descriptor = second_registry
+            .get_descriptor("root")
+            .await
+            .unwrap()
+            .expect("session restored from default sqlite registry store");
+
+        assert_eq!(descriptor.session_id, "root");
     }
 
     #[test]
@@ -958,6 +1097,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_omitted_event_store_uses_state_database() {
+        let db = TempSqliteDb::new("default-profile-event-store");
+        let mut config = runtime_profile_config(sqlite_event_store(&db.path, true));
+        config.event_store = None;
+        let database_url = sqlite_database_url(&db.path);
+
+        let profile = RuntimeProfile::try_from_config(
+            &config,
+            Some(&models_dev_registry()),
+            None,
+            Some(&database_url),
+        )
+        .await
+        .unwrap();
+        profile
+            .event_store
+            .append(event("default-event-run", 1, AgentEventKind::RunStarted))
+            .await
+            .unwrap();
+        drop(profile);
+
+        let reloaded_store = SqliteEventStore::connect(SqliteEventStoreConfig::new(database_url))
+            .await
+            .unwrap();
+        let loaded = reloaded_store.load("default-event-run").await.unwrap();
+
+        assert_eq!(loaded.len(), 1);
+    }
+
+    #[tokio::test]
     async fn sqlite_event_store_reloads_events_across_profile_rebuilds() {
         let db = TempSqliteDb::new("profile-event-reload");
         let config = runtime_profile_config(sqlite_event_store(&db.path, true));
@@ -1021,7 +1190,9 @@ mod tests {
         ))
         .unwrap();
 
-        let registry = build_registry(&config).await.unwrap();
+        let registry = build_registry_with_state_database_url(&config, "sqlite::memory:")
+            .await
+            .unwrap();
 
         assert_eq!(
             registry.profile_descriptors()[0].profile_id,
@@ -1036,7 +1207,9 @@ mod tests {
         ))
         .unwrap();
 
-        let registry = build_registry(&config).await.unwrap();
+        let registry = build_registry_with_state_database_url(&config, "sqlite::memory:")
+            .await
+            .unwrap();
 
         assert_eq!(
             registry.profile_descriptors()[0].profile_id,
@@ -1051,7 +1224,9 @@ mod tests {
         ))
         .unwrap();
 
-        let registry = build_registry(&config).await.unwrap();
+        let registry = build_registry_with_state_database_url(&config, "sqlite::memory:")
+            .await
+            .unwrap();
 
         assert_eq!(
             registry.profile_descriptors()[0].profile_id,
@@ -1066,9 +1241,11 @@ mod tests {
         ))
         .unwrap();
         let db = TempSqliteDb::new("plugin-stdio-example");
-        config.profiles[0].event_store = sqlite_event_store(&db.path, true);
+        config.profiles[0].event_store = Some(sqlite_event_store(&db.path, true));
 
-        let registry = build_registry(&config).await.unwrap();
+        let registry = build_registry_with_state_database_url(&config, "sqlite::memory:")
+            .await
+            .unwrap();
 
         assert_eq!(
             registry.profile_descriptors()[0].profile_id,
@@ -1243,7 +1420,7 @@ mod tests {
             display_name: "Default".into(),
             description: None,
             provider: responses_provider(),
-            event_store,
+            event_store: Some(event_store),
             compaction: Default::default(),
             plugins: Vec::new(),
             manifest_patches: Vec::new(),

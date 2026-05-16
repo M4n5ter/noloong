@@ -133,7 +133,7 @@ SQLite backend 采用 SQL-first 设计，v1 不引入 OpenDAL 作为 primary eve
 - `kind_type`
 - `created_at_ms`
 
-`SqliteEventStore` 使用 Toasty 0.5 和 `toasty-driver-sqlite` 管理模型 schema。`(run_id, sequence)` 是 Toasty composite primary key，因此重复 append 同一个 run 的同一 sequence 会失败，而不是 upsert 或覆盖已有事件。`load(run_id)` 始终按 `sequence ASC` 返回完整事件，再由 `reduce_events(events)` 恢复 `AgentState`。
+`SqliteEventStore` 使用 Toasty 0.6 和 `toasty-driver-sqlite` 管理模型 schema。`(run_id, sequence)` 是 Toasty composite primary key，因此重复 append 同一个 run 的同一 sequence 会失败，而不是 upsert 或覆盖已有事件。`load(run_id)` 始终按 `sequence ASC` 返回完整事件，再由 `reduce_events(events)` 恢复 `AgentState`。
 
 `SqliteEventStoreConfig` 包含：
 

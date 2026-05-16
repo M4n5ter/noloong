@@ -35,7 +35,9 @@ pub const DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV: &str =
     "TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE";
 pub const DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV: &str = "TELEGRAM_STARTUP_UPDATE_POLICY";
 pub const DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV: &str = "TELEGRAM_OFFSET_CHECKPOINT";
+pub const DEFAULT_STATE_DATABASE_URL_ENV: &str = "NOLOONG_STATE_DATABASE_URL";
 pub const DEFAULT_CHATGPT_TOKEN_FILE_ENV: &str = "NOLOONG_CHATGPT_TOKEN_FILE";
+const DEFAULT_STATE_DATABASE_FILE_RELATIVE: &[&str] = &[".agents", "noloong", "state.sqlite"];
 const DEFAULT_CHATGPT_TOKEN_FILE_RELATIVE: &[&str] =
     &[".agents", "noloong", "chatgpt", "token.json"];
 
@@ -45,8 +47,8 @@ pub struct HostProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile_id: Option<String>,
     pub profiles: Vec<RuntimeProfileConfig>,
-    #[serde(default)]
-    pub registry_store: RegistryStoreConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_store: Option<RegistryStoreConfig>,
 }
 
 impl HostProfileConfig {
@@ -117,8 +119,8 @@ pub struct RuntimeProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub provider: BuiltInProviderConfig,
-    #[serde(default)]
-    pub event_store: ProfileEventStoreConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_store: Option<ProfileEventStoreConfig>,
     #[serde(default)]
     pub compaction: ProfileCompactionConfig,
     #[serde(default)]
@@ -532,6 +534,71 @@ pub fn resolve_chatgpt_token_file(
     resolve_chatgpt_token_file_with_env(token_file, token_file_env, process_env)
 }
 
+pub fn resolve_state_database_url() -> Result<String, CliConfigError> {
+    resolve_state_database_url_with_env(process_env)
+}
+
+pub fn resolve_state_database_url_with_env(
+    env_source: impl Fn(&str) -> Option<String>,
+) -> Result<String, CliConfigError> {
+    if let Some(database_url) =
+        env_source(DEFAULT_STATE_DATABASE_URL_ENV).filter(|value| !value.trim().is_empty())
+    {
+        return Ok(database_url);
+    }
+    let mut path = home_dir(&env_source)?;
+    for component in DEFAULT_STATE_DATABASE_FILE_RELATIVE {
+        path.push(component);
+    }
+    Ok(format!("sqlite:{}", path.display()))
+}
+
+pub fn ensure_sqlite_database_parent(database_url: &str) -> Result<(), CliConfigError> {
+    let Some(path) = sqlite_database_path(database_url)? else {
+        return Ok(());
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            CliConfigError::ReadConfig(format!("{}: {error}", parent.display()))
+        })?;
+    }
+    Ok(())
+}
+
+pub fn sqlite_database_path(database_url: &str) -> Result<Option<PathBuf>, CliConfigError> {
+    match database_url {
+        "" => Err(CliConfigError::ParseConfig(
+            "sqlite database url is empty".into(),
+        )),
+        "sqlite::memory:" | "sqlite://memory" | ":memory:" => Ok(None),
+        url if url.starts_with("sqlite://") => {
+            sqlite_path_from_suffix(url.strip_prefix("sqlite://").unwrap_or_default())
+        }
+        url if url.starts_with("sqlite:") => {
+            sqlite_path_from_suffix(url.strip_prefix("sqlite:").unwrap_or_default())
+        }
+        url if url.contains("://") => Err(CliConfigError::ParseConfig(format!(
+            "state database URL must be sqlite, got: {url}"
+        ))),
+        path => Ok(Some(PathBuf::from(path))),
+    }
+}
+
+fn sqlite_path_from_suffix(path: &str) -> Result<Option<PathBuf>, CliConfigError> {
+    if path.is_empty() {
+        return Err(CliConfigError::ParseConfig(
+            "sqlite database path is empty".into(),
+        ));
+    }
+    if path == ":memory:" || path == "memory" {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(path)))
+}
+
 pub fn resolve_chatgpt_token_file_with_env(
     token_file: Option<&str>,
     token_file_env: Option<&str>,
@@ -634,7 +701,8 @@ mod tests {
         ChatCompletionsReasoningEffort, ChatGptAuthConfig, HostProfileConfig,
         ProfileCompactionConfig, ProfileEventStoreConfig, ResponsesProviderReasoningEffort,
         ResponsesProviderReasoningSummary, ResponsesStateMode, RuntimeProfileConfig,
-        resolve_chatgpt_token_file_with_env,
+        ensure_sqlite_database_parent, resolve_chatgpt_token_file_with_env,
+        resolve_state_database_url_with_env, sqlite_database_path,
     };
     use crate::test_support::{remove_temp_file, write_temp_file};
     use noloong_agent_core::ContextCompactionMode;
@@ -662,10 +730,7 @@ mod tests {
             config.profiles[0].provider,
             BuiltInProviderConfig::ChatCompletions { .. }
         ));
-        assert_eq!(
-            config.profiles[0].event_store,
-            ProfileEventStoreConfig::Memory
-        );
+        assert_eq!(config.profiles[0].event_store, None);
     }
 
     #[test]
@@ -936,10 +1001,10 @@ mod tests {
 
         assert_eq!(
             config.event_store,
-            ProfileEventStoreConfig::Sqlite {
+            Some(ProfileEventStoreConfig::Sqlite {
                 database_url: "sqlite:target/noloong-events.sqlite".into(),
                 migrate_on_connect: true,
-            }
+            })
         );
     }
 
@@ -961,10 +1026,10 @@ mod tests {
 
         assert_eq!(
             config.event_store,
-            ProfileEventStoreConfig::Sqlite {
+            Some(ProfileEventStoreConfig::Sqlite {
                 database_url: "sqlite:target/noloong-events.sqlite".into(),
                 migrate_on_connect: false,
-            }
+            })
         );
     }
 
@@ -999,6 +1064,67 @@ mod tests {
         .unwrap();
 
         assert!(config.validate().is_ok());
+        assert!(matches!(
+            config.registry_store,
+            Some(super::RegistryStoreConfig::Sqlite { .. })
+        ));
+    }
+
+    #[test]
+    fn state_database_url_uses_default_home_path() {
+        let url = resolve_state_database_url_with_env(|name| match name {
+            "HOME" => Some("/home/alice".into()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(url, "sqlite:/home/alice/.agents/noloong/state.sqlite");
+    }
+
+    #[test]
+    fn state_database_url_prefers_env() {
+        let url = resolve_state_database_url_with_env(|name| match name {
+            "HOME" => Some("/home/alice".into()),
+            "NOLOONG_STATE_DATABASE_URL" => Some("sqlite:/tmp/noloong.sqlite".into()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(url, "sqlite:/tmp/noloong.sqlite");
+    }
+
+    #[test]
+    fn state_database_url_ignores_empty_env() {
+        let url = resolve_state_database_url_with_env(|name| match name {
+            "HOME" => Some("/home/alice".into()),
+            "NOLOONG_STATE_DATABASE_URL" => Some("   ".into()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(url, "sqlite:/home/alice/.agents/noloong/state.sqlite");
+    }
+
+    #[test]
+    fn sqlite_database_path_parses_supported_urls() {
+        assert_eq!(
+            sqlite_database_path("sqlite:/tmp/noloong.sqlite").unwrap(),
+            Some(PathBuf::from("/tmp/noloong.sqlite"))
+        );
+        assert_eq!(sqlite_database_path("sqlite::memory:").unwrap(), None);
+        assert!(sqlite_database_path("postgres://localhost/db").is_err());
+    }
+
+    #[test]
+    fn sqlite_database_parent_is_created() {
+        let dir = crate::test_support::temp_dir("state-database-parent");
+        let db = dir.join("nested").join("state.sqlite");
+        let url = format!("sqlite:{}", db.display());
+
+        ensure_sqlite_database_parent(&url).unwrap();
+
+        assert!(db.parent().unwrap().is_dir());
+        crate::test_support::remove_temp_dir(dir);
     }
 
     #[test]

@@ -394,6 +394,7 @@
         "agent.subagent.wait",
         "agent.subagent.result",
         "agent.subagent.list",
+        "agent.goal.update",
         "agent.manifest.propose_patch"
       ],
       "type": "string"
@@ -1297,7 +1298,14 @@
           "type": "string"
         },
         "eventStore": {
-          "$ref": "#/$defs/ProfileEventStoreConfig"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileEventStoreConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "manifestPatches": {
           "default": [],
@@ -1414,7 +1422,14 @@
       "type": "array"
     },
     "registryStore": {
-      "$ref": "#/$defs/RegistryStoreConfig"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RegistryStoreConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [

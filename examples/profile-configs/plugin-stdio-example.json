@@ -1,8 +1,5 @@
 {
   "defaultProfileId": "plugin-stdio-example",
-  "registryStore": {
-    "type": "memory"
-  },
   "profiles": [
     {
       "profileId": "plugin-stdio-example",
@@ -13,10 +10,6 @@
         "model": "openrouter/free",
         "baseUrl": "https://openrouter.ai/api/v1",
         "apiKeyEnv": "OPENROUTER_API_KEY"
-      },
-      "eventStore": {
-        "type": "sqlite",
-        "databaseUrl": "sqlite:target/noloong-plugin-stdio-events.sqlite"
       },
       "plugins": [
         {

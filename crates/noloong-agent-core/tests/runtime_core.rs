@@ -63,6 +63,22 @@ async fn run_with_events_emits_realtime_events_in_order() -> Result<()> {
 }
 
 #[tokio::test]
+async fn runtime_run_id_prefix_namespaces_event_log() -> Result<()> {
+    let event_store = Arc::new(InMemoryEventStore::new());
+    let runtime = native_runtime()
+        .with_event_store(event_store.clone())
+        .with_run_id_prefix("session:root/1")
+        .build()?;
+
+    let report = runtime.run("hello").await?;
+
+    assert_eq!(report.state.run_id.as_deref(), Some("run-session-root-1-1"));
+    assert!(!event_store.load("run-session-root-1-1").await?.is_empty());
+    assert!(event_store.load("run-1").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn event_sink_failure_records_run_failed() -> Result<()> {
     let event_store = Arc::new(InMemoryEventStore::new());
     let runtime = native_runtime()
