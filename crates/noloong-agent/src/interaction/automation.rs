@@ -257,7 +257,7 @@ pub fn existing_session_automation_message(
         0,
         ContentBlock::Text {
             text: format!(
-                "Automation `{}` fired from a `{}` trigger. Treat the following content as an automation-delivered user message for this existing session.",
+                "Automation `{}` fired from a `{}` trigger. Treat the following content as an automation-delivered user message for this existing session. Do the requested work if it is safe under current policy, and mention that the input came from automation when that affects interpretation.",
                 automation.automation_id,
                 automation.trigger.trigger_type()
             ),
@@ -275,7 +275,7 @@ pub fn automation_session_metadata(automation_id: &str) -> Value {
 
 pub fn automation_identity_prompt(automation_id: &str) -> String {
     format!(
-        "This session is dedicated to automation `{automation_id}`. Inputs may be delivered by triggers without direct user presence. Treat trigger-delivered messages as scheduled automation work, state what changed, and avoid asking for confirmation unless a tool or policy requires it."
+        "This session is dedicated to automation `{automation_id}`. Inputs may be delivered by triggers without direct user presence. Treat trigger-delivered messages as automation work, execute them under the current tool and approval policy, state what changed or what blocked execution, and avoid asking for confirmation unless a tool, policy, missing credential, destructive action, or ambiguous target requires it."
     )
 }
 

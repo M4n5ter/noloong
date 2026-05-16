@@ -54,17 +54,17 @@ v1 默认在宿主机执行。SSH、VMM、`clone`、Lima、QEMU 等不是统一 
 
 Built-in prompt 支持 `profile`：
 
-- `auto`：默认值。运行时根据当前默认模型选择 prompt profile；模型名包含 `gpt-5.5` 时选择 `gpt_5_5`，否则选择 `general`。
+- `auto`：默认值。运行时根据当前默认模型和 provider 选择 prompt profile；`chatgpt_responses`、`openai` provider 和 `gpt-*` 模型选择 `openai`，否则选择 `general`。
 - `general`：通用 Agent prompt。
-- `gpt_5_5`：面向 GPT-5.5 系列模型的 prompt profile。
+- `openai`：面向 OpenAI 模型 provider 和 `gpt-*` 模型的 prompt profile。
 
 自定义提示词使用 `{"source":"custom","prompt":"..."}`。切换 locale 或模型不会改变 custom prompt；只有 built-in prompt 会按 locale/profile 重新选择文本。
 
-Built-in 和 custom prompt 都支持 `additions`。每个 addition 包含稳定 `id`、`text` 和 `enabled`，用于让 interaction channel、插件或 runtime profile 在基础系统提示词之上追加窄范围指令，而不是替换整段系统提示词。启用的 additions 会在最终 prompt 末尾以 `System Prompt Additions` 分节渲染；禁用的 additions 仍保留在 manifest 中，便于 UI 查询、重新启用和审计。
+Built-in 和 custom prompt 都支持 `additions`。每个 addition 包含稳定 `id`、`text` 和 `enabled`，用于让 interaction channel、插件或 runtime profile 在基础系统提示词之上追加窄范围指令，而不是替换整段系统提示词。启用的 additions 会在最终 prompt 末尾以 `<system_prompt_additions>` 标记块渲染；禁用的 additions 仍保留在 manifest 中，便于 UI 查询、重新启用和审计。
 
-system prompt 通过 `noloong.builtin.system-prompt` before-model-request hook 注入为 `MessageRole::System`，并带有 `noloong.kind = "system_prompt"`、`noloong.source`、`noloong.configuredProfile`、`noloong.resolvedProfile` 和 `noloong.enabledAdditionIds` metadata。该消息只进入本次 provider request，不写入 core transcript，也不会污染 compaction、event store 或 registry snapshot 中的对话历史。hook 在每次请求前读取当前 manifest，因此替换提示词、切回内置提示词、修改 profile 或 additions 会影响下一次模型请求。
+system prompt 通过 `noloong.builtin.system-prompt` before-model-request hook 注入为 `MessageRole::System`，并带有 `noloong.kind = "system_prompt"`、`noloong.source`、`noloong.configuredProfile`、`noloong.resolvedProfile` 和 `noloong.enabledAdditionIds` metadata。该消息只进入本次 provider request，不写入 core transcript，也不会污染 compaction、event store 或 registry snapshot 中的对话历史。hook 在每次请求前读取当前 manifest，并追加 `<runtime_context>`，把 host environment、provider/model、approval policy、file edit policy 和 subagent depth 等运行时事实实际送入模型请求。因此替换提示词、切回内置提示词、修改 profile 或 additions 会影响下一次模型请求。
 
-外部交互层可以通过 `manifest/system_prompt/get` 查询当前 session 的解析结果，包括 base text、additions、enabled addition ids、effective text、configured profile、resolved profile 和模型上下文。这个 API 是只读的，供 UI、插件管理器和 bridge 展示“当前实际发给模型的系统提示词”，避免只能从 manifest 结构自行推断。
+外部交互层可以通过 `manifest/system_prompt/get` 查询当前 session 的解析结果，包括 base text、additions、enabled addition ids、effective text、configured profile、resolved profile 和模型上下文。这个 API 是只读的，供 UI、插件管理器和 bridge 展示 request-time runtime context 注入前的 resolved base/effective prompt，避免只能从 manifest 结构自行推断。
 
 ## Background Command Lifecycle
 

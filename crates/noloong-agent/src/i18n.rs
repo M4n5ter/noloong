@@ -179,7 +179,7 @@ impl Catalog {
                  Dropped before seq: {}\n\
                  Output preview truncated: {}\n\n\
                  Output preview:\n{}\n\n\
-                 Use `host.exec.read` with `jobId` `{job_id}` and `afterSeq` to inspect more output.",
+                 Use this completion as observed evidence. If the completed command result is needed to satisfy the current user request and the preview is insufficient, call `host.exec.read` with `jobId` `{job_id}` and `afterSeq` before finalizing.",
                 self.render_job_status(&completion.snapshot.status),
                 completion.snapshot.command,
                 completion.snapshot.shell,
@@ -208,7 +208,7 @@ impl Catalog {
                  已丢弃 seq 之前输出：{}\n\
                  输出预览是否已截断：{}\n\n\
                  输出预览：\n{}\n\n\
-                 如需查看更多输出，请调用 `host.exec.read`，使用 `jobId` `{job_id}` 和 `afterSeq` cursor。",
+                 将该完成通知视为已观察证据。如果当前用户请求需要这个命令结果且预览不足，请在 final 前调用 `host.exec.read`，使用 `jobId` `{job_id}` 和 `afterSeq` cursor。",
                 self.render_job_status(&completion.snapshot.status),
                 completion.snapshot.command,
                 completion.snapshot.shell,
@@ -543,7 +543,7 @@ fn en_message(key: MessageKey) -> &'static str {
     match key {
         MessageKey::HostEnvironmentContext => "Current host execution environment:",
         MessageKey::HostExecStartDescription => {
-            "Start a host shell command as a background job. Set foregroundWaitMs to return quick results inline; otherwise use the returned jobId with host.exec.read, host.exec.wait, host.exec.write, or host.exec.terminate."
+            "Start a host shell command as a background job. Set foregroundWaitMs for quick inline results. If the command result matters to the user request, use the returned jobId with host.exec.read or host.exec.wait before finalizing; a jobId alone is not completion. Long-running services may remain running when you report jobId, status, observed output, and the next inspection path."
         }
         MessageKey::HostExecReadDescription => {
             "Read buffered stdout/stderr from a background host command without consuming it. Use jobId with afterSeq as the cursor and maxBytes to bound the returned output."
@@ -561,7 +561,7 @@ fn en_message(key: MessageKey) -> &'static str {
             "List background host command jobs for the current session with their latest status."
         }
         MessageKey::SubagentSpawnDescription => {
-            "Spawn a direct child subagent for a bounded task and start it with the provided prompt. Always use agent.subagent.wait or agent.subagent.result to collect real status and final output; never invent sessionId, status, or finalText in prose."
+            "Spawn a direct child subagent for a bounded, independent task and start it with the provided prompt. Use agent.subagent.wait or agent.subagent.result to collect real status and final output before relying on its work; never invent sessionId, status, or finalText in prose. Only leave it running when the user explicitly asked for background delegation, and then report the real sessionId and status."
         }
         MessageKey::SubagentWaitDescription => {
             "Wait for one or more direct child subagents to settle and return each real status plus final assistant output when available. Timeout does not abort subagents; do not simulate wait results."
@@ -573,7 +573,7 @@ fn en_message(key: MessageKey) -> &'static str {
             "List direct child subagents for the current session with lightweight status information."
         }
         MessageKey::GoalUpdateDescription => {
-            "Update the current session goal during a goal audit. Use this tool only for real goal status changes, and provide concise summary and evidence when marking achieved, unmet, or budget_limited."
+            "Update the current session goal during a goal audit. Use this tool for real goal status changes; prose alone does not complete a goal audit. Provide concise summary and evidence when marking achieved, unmet, or budget_limited, and keep pursuing when evidence is insufficient."
         }
         MessageKey::FileWriteDescription => {
             "Edit a text file on the host filesystem. Provide content for a complete file write, or provide oldString and newString for an exact replacement; replaceAll controls whether every match is replaced."
@@ -592,7 +592,7 @@ fn en_message(key: MessageKey) -> &'static str {
 *** End Patch"
         }
         MessageKey::ManifestPatchDescription => {
-            "Propose a manifest patch that may change future agent session behavior. The proposal is recorded for a future turn and does not apply until approved."
+            "Propose a manifest patch that may change future agent session behavior. The proposal is recorded for a future turn and does not apply until approved, so do not claim the behavior changed until approval/application has actually happened."
         }
         MessageKey::HostCommandPermissionDescription => {
             "Start and control host processes, including reading output, writing stdin, waiting, listing, or terminating jobs."
@@ -617,7 +617,7 @@ fn zh_message(key: MessageKey) -> &'static str {
     match key {
         MessageKey::HostEnvironmentContext => "当前宿主机执行环境：",
         MessageKey::HostExecStartDescription => {
-            "将宿主机 shell 命令作为后台 job 启动。设置 foregroundWaitMs 可让快速结果直接内联返回；否则请使用返回的 jobId 继续调用 host.exec.read、host.exec.wait、host.exec.write 或 host.exec.terminate。"
+            "将宿主机 shell 命令作为后台 job 启动。设置 foregroundWaitMs 可让快速结果内联返回。如果命令结果会影响用户请求，final 前必须用返回的 jobId 调用 host.exec.read 或 host.exec.wait 观察；只有 jobId 不代表完成。长期服务可以保持运行，但需要报告 jobId、状态、已观察输出和下一步查看方式。"
         }
         MessageKey::HostExecReadDescription => {
             "非破坏性读取后台宿主机命令的 stdout/stderr 缓冲输出。使用 jobId 和 afterSeq 作为 cursor，并用 maxBytes 限制返回输出大小。"
@@ -635,7 +635,7 @@ fn zh_message(key: MessageKey) -> &'static str {
             "列出当前 session 中的后台宿主机命令 job 及其最新状态。"
         }
         MessageKey::SubagentSpawnDescription => {
-            "为有边界的任务创建直接子 agent，并用给定 prompt 启动它。必须使用 agent.subagent.wait 或 agent.subagent.result 收集真实状态和最终 assistant 输出；不要在文字里编造 sessionId、status 或 finalText。"
+            "为有边界、可独立推进的任务创建直接子 agent，并用给定 prompt 启动它。依赖其工作前必须使用 agent.subagent.wait 或 agent.subagent.result 收集真实状态和最终 assistant 输出；不要在文字里编造 sessionId、status 或 finalText。只有用户明确要求后台委派时，才可以留下运行中的子 agent，并报告真实 sessionId 和状态。"
         }
         MessageKey::SubagentWaitDescription => {
             "等待一个或多个直接子 agent 进入终态，并返回每个子 agent 的真实状态以及可用的最终 assistant 输出。超时不会中止子 agent；不要模拟等待结果。"
@@ -645,7 +645,7 @@ fn zh_message(key: MessageKey) -> &'static str {
         }
         MessageKey::SubagentListDescription => "列出当前 session 的直接子 agent 及轻量状态信息。",
         MessageKey::GoalUpdateDescription => {
-            "在 goal 审计中更新当前 session 的目标状态。只在目标状态确实发生变化时使用，并在标记 achieved、unmet 或 budget_limited 时给出简明 summary 和 evidence。"
+            "在 goal 审计中更新当前 session 的目标状态。只在目标状态确实发生变化时使用；单靠文字不能完成 goal 审计。标记 achieved、unmet 或 budget_limited 时给出简明 summary 和 evidence，证据不足时保持 pursuing。"
         }
         MessageKey::FileWriteDescription => {
             "编辑宿主机文件系统中的文本文件。提供 content 表示完整写入文件；或提供 oldString 和 newString 表示精确替换，replaceAll 控制是否替换所有匹配项。"
@@ -664,7 +664,7 @@ fn zh_message(key: MessageKey) -> &'static str {
 *** End Patch"
         }
         MessageKey::ManifestPatchDescription => {
-            "提交可能改变未来 agent session 行为的 manifest patch 提案。该提案会记录到后续轮次，审批通过前不会生效。"
+            "提交可能改变未来 agent session 行为的 manifest patch 提案。该提案会记录到后续轮次，审批并应用前不会生效，因此不要在实际应用前声称行为已经改变。"
         }
         MessageKey::HostCommandPermissionDescription => {
             "启动和控制宿主机进程，包括读取输出、写入 stdin、等待、列出或终止 job。"

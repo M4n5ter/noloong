@@ -23,7 +23,7 @@ use noloong_agent_core::{
     PhaseNode, Result, StdioExtensionConfig, TokenEstimator, ToolApprovalRequest, ToolCallHook,
     ToolExecutionMode, ToolPermissionDecision, ToolProvider,
 };
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
     env,
@@ -348,9 +348,11 @@ impl PhaseHook for BuiltInSystemPromptHook {
                     .tools
                     .retain(|tool| tool.name != BuiltInToolName::GoalUpdate.as_str());
             }
+            let prompt_text =
+                render_model_system_prompt(&self.inner, &prompt, &context.request.context);
             request.messages.insert(
                 0,
-                system_prompt_message(&prompt, context.run_id, context.turn_id),
+                system_prompt_message(&prompt, prompt_text, context.run_id, context.turn_id),
             );
             Ok(Some(BeforeModelRequestHookResult { request }))
         })
@@ -384,6 +386,7 @@ fn resolved_system_prompt_from_inner(inner: &AgentSessionInner) -> ResolvedSyste
 
 fn system_prompt_message(
     prompt: &ResolvedSystemPrompt,
+    text: String,
     run_id: &str,
     turn_id: u64,
 ) -> AgentMessage {
@@ -409,10 +412,84 @@ fn system_prompt_message(
     AgentMessage {
         id: format!("noloong-system-prompt-{run_id}-{turn_id}"),
         role: MessageRole::System,
-        content: vec![ContentBlock::Text {
-            text: prompt.effective_text.clone(),
-        }],
+        content: vec![ContentBlock::Text { text }],
         metadata,
+    }
+}
+
+fn render_model_system_prompt(
+    inner: &AgentSessionInner,
+    prompt: &ResolvedSystemPrompt,
+    context: &Map<String, Value>,
+) -> String {
+    let runtime_context = render_runtime_context(inner, context);
+    format!(
+        "{}\n\n{}",
+        prompt.effective_text.trim_end(),
+        runtime_context
+    )
+}
+
+fn render_runtime_context(inner: &AgentSessionInner, context: &Map<String, Value>) -> String {
+    let mut blocks = Vec::new();
+    blocks.push(render_runtime_policy(inner));
+
+    let mut context_texts = context
+        .iter()
+        .filter_map(|(key, value)| {
+            value
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| (key.as_str(), text))
+        })
+        .collect::<Vec<_>>();
+    context_texts.sort_by_key(|(key, _)| *key);
+    blocks.extend(context_texts.into_iter().map(|(key, text)| {
+        format!(
+            "<context key=\"{}\">\n{}\n</context>",
+            crate::system_prompt::escape_xml_attribute(key),
+            text
+        )
+    }));
+
+    format!(
+        "<runtime_context>\n{}\n</runtime_context>",
+        blocks.join("\n")
+    )
+}
+
+fn render_runtime_policy(inner: &AgentSessionInner) -> String {
+    let manifest = inner
+        .manifest
+        .lock()
+        .expect("agent session manifest lock poisoned");
+    let model = inner
+        .system_prompt_model_context
+        .lock()
+        .expect("agent session model context lock poisoned")
+        .clone();
+    let (provider_id, model_name) = model
+        .map(|model| (model.provider_id, model.model_name))
+        .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
+    format!(
+        "<runtime_policy>\nProvider: {provider_id}\nModel: {model_name}\nLocale: {}\nApproval policy: {}\nFile edit policy: {}\nSubagent depth: {}/{}\n</runtime_policy>",
+        manifest.locale.code(),
+        approval_policy_label(&manifest.approval_policy),
+        manifest.file_edit_tool_policy.as_str(),
+        inner.subagent_depth,
+        inner.max_subagent_depth,
+    )
+}
+
+fn approval_policy_label(policy: &crate::ApprovalPolicy) -> String {
+    match policy {
+        crate::ApprovalPolicy::AllowAll => "allow_all".into(),
+        crate::ApprovalPolicy::RequireApproval => "require_approval".into(),
+        crate::ApprovalPolicy::AutoReview { fallback_to_human } => {
+            format!("auto_review(fallback_to_human={fallback_to_human})")
+        }
     }
 }
 

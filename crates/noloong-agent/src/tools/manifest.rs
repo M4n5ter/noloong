@@ -88,7 +88,7 @@ fn manifest_patch_input_schema() -> Value {
                             "required": ["op", "profile"],
                             "properties": {
                                 "op": {"const": "set_built_in_system_prompt_profile"},
-                                "profile": {"enum": ["auto", "general", "gpt_5_5"]}
+                                "profile": {"enum": ["auto", "general", "openai"]}
                             }
                         },
                         {

@@ -989,7 +989,7 @@ fn telegram_system_prompt_patch() -> ManifestPatch {
     ManifestPatch::UpsertSystemPromptAddition {
         addition: SystemPromptAddition::new(
             TELEGRAM_SYSTEM_PROMPT_ADDITION_ID,
-            "Current interaction channel: Telegram. User messages arrive from Telegram chats, and assistant replies are delivered back to Telegram automatically by the bridge. Keep responses suitable for Telegram: concise, split-safe, Markdown-friendly, and useful without requiring the user to see raw JSON-RPC events or host logs.",
+            "Current interaction channel: Telegram. User messages arrive from Telegram chats, and assistant replies are delivered back to Telegram automatically by the bridge. Keep responses concise, split-safe, Markdown-friendly, and useful on Telegram. Do not expose raw JSON-RPC events, provider payloads, or host logs unless the user asks for them or they are necessary to diagnose the issue.",
         ),
     }
 }

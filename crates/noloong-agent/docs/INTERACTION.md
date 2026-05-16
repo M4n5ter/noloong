@@ -280,10 +280,10 @@ Resume timed-out approvals:
 {"source":"built_in"}
 ```
 
-Built-in prompts may pin a profile. `auto` is the default, `general` is model-neutral, and `gpt_5_5` is tuned for GPT-5.5 family models:
+Built-in prompts may pin a profile. `auto` is the default, `general` is model-neutral, and `openai` is tuned for OpenAI model providers and `gpt-*` models:
 
 ```json
-{"source":"built_in","profile":"gpt_5_5"}
+{"source":"built_in","profile":"openai"}
 ```
 
 Custom text uses:
@@ -312,7 +312,7 @@ Supported system-prompt patches are:
 ```json
 {"op":"replace_system_prompt","prompt":"Use this session-specific system prompt."}
 {"op":"use_built_in_system_prompt"}
-{"op":"set_built_in_system_prompt_profile","profile":"gpt_5_5"}
+{"op":"set_built_in_system_prompt_profile","profile":"openai"}
 {"op":"upsert_system_prompt_addition","addition":{"id":"interaction.telegram","text":"Current interaction channel: Telegram."}}
 {"op":"set_system_prompt_addition_enabled","id":"interaction.telegram","enabled":false}
 {"op":"reorder_system_prompt_additions","ids":["interaction.telegram","workspace.policy"]}
@@ -320,7 +320,7 @@ Supported system-prompt patches are:
 {"op":"clear_system_prompt_additions"}
 ```
 
-`manifest/system_prompt/get` returns the resolved prompt that will be injected on the next model request. The response includes `baseText`, `effectiveText`, `additions`, `enabledAdditionIds`, `configuredProfile`, `resolvedProfile`, `locale`, and optional model context.
+`manifest/system_prompt/get` returns the resolved base prompt before request-time runtime context injection. The response includes `baseText`, `effectiveText`, `additions`, `enabledAdditionIds`, `configuredProfile`, `resolvedProfile`, `locale`, and optional model context.
 
 The built-in prompt is injected by the Rust host before each model request. It is not persisted as a transcript message. Changing locale or model profile affects only `built_in` prompts; a `custom` prompt stays literal until replaced or reset to built-in. Additions are preserved when switching between built-in and custom base prompts unless explicitly removed or cleared.
 

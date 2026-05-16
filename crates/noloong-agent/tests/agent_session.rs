@@ -365,10 +365,10 @@ async fn agent_session_injects_locale_selected_built_in_system_prompt() {
     assert_eq!(system_prompt.role, MessageRole::System);
     assert_eq!(system_prompt.metadata["noloong.kind"], "system_prompt");
     assert_eq!(system_prompt.metadata["noloong.source"], "built_in");
-    assert_eq!(
-        message_text(system_prompt),
-        built_in_system_prompt(Locale::Zh)
-    );
+    let system_prompt_text = message_text(system_prompt);
+    assert!(system_prompt_text.starts_with(built_in_system_prompt(Locale::Zh)));
+    assert!(system_prompt_text.contains("<runtime_context>"));
+    assert!(system_prompt_text.contains("当前宿主机执行环境："));
 
     let state = agent.state().await;
     assert!(
@@ -412,13 +412,15 @@ async fn agent_session_system_prompt_hook_reads_current_manifest() {
     let system_prompt = messages.first().expect("system prompt is first");
     assert_eq!(system_prompt.role, MessageRole::System);
     assert_eq!(system_prompt.metadata["noloong.source"], "custom");
-    assert_eq!(message_text(system_prompt), "Custom runtime prompt.");
+    let system_prompt_text = message_text(system_prompt);
+    assert!(system_prompt_text.starts_with("Custom runtime prompt."));
+    assert!(system_prompt_text.contains("<runtime_context>"));
 }
 
 #[tokio::test]
 async fn agent_session_auto_system_prompt_profile_uses_model_context() {
     let session = AgentSession::builder().build();
-    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.5"));
+    let model = Arc::new(CapturingModelProvider::with_model_name("gpt-5.4-mini"));
     let agent = Agent::builder()
         .with_runtime(Arc::new(
             session
@@ -436,11 +438,42 @@ async fn agent_session_auto_system_prompt_profile_uses_model_context() {
     let messages = &requests.first().expect("first request exists").messages;
     let system_prompt = messages.first().expect("system prompt is first");
     assert_eq!(system_prompt.metadata["noloong.configuredProfile"], "auto");
-    assert_eq!(system_prompt.metadata["noloong.resolvedProfile"], "gpt_5_5");
-    assert_eq!(
-        message_text(system_prompt),
-        built_in_system_prompt_for_profile(Locale::En, BuiltInSystemPromptProfile::Gpt55)
+    assert_eq!(system_prompt.metadata["noloong.resolvedProfile"], "openai");
+    let system_prompt_text = message_text(system_prompt);
+    assert!(
+        system_prompt_text.starts_with(built_in_system_prompt_for_profile(
+            Locale::En,
+            BuiltInSystemPromptProfile::OpenAi,
+        ))
     );
+    assert!(system_prompt_text.contains("Model: gpt-5.4-mini"));
+}
+
+#[tokio::test]
+async fn agent_session_auto_system_prompt_profile_uses_openai_provider() {
+    let session = AgentSession::builder().build();
+    let model = Arc::new(CapturingModelProvider::with_provider_and_model(
+        "chatgpt-responses",
+        "custom-router-name",
+    ));
+    let agent = Agent::builder()
+        .with_runtime(Arc::new(
+            session
+                .runtime_builder()
+                .with_model_provider(model.clone())
+                .build()
+                .unwrap(),
+        ))
+        .build()
+        .unwrap();
+
+    agent.prompt("capture provider prompt").await.unwrap();
+
+    let requests = model.requests();
+    let messages = &requests.first().expect("first request exists").messages;
+    let system_prompt = messages.first().expect("system prompt is first");
+    assert_eq!(system_prompt.metadata["noloong.resolvedProfile"], "openai");
+    assert!(message_text(system_prompt).contains("Provider: chatgpt-responses"));
 }
 
 #[tokio::test]
@@ -836,6 +869,7 @@ impl ModelProvider for HostExecCommandModel {
 
 struct CapturingModelProvider {
     requests: Mutex<Vec<ModelRequest>>,
+    provider_id: String,
     model_name: Option<String>,
 }
 
@@ -843,6 +877,18 @@ impl CapturingModelProvider {
     fn with_model_name(model_name: impl Into<String>) -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
+            provider_id: "capturing".into(),
+            model_name: Some(model_name.into()),
+        }
+    }
+
+    fn with_provider_and_model(
+        provider_id: impl Into<String>,
+        model_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            provider_id: provider_id.into(),
             model_name: Some(model_name.into()),
         }
     }
@@ -866,6 +912,7 @@ impl Default for CapturingModelProvider {
     fn default() -> Self {
         Self {
             requests: Mutex::new(Vec::new()),
+            provider_id: "capturing".into(),
             model_name: None,
         }
     }
@@ -873,7 +920,7 @@ impl Default for CapturingModelProvider {
 
 impl ModelProvider for CapturingModelProvider {
     fn id(&self) -> &str {
-        "capturing"
+        &self.provider_id
     }
 
     fn model_name(&self) -> Option<&str> {

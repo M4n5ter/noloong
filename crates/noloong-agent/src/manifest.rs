@@ -278,8 +278,7 @@ pub enum BuiltInSystemPromptProfile {
     #[default]
     Auto,
     General,
-    #[serde(rename = "gpt_5_5")]
-    Gpt55,
+    OpenAi,
 }
 
 impl BuiltInSystemPromptProfile {
@@ -287,7 +286,7 @@ impl BuiltInSystemPromptProfile {
         match self {
             Self::Auto => "auto",
             Self::General => "general",
-            Self::Gpt55 => "gpt_5_5",
+            Self::OpenAi => "openai",
         }
     }
 

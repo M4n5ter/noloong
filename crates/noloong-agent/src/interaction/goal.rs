@@ -104,7 +104,7 @@ pub fn goal_audit_message(goal: &GoalRecord, run_id: &str, turn_id: u64) -> Agen
     let mut message = AgentMessage::user(
         format!("{GOAL_AUDIT_MESSAGE_ID_PREFIX}-{run_id}-{turn_id}"),
         format!(
-            "Goal audit request.\n\nCurrent goal: {}\n\nReview the latest turn against this goal. If the goal status changed, call `agent.goal.update` with the new status, summary, and evidence. Do not mark the goal complete using prose alone.",
+            "Goal audit request.\n\nCurrent goal: {}\n\nReview the latest turn against this goal. If the goal status changed, call `agent.goal.update` with the new status, summary, and evidence. If evidence is insufficient, keep the goal pursuing. Do not mark the goal complete using prose alone.",
             goal.objective
         ),
     );

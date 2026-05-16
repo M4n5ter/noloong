@@ -169,7 +169,7 @@ fn manifest_system_prompt_base_changes_preserve_additions() {
     let mut manifest = AgentManifest::default();
     manifest
         .apply_patch(ManifestPatch::UpsertSystemPromptAddition {
-            addition: SystemPromptAddition::new("channel.telegram", "Use Telegram."),
+            addition: SystemPromptAddition::new("channel.<telegram>&\"", "Use Telegram."),
         })
         .unwrap();
 
@@ -180,7 +180,7 @@ fn manifest_system_prompt_base_changes_preserve_additions() {
         .unwrap();
     assert_eq!(
         manifest.effective_system_prompt(),
-        "Custom base.\n\n## System Prompt Additions\n\n### channel.telegram\nUse Telegram.\n"
+        "Custom base.\n\n<system_prompt_additions>\n<addition id=\"channel.&lt;telegram&gt;&amp;&quot;\">\nUse Telegram.\n</addition>\n</system_prompt_additions>\n"
     );
 
     manifest
@@ -190,12 +190,12 @@ fn manifest_system_prompt_base_changes_preserve_additions() {
 
     manifest
         .apply_patch(ManifestPatch::SetBuiltInSystemPromptProfile {
-            profile: BuiltInSystemPromptProfile::Gpt55,
+            profile: BuiltInSystemPromptProfile::OpenAi,
         })
         .unwrap();
     match manifest.system_prompt {
         AgentSystemPrompt::BuiltIn { profile, .. } => {
-            assert_eq!(profile, BuiltInSystemPromptProfile::Gpt55)
+            assert_eq!(profile, BuiltInSystemPromptProfile::OpenAi)
         }
         AgentSystemPrompt::Custom { .. } => panic!("expected built-in prompt"),
     }

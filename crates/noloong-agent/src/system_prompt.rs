@@ -40,11 +40,11 @@ pub fn built_in_system_prompt_for_profile(
     profile: BuiltInSystemPromptProfile,
 ) -> &'static str {
     match (locale, profile) {
-        (Locale::En, BuiltInSystemPromptProfile::Gpt55) => {
-            include_str!("prompts/system.gpt-5.5.en.md")
+        (Locale::En, BuiltInSystemPromptProfile::OpenAi) => {
+            include_str!("prompts/system.openai.en.md")
         }
-        (Locale::Zh, BuiltInSystemPromptProfile::Gpt55) => {
-            include_str!("prompts/system.gpt-5.5.zh.md")
+        (Locale::Zh, BuiltInSystemPromptProfile::OpenAi) => {
+            include_str!("prompts/system.openai.zh.md")
         }
         (Locale::En, _) => include_str!("prompts/system.general.en.md"),
         (Locale::Zh, _) => include_str!("prompts/system.general.zh.md"),
@@ -88,11 +88,8 @@ pub fn resolve_built_in_profile(
 ) -> BuiltInSystemPromptProfile {
     match profile {
         BuiltInSystemPromptProfile::Auto => {
-            if model
-                .map(|model| is_gpt_5_5_model(&model.model_name))
-                .unwrap_or(false)
-            {
-                BuiltInSystemPromptProfile::Gpt55
+            if model.map(is_openai_model_context).unwrap_or(false) {
+                BuiltInSystemPromptProfile::OpenAi
             } else {
                 BuiltInSystemPromptProfile::General
             }
@@ -139,18 +136,36 @@ fn render_effective_system_prompt(base_text: &str, additions: &[SystemPromptAddi
     }
 
     let mut text = base_text.trim_end().to_owned();
-    text.push_str("\n\n## System Prompt Additions\n");
+    text.push_str("\n\n<system_prompt_additions>\n");
     for addition in enabled {
-        text.push_str("\n### ");
-        text.push_str(&addition.id);
-        text.push('\n');
+        text.push_str("<addition id=\"");
+        text.push_str(&escape_xml_attribute(&addition.id));
+        text.push_str("\">\n");
         text.push_str(addition.text.trim());
-        text.push('\n');
+        text.push_str("\n</addition>\n");
     }
+    text.push_str("</system_prompt_additions>\n");
     text
 }
 
-fn is_gpt_5_5_model(model_name: &str) -> bool {
+pub(crate) fn escape_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn is_openai_model_context(model: &SystemPromptModelContext) -> bool {
+    is_openai_provider(&model.provider_id) || is_openai_model_name(&model.model_name)
+}
+
+fn is_openai_provider(provider_id: &str) -> bool {
+    let normalized = provider_id.to_ascii_lowercase().replace('-', "_");
+    matches!(normalized.as_str(), "openai" | "chatgpt_responses")
+}
+
+fn is_openai_model_name(model_name: &str) -> bool {
     let normalized = model_name.to_ascii_lowercase().replace('_', "-");
-    normalized.contains("gpt-5.5")
+    normalized.starts_with("gpt-")
 }
