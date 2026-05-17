@@ -7,6 +7,7 @@ use super::{
     InteractionSessionDescriptor, InteractionUxCapabilities, JsonRpcHandler, JsonRpcHandlerOutput,
     SubagentSpawnRequest, store::missing_session_error,
 };
+use crate::tools::final_assistant_output;
 use crate::{ReadOutputRequest, text};
 use noloong_agent_core::{
     AgentEvent, AgentEventKind, AgentInput, AgentMessage, ContentBlock, ModelStreamEvent,
@@ -196,7 +197,16 @@ impl JsonRpcHandler for InteractionControlHandler {
                 "subagent/spawn" => {
                     self.require(method, InteractionAuthorityCapability::SubagentSpawn)?;
                     let request = parse_params::<SubagentSpawnRequest>(params)?;
-                    value(self.inner.registry.spawn_subagent(request).await?)?
+                    let parent_session_id = request.parent_session_id.clone();
+                    let observe_result = request.initial_prompt.is_some();
+                    let descriptor = self.inner.registry.spawn_subagent(request).await?;
+                    if observe_result {
+                        self.observe_control_plane_subagent_result(
+                            parent_session_id,
+                            descriptor.session_id.clone(),
+                        );
+                    }
+                    value(descriptor)?
                 }
                 "goal/set" => {
                     self.require(method, InteractionAuthorityCapability::GoalManage)?;
@@ -283,7 +293,14 @@ impl JsonRpcHandler for InteractionControlHandler {
                         .agent()
                         .prompt(request.input.into_agent_input())
                         .await?;
-                    value(registered.descriptor().await)?
+                    let descriptor = registered.descriptor().await;
+                    if let Some(parent_session_id) = descriptor.parent_session_id.clone() {
+                        self.observe_control_plane_subagent_result(
+                            parent_session_id,
+                            descriptor.session_id.clone(),
+                        );
+                    }
+                    value(descriptor)?
                 }
                 "agent/continue" => {
                     self.require(method, InteractionAuthorityCapability::AgentRun)?;
@@ -687,6 +704,88 @@ impl InteractionControlHandler {
             .await?;
         Ok(registered.descriptor().await)
     }
+
+    fn observe_control_plane_subagent_result(
+        &self,
+        parent_session_id: String,
+        child_session_id: String,
+    ) {
+        let registry = self.inner.registry.clone();
+        tokio::spawn(async move {
+            let _ = observe_control_plane_subagent_result(
+                registry,
+                parent_session_id,
+                child_session_id,
+            )
+            .await;
+        });
+    }
+}
+
+async fn observe_control_plane_subagent_result(
+    registry: AgentSessionRegistry,
+    parent_session_id: String,
+    child_session_id: String,
+) -> Result<(), InteractionError> {
+    if let Some(child) = registry.get(&child_session_id).await? {
+        child.agent().wait_for_idle().await;
+    }
+    let Some(descriptor) = registry.get_descriptor(&child_session_id).await? else {
+        return Ok(());
+    };
+    if descriptor.parent_session_id.as_deref() != Some(parent_session_id.as_str()) {
+        return Ok(());
+    }
+    let Some(parent) = registry.get(&parent_session_id).await? else {
+        return Ok(());
+    };
+    parent.agent().steer(subagent_result_observation_message(
+        &parent_session_id,
+        &descriptor,
+    ));
+    parent.save_snapshot().await?;
+    Ok(())
+}
+
+fn subagent_result_observation_message(
+    parent_session_id: &str,
+    descriptor: &InteractionSessionDescriptor,
+) -> AgentMessage {
+    let final_output = final_assistant_output(&descriptor.state);
+    let final_text = final_output
+        .as_ref()
+        .map(|output| output.final_text.trim())
+        .filter(|text| !text.is_empty())
+        .unwrap_or("(no assistant text)");
+    let role_line = descriptor
+        .role
+        .as_deref()
+        .map(|role| format!("\nrole: {role}"))
+        .unwrap_or_default();
+    let text = format!(
+        "<subagent_result>\nsource: interaction_control\nparent_session_id: {parent_session_id}\nsession_id: {}\nstatus: {}{role_line}\nfinal_text:\n{final_text}\n</subagent_result>",
+        descriptor.session_id,
+        descriptor.status.as_str(),
+    );
+    let mut message =
+        AgentMessage::user(format!("subagent-result-{}", descriptor.session_id), text);
+    message.metadata.insert(
+        "source".into(),
+        Value::String("interaction_control.subagent_result".into()),
+    );
+    message.metadata.insert(
+        "parentSessionId".into(),
+        Value::String(parent_session_id.into()),
+    );
+    message.metadata.insert(
+        "childSessionId".into(),
+        Value::String(descriptor.session_id.clone()),
+    );
+    message.metadata.insert(
+        "childStatus".into(),
+        Value::String(descriptor.status.as_str().into()),
+    );
+    message
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]

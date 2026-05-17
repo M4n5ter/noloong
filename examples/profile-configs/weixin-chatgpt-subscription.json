@@ -1,0 +1,37 @@
+{
+  "defaultProfileId": "weixin-chatgpt",
+  "profiles": [
+    {
+      "profileId": "weixin-chatgpt",
+      "displayName": "Weixin ChatGPT",
+      "description": "ChatGPT subscription profile for Weixin iLink live smoke tests.",
+      "provider": {
+        "type": "chatgpt_responses",
+        "model": "gpt-5.4-mini",
+        "stateMode": "stateless",
+        "allowFileDataUrlInput": true,
+        "reasoning": {
+          "effort": "medium",
+          "summary": "auto"
+        }
+      },
+      "compaction": {
+        "type": "auto"
+      },
+      "manifestPatches": [
+        {
+          "op": "set_locale",
+          "locale": "zh"
+        },
+        {
+          "op": "update_file_edit_tool_policy",
+          "policy": "auto_by_model"
+        }
+      ],
+      "metadata": {
+        "channel": "weixin",
+        "example": true
+      }
+    }
+  ]
+}

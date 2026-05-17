@@ -88,26 +88,41 @@ pub async fn deliver_display_event(
     deliver_display_event_with_reply(
         state,
         delivery,
-        target,
-        notification,
-        None,
-        show_tool_status,
-        edit_throttle,
-        catalog,
+        TelegramDisplayDeliveryContext {
+            target,
+            notification,
+            reply_to: None,
+            show_tool_status,
+            edit_throttle,
+            catalog,
+        },
     )
     .await
+}
+
+#[derive(Clone, Debug)]
+pub struct TelegramDisplayDeliveryContext {
+    pub target: TelegramMessageTarget,
+    pub notification: InteractionDisplayNotification,
+    pub reply_to: Option<TelegramReplyTarget>,
+    pub show_tool_status: bool,
+    pub edit_throttle: Duration,
+    pub catalog: TelegramUiCatalog,
 }
 
 pub async fn deliver_display_event_with_reply(
     state: &mut TelegramDisplayState,
     delivery: &TelegramDelivery,
-    target: TelegramMessageTarget,
-    notification: InteractionDisplayNotification,
-    reply_to: Option<TelegramReplyTarget>,
-    show_tool_status: bool,
-    edit_throttle: Duration,
-    catalog: TelegramUiCatalog,
+    context: TelegramDisplayDeliveryContext,
 ) -> TelegramDeliveryResult<Vec<TelegramMessageHandle>> {
+    let TelegramDisplayDeliveryContext {
+        target,
+        notification,
+        reply_to,
+        show_tool_status,
+        edit_throttle,
+        catalog,
+    } = context;
     let mut cleanup = Vec::new();
     match notification.event {
         DisplayEvent::AssistantMessageDelta {
@@ -405,8 +420,8 @@ fn should_edit(last_edit_at: Option<Instant>, now: Instant, edit_throttle: Durat
 #[cfg(test)]
 mod tests {
     use super::{
-        TelegramDisplayState, cleanup_display_messages, deliver_display_event,
-        deliver_display_event_with_reply,
+        TelegramDisplayDeliveryContext, TelegramDisplayState, cleanup_display_messages,
+        deliver_display_event, deliver_display_event_with_reply,
     };
     use crate::{
         bridge::InteractionDisplayNotification,
@@ -488,16 +503,18 @@ mod tests {
         deliver_display_event_with_reply(
             &mut state,
             &delivery,
-            target(),
-            notification(DisplayEvent::AssistantMessageDelta {
-                run_id: "run-1".into(),
-                display_message_id: "m1".into(),
-                text: "hello".into(),
-            }),
-            Some(TelegramReplyTarget::new(77)),
-            true,
-            Duration::ZERO,
-            TelegramUiCatalog::new(Locale::En),
+            TelegramDisplayDeliveryContext {
+                target: target(),
+                notification: notification(DisplayEvent::AssistantMessageDelta {
+                    run_id: "run-1".into(),
+                    display_message_id: "m1".into(),
+                    text: "hello".into(),
+                }),
+                reply_to: Some(TelegramReplyTarget::new(77)),
+                show_tool_status: true,
+                edit_throttle: Duration::ZERO,
+                catalog: TelegramUiCatalog::new(Locale::En),
+            },
         )
         .await
         .unwrap();

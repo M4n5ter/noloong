@@ -822,6 +822,30 @@ impl AgentRuntime {
         }
     }
 
+    pub fn ensure_run_counter_after_run_id(&self, run_id: &str) {
+        let Some(id) = self.run_counter_value_from_run_id(run_id) else {
+            return;
+        };
+        let mut current = self.run_counter.load(Ordering::SeqCst);
+        while current < id {
+            match self
+                .run_counter
+                .compare_exchange(current, id, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn run_counter_value_from_run_id(&self, run_id: &str) -> Option<u64> {
+        let rest = run_id.strip_prefix("run-")?;
+        match &self.run_id_prefix {
+            Some(prefix) => rest.strip_prefix(prefix)?.strip_prefix('-')?.parse().ok(),
+            None => rest.parse().ok(),
+        }
+    }
+
     pub(super) fn ensure_event_counter_after(&self, events: &[AgentEvent]) {
         let Some(max_sequence) = events.iter().map(|event| event.sequence).max() else {
             return;

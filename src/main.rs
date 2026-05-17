@@ -19,7 +19,12 @@ use crate::{
         DEFAULT_TELEGRAM_LOCALE_ENV, DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV,
         DEFAULT_TELEGRAM_PROXY_ENV, DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV,
         DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
-        DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV, HostProfileConfig,
+        DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV, DEFAULT_WEIXIN_ACCOUNT_ID_ENV,
+        DEFAULT_WEIXIN_ALLOW_ALL_ENV, DEFAULT_WEIXIN_ALLOWED_USERS_ENV,
+        DEFAULT_WEIXIN_BASE_URL_ENV, DEFAULT_WEIXIN_CDN_BASE_URL_ENV,
+        DEFAULT_WEIXIN_FILE_DOWNLOAD_DIR_ENV, DEFAULT_WEIXIN_FILE_INLINE_MAX_BYTES_ENV,
+        DEFAULT_WEIXIN_FILE_MAX_DOWNLOAD_BYTES_ENV, DEFAULT_WEIXIN_FILE_MAX_UPLOAD_BYTES_ENV,
+        DEFAULT_WEIXIN_LOCALE_ENV, DEFAULT_WEIXIN_TOKEN_ENV, HostProfileConfig,
         ensure_sqlite_database_parent, env_or_value, parse_bool_env, parse_csv_i64, parse_csv_u64,
         resolve_state_database_url,
     },
@@ -27,7 +32,7 @@ use crate::{
 };
 use clap::{Args, Parser, Subcommand};
 use noloong_agent::{
-    Locale,
+    Locale, ManifestPatch,
     approval::{allow_decision, deny_decision},
     interaction::{
         InteractionCapabilityPolicy, InteractionClientError, InteractionControlHandler,
@@ -49,7 +54,10 @@ use noloong_agent_telegram::{
         TelegramUnsupportedMediaFallbackPolicy,
     },
     delivery::{TelegramDelivery, TelegramMessageTarget},
-    display::{TelegramDisplayState, cleanup_display_messages, deliver_display_event_with_reply},
+    display::{
+        TelegramDisplayDeliveryContext, TelegramDisplayState, cleanup_display_messages,
+        deliver_display_event_with_reply,
+    },
     i18n::{
         MANIFEST_PROPOSAL_DISPLAY_LIMIT, TelegramManifestCard, TelegramStatusCard,
         TelegramUiCatalog,
@@ -79,6 +87,15 @@ use noloong_agent_telegram::{
         TelegramInputFile, TelegramMediaMessageOptions, TelegramMessageHandle,
         TelegramSendDocumentRequest,
     },
+};
+use noloong_agent_weixin::{
+    config::{
+        ILINK_BASE_URL, WEIXIN_CDN_BASE_URL, WeixinAccessPolicy, WeixinBridgeConfig,
+        WeixinFilePolicy,
+    },
+    login::{WeixinLoginOptions, run_qr_login},
+    runtime::run_weixin_bridge_with_config,
+    state::WeixinAccountStore,
 };
 use std::{
     collections::BTreeMap,
@@ -152,6 +169,7 @@ async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
         }) => run_profile_config_schema(options),
         CliCommand::TelegramBridge(options) => run_telegram_bridge(options).await,
         CliCommand::Telegram(options) => run_telegram(options).await,
+        CliCommand::Weixin(command) => run_weixin(command).await,
     }
 }
 
@@ -295,6 +313,82 @@ async fn run_telegram(options: TelegramOptions) -> Result<(), CliError> {
                 .map_err(CliError::Interaction)
         }
     }
+}
+
+async fn run_weixin(command: WeixinCommand) -> Result<(), CliError> {
+    match command.command {
+        WeixinSubcommand::Login(options) => run_weixin_login(options).await,
+        WeixinSubcommand::Bridge(options) => run_weixin_bridge(options).await,
+        WeixinSubcommand::Run(options) => run_weixin_embedded(options).await,
+    }
+}
+
+async fn run_weixin_login(options: WeixinLoginCliOptions) -> Result<(), CliError> {
+    let client = reqwest::Client::builder()
+        .user_agent("noloong-weixin-login")
+        .build()
+        .map_err(|error| {
+            CliError::WeixinRuntime(
+                noloong_agent_weixin::runtime::WeixinRuntimeError::HttpClient(error.to_string()),
+            )
+        })?;
+    let store = WeixinAccountStore::default_root();
+    run_qr_login(
+        client,
+        &store,
+        WeixinLoginOptions {
+            bot_type: options.bot_type,
+            timeout_seconds: options.timeout_seconds,
+            qr_png_path: options.qr_png_path,
+        },
+        io::stdout().lock(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_weixin_bridge(options: WeixinBridgeOptions) -> Result<(), CliError> {
+    let config = weixin_config_from_values(&options, process_env)?;
+    run_weixin_bridge_config(config).await
+}
+
+async fn run_weixin_embedded(options: WeixinRunOptions) -> Result<(), CliError> {
+    let profile_config = load_profile_config(options.profile_config)?;
+    let registry = build_registry(&profile_config).await?;
+    let token = generate_token()?;
+    let listener = TcpListener::bind(default_embedded_interaction_bind()).await?;
+    let address = listener.local_addr()?;
+    let server_token = token.clone();
+    let server = tokio::spawn(async move {
+        serve_interaction_http(
+            listener,
+            InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all()),
+            InteractionHttpTransportConfig::bearer_token(server_token),
+        )
+        .await
+    });
+    let mut bridge_options = options.bridge;
+    if bridge_options.locale.is_none() && process_env(DEFAULT_WEIXIN_LOCALE_ENV).is_none() {
+        bridge_options.locale =
+            profile_locale(&profile_config, bridge_options.profile_id.as_deref());
+    }
+    bridge_options.interaction_url = Some(format!("ws://{address}/jsonrpc/ws"));
+    bridge_options.interaction_token = Some(token);
+    let bridge_config = weixin_config_from_values(&bridge_options, process_env)?;
+    tokio::select! {
+        result = run_weixin_bridge_config(bridge_config) => result,
+        result = server => {
+            result.map_err(|error| CliError::Task(error.to_string()))?
+                .map_err(CliError::Interaction)
+        }
+    }
+}
+
+async fn run_weixin_bridge_config(config: WeixinBridgeConfig) -> Result<(), CliError> {
+    let state_database_url = resolve_state_database_url()?;
+    ensure_sqlite_database_parent(&state_database_url)?;
+    run_weixin_bridge_with_config(config, state_database_url).await?;
+    Ok(())
 }
 
 async fn run_telegram_bridge_with_config(
@@ -465,12 +559,14 @@ async fn run_display_delivery(
             match deliver_display_event_with_reply(
                 &mut state,
                 &delivery,
-                TelegramMessageTarget::new(key.chat_id, key.thread_id),
-                display,
-                reply_to,
-                show_tool_status,
-                edit_throttle,
-                catalog,
+                TelegramDisplayDeliveryContext {
+                    target: TelegramMessageTarget::new(key.chat_id, key.thread_id),
+                    notification: display,
+                    reply_to,
+                    show_tool_status,
+                    edit_throttle,
+                    catalog,
+                },
             )
             .await
             {
@@ -1934,6 +2030,27 @@ fn profile_media_fallback_policy(
     provider_media_fallback_policy(&profile.provider)
 }
 
+fn profile_locale(
+    profile_config: &HostProfileConfig,
+    selected_profile_id: Option<&str>,
+) -> Option<Locale> {
+    let profile_id = selected_profile_id
+        .or(profile_config.default_profile_id.as_deref())
+        .unwrap_or_else(|| profile_config.profiles[0].profile_id.as_str());
+    let profile = profile_config
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == profile_id)?;
+    profile
+        .manifest_patches
+        .iter()
+        .rev()
+        .find_map(|patch| match patch {
+            ManifestPatch::SetLocale { locale } => Some(*locale),
+            _ => None,
+        })
+}
+
 fn provider_media_fallback_policy(
     provider: &BuiltInProviderConfig,
 ) -> TelegramUnsupportedMediaFallbackPolicy {
@@ -2165,6 +2282,113 @@ fn telegram_config_from_values(
     Ok(config)
 }
 
+fn weixin_config_from_values(
+    options: &WeixinBridgeOptions,
+    env_source: impl Fn(&str) -> Option<String>,
+) -> Result<WeixinBridgeConfig, CliError> {
+    let interaction_ws_url = options
+        .interaction_url
+        .clone()
+        .or_else(|| env_source(DEFAULT_INTERACTION_URL_ENV))
+        .ok_or(config::CliConfigError::MissingEnv(
+            DEFAULT_INTERACTION_URL_ENV.into(),
+        ))?;
+    let account_id = options
+        .account_id
+        .clone()
+        .or_else(|| env_source(DEFAULT_WEIXIN_ACCOUNT_ID_ENV))
+        .ok_or(config::CliConfigError::MissingEnv(
+            DEFAULT_WEIXIN_ACCOUNT_ID_ENV.into(),
+        ))?;
+    let store = WeixinAccountStore::default_root();
+    let stored_account = store.load(&account_id)?;
+    let token = options
+        .token
+        .clone()
+        .or_else(|| env_source(DEFAULT_WEIXIN_TOKEN_ENV))
+        .or_else(|| stored_account.as_ref().map(|account| account.token.clone()))
+        .ok_or(config::CliConfigError::MissingEnv(
+            DEFAULT_WEIXIN_TOKEN_ENV.into(),
+        ))?;
+    let base_url = options
+        .base_url
+        .clone()
+        .or_else(|| env_source(DEFAULT_WEIXIN_BASE_URL_ENV))
+        .or_else(|| {
+            stored_account
+                .as_ref()
+                .map(|account| account.base_url.clone())
+        })
+        .unwrap_or_else(|| ILINK_BASE_URL.into());
+    let cdn_base_url = options
+        .cdn_base_url
+        .clone()
+        .or_else(|| env_source(DEFAULT_WEIXIN_CDN_BASE_URL_ENV))
+        .unwrap_or_else(|| WEIXIN_CDN_BASE_URL.into());
+    let allowed_users = parse_csv_strings(
+        options
+            .allowed_users
+            .clone()
+            .or_else(|| env_source(DEFAULT_WEIXIN_ALLOWED_USERS_ENV)),
+    );
+    let allow_all =
+        options.allow_all || parse_bool_env(env_source(DEFAULT_WEIXIN_ALLOW_ALL_ENV), false);
+    let access = if allow_all {
+        WeixinAccessPolicy::allow_all()
+    } else {
+        WeixinAccessPolicy::new(allowed_users)
+    };
+    let locale = weixin_locale(options.locale, env_source(DEFAULT_WEIXIN_LOCALE_ENV))?;
+    let default_file_policy = WeixinFilePolicy::default();
+    let file_policy = WeixinFilePolicy {
+        inline_max_bytes: parse_config_usize(
+            options.file_inline_max_bytes,
+            env_source(DEFAULT_WEIXIN_FILE_INLINE_MAX_BYTES_ENV),
+            default_file_policy.inline_max_bytes,
+            DEFAULT_WEIXIN_FILE_INLINE_MAX_BYTES_ENV,
+        )?,
+        max_download_bytes: parse_config_usize(
+            options.file_max_download_bytes,
+            env_source(DEFAULT_WEIXIN_FILE_MAX_DOWNLOAD_BYTES_ENV),
+            default_file_policy.max_download_bytes,
+            DEFAULT_WEIXIN_FILE_MAX_DOWNLOAD_BYTES_ENV,
+        )?,
+        max_upload_bytes: parse_config_usize(
+            options.file_max_upload_bytes,
+            env_source(DEFAULT_WEIXIN_FILE_MAX_UPLOAD_BYTES_ENV),
+            default_file_policy.max_upload_bytes,
+            DEFAULT_WEIXIN_FILE_MAX_UPLOAD_BYTES_ENV,
+        )?,
+        download_dir: options.file_download_dir.clone().or_else(|| {
+            non_empty_option(env_source(DEFAULT_WEIXIN_FILE_DOWNLOAD_DIR_ENV)).map(PathBuf::from)
+        }),
+    };
+    let config = WeixinBridgeConfig {
+        account_id,
+        token,
+        base_url,
+        cdn_base_url,
+        interaction_ws_url,
+        interaction_bearer_token: options
+            .interaction_token
+            .clone()
+            .or_else(|| {
+                options
+                    .interaction_token_env
+                    .as_deref()
+                    .and_then(|env_name| interaction_token(Some(env_name)))
+            })
+            .or_else(|| env_source(DEFAULT_INTERACTION_TOKEN_ENV)),
+        profile_id: options.profile_id.clone(),
+        max_outbound_chars: options.max_outbound_chars.unwrap_or(2000),
+        access,
+        file_policy,
+        locale,
+    };
+    config.validate()?;
+    Ok(config)
+}
+
 fn interaction_token(token_env: Option<&str>) -> Option<String> {
     token_env
         .and_then(|env_name| env_or_value(None, env_name))
@@ -2206,6 +2430,26 @@ fn telegram_locale(
         return Ok(locale);
     }
     parse_locale_option(env_locale)?.map_or_else(|| Ok(Locale::detect()), Ok)
+}
+
+fn weixin_locale(
+    cli_locale: Option<Locale>,
+    env_locale: Option<String>,
+) -> Result<Locale, CliError> {
+    if let Some(locale) = cli_locale {
+        return Ok(locale);
+    }
+    parse_locale_option(env_locale)?.map_or_else(|| Ok(Locale::detect()), Ok)
+}
+
+fn parse_csv_strings(value: Option<String>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn parse_locale_option(value: Option<String>) -> Result<Option<Locale>, CliError> {
@@ -2343,6 +2587,73 @@ struct TelegramOptions {
     bridge: TelegramBridgeOptions,
 }
 
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct WeixinCommand {
+    #[command(subcommand)]
+    command: WeixinSubcommand,
+}
+
+#[derive(Clone, Debug, Subcommand, PartialEq, Eq)]
+enum WeixinSubcommand {
+    Login(WeixinLoginCliOptions),
+    Bridge(WeixinBridgeOptions),
+    Run(WeixinRunOptions),
+}
+
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+struct WeixinLoginCliOptions {
+    #[arg(long = "bot-type", default_value = "3")]
+    bot_type: String,
+    #[arg(long = "timeout-seconds", default_value_t = 480)]
+    timeout_seconds: u64,
+    #[arg(long = "qr-png")]
+    qr_png_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Args, PartialEq, Eq)]
+struct WeixinBridgeOptions {
+    #[arg(long = "interaction-url")]
+    interaction_url: Option<String>,
+    #[arg(long = "interaction-token")]
+    interaction_token: Option<String>,
+    #[arg(long = "interaction-token-env")]
+    interaction_token_env: Option<String>,
+    #[arg(long = "weixin-account-id")]
+    account_id: Option<String>,
+    #[arg(long = "weixin-token")]
+    token: Option<String>,
+    #[arg(long = "weixin-base-url")]
+    base_url: Option<String>,
+    #[arg(long = "weixin-cdn-base-url")]
+    cdn_base_url: Option<String>,
+    #[arg(long = "weixin-allowed-users")]
+    allowed_users: Option<String>,
+    #[arg(long = "weixin-allow-all")]
+    allow_all: bool,
+    #[arg(long = "weixin-locale", value_parser = parse_locale_arg)]
+    locale: Option<Locale>,
+    #[arg(long = "weixin-max-outbound-chars")]
+    max_outbound_chars: Option<usize>,
+    #[arg(long = "weixin-file-inline-max-bytes")]
+    file_inline_max_bytes: Option<usize>,
+    #[arg(long = "weixin-file-max-download-bytes")]
+    file_max_download_bytes: Option<usize>,
+    #[arg(long = "weixin-file-max-upload-bytes")]
+    file_max_upload_bytes: Option<usize>,
+    #[arg(long = "weixin-file-download-dir")]
+    file_download_dir: Option<PathBuf>,
+    #[arg(long = "profile-id")]
+    profile_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Args, PartialEq, Eq)]
+struct WeixinRunOptions {
+    #[arg(long = "profile-config")]
+    profile_config: Option<String>,
+    #[command(flatten)]
+    bridge: WeixinBridgeOptions,
+}
+
 #[derive(Clone, Debug, Default, Args, PartialEq, Eq)]
 struct ServeInteractionOptions {
     #[arg(long = "profile-config")]
@@ -2437,6 +2748,7 @@ enum CliCommand {
     #[command(name = "telegram-bridge")]
     TelegramBridge(TelegramBridgeOptions),
     Telegram(TelegramOptions),
+    Weixin(WeixinCommand),
 }
 
 #[derive(Clone, Debug, Args, PartialEq, Eq)]
@@ -2476,6 +2788,14 @@ enum CliError {
     TelegramDelivery(#[from] noloong_agent_telegram::delivery::TelegramDeliveryError),
     #[error("Telegram polling failed: {0}")]
     Polling(TelegramPollingError),
+    #[error("Weixin bridge failed: {0}")]
+    WeixinConfig(#[from] noloong_agent_weixin::config::WeixinConfigError),
+    #[error("Weixin runtime failed: {0}")]
+    WeixinRuntime(#[from] noloong_agent_weixin::runtime::WeixinRuntimeError),
+    #[error("Weixin login failed: {0}")]
+    WeixinLogin(#[from] noloong_agent_weixin::login::WeixinLoginError),
+    #[error("Weixin state failed: {0}")]
+    WeixinState(#[from] noloong_agent_weixin::state::WeixinStateError),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("background task failed: {0}")]
@@ -2495,9 +2815,9 @@ mod tests {
     use super::{
         BridgeUpdateHandler, BuildInfoSourceSubcommand, BuildInfoSubcommand, Cli, CliCommand,
         CliError, ProfileConfigSchemaOptions, ProfileConfigSubcommand, TelegramBridgeOptions,
-        apply_profile_media_fallback_policy, profile_media_fallback_policy,
-        register_telegram_commands, run_profile_config_schema, telegram_config_from_values,
-        validate_interaction_bind,
+        WeixinBridgeOptions, WeixinSubcommand, apply_profile_media_fallback_policy, profile_locale,
+        profile_media_fallback_policy, register_telegram_commands, run_profile_config_schema,
+        telegram_config_from_values, validate_interaction_bind, weixin_config_from_values,
     };
     use crate::config::HostProfileConfig;
     use crate::schema::profile_config_schema_json;
@@ -2603,6 +2923,38 @@ mod tests {
         assert_eq!(options.profile_config.as_deref(), Some("profiles.json"));
         assert_eq!(options.bridge.bot_username.as_deref(), Some("noloong_bot"));
         assert_eq!(options.bridge.allowed_users.as_deref(), Some("123456789"));
+        assert_eq!(options.bridge.locale, Some(Locale::Zh));
+    }
+
+    #[test]
+    fn cli_weixin_run_embeds_loopback_interaction_options() {
+        let cli = Cli::try_parse_from([
+            "noloong",
+            "weixin",
+            "run",
+            "--profile-config",
+            "profiles.json",
+            "--weixin-account-id",
+            "wx-bot",
+            "--weixin-allowed-users",
+            "user-1,user-2",
+            "--weixin-locale",
+            "zh",
+        ])
+        .unwrap();
+
+        let CliCommand::Weixin(command) = cli.command else {
+            panic!("expected weixin command");
+        };
+        let WeixinSubcommand::Run(options) = command.command else {
+            panic!("expected weixin run");
+        };
+        assert_eq!(options.profile_config.as_deref(), Some("profiles.json"));
+        assert_eq!(options.bridge.account_id.as_deref(), Some("wx-bot"));
+        assert_eq!(
+            options.bridge.allowed_users.as_deref(),
+            Some("user-1,user-2")
+        );
         assert_eq!(options.bridge.locale, Some(Locale::Zh));
     }
 
@@ -2815,6 +3167,52 @@ mod tests {
         assert!(config.access.allows(1, Some(123456789)));
         assert_eq!(config.bot_username.as_deref(), Some("noloong_bot"));
         assert_eq!(config.locale, Locale::Zh);
+    }
+
+    #[test]
+    fn weixin_config_uses_env_values() {
+        let env = BTreeMap::from([
+            ("NOLOONG_INTERACTION_URL", "ws://127.0.0.1:8787/jsonrpc/ws"),
+            ("WEIXIN_ACCOUNT_ID", "wx-bot"),
+            ("WEIXIN_TOKEN", "token"),
+            ("WEIXIN_ALLOWED_USERS", "user-1,user-2"),
+            ("WEIXIN_LOCALE", "zh"),
+        ]);
+
+        let config = weixin_config_from_values(&WeixinBridgeOptions::default(), |name| {
+            env.get(name).map(|value| value.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(config.account_id, "wx-bot");
+        assert!(config.access.allows_dm("user-1"));
+        assert!(!config.access.allows_dm("user-3"));
+        assert_eq!(config.locale, Locale::Zh);
+    }
+
+    #[test]
+    fn weixin_embedded_can_inherit_profile_locale() {
+        let config =
+            HostProfileConfig::load("examples/profile-configs/weixin-chatgpt-subscription.json")
+                .unwrap();
+
+        assert_eq!(profile_locale(&config, None), Some(Locale::Zh));
+    }
+
+    #[test]
+    fn weixin_config_rejects_missing_allowlist() {
+        let env = BTreeMap::from([
+            ("NOLOONG_INTERACTION_URL", "ws://127.0.0.1:8787/jsonrpc/ws"),
+            ("WEIXIN_ACCOUNT_ID", "wx-bot"),
+            ("WEIXIN_TOKEN", "token"),
+        ]);
+
+        let error = weixin_config_from_values(&WeixinBridgeOptions::default(), |name| {
+            env.get(name).map(|value| value.to_string())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("allowlist"));
     }
 
     #[test]

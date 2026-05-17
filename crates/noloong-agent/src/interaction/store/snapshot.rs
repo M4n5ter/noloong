@@ -19,6 +19,7 @@ pub struct AgentSessionRecord {
     pub parent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    pub run_id_prefix: String,
     pub manifest: AgentManifest,
     #[serde(default)]
     pub state: AgentState,

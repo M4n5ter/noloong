@@ -212,6 +212,7 @@ fn record(session_id: &str) -> AgentSessionRecord {
         profile_id: "default".into(),
         parent_session_id: None,
         role: None,
+        run_id_prefix: format!("stored-{session_id}"),
         manifest: AgentManifest::default(),
         state: AgentState {
             run_id: Some("run-1".into()),

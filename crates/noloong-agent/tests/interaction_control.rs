@@ -413,6 +413,180 @@ async fn interaction_control_subagent_spawn_requires_capability() {
 }
 
 #[tokio::test]
+async fn interaction_control_subagent_spawn_observes_result_for_parent() {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server);
+    let server = tokio::spawn(serve_jsonrpc(
+        server_reader,
+        server_writer,
+        test_handler("default").await,
+    ));
+    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let mut lines = BufReader::new(client_reader).lines();
+    let initial_prompt = serde_json::to_value(AgentMessage::user("child-user", "child prompt"))
+        .expect("message serializes");
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "name": "subagent-client",
+                "requestedAuthority": ["subagent.spawn"]
+            }),
+        ),
+    )
+    .await;
+    read_message(&mut lines).await;
+    write_rpc(
+        &mut client_writer,
+        rpc(2, "session/create", json!({"sessionId": "root"})),
+    )
+    .await;
+    read_message(&mut lines).await;
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            3,
+            "subagent/spawn",
+            json!({
+                "parentSessionId": "root",
+                "role": "worker",
+                "initialPrompt": initial_prompt
+            }),
+        ),
+    )
+    .await;
+    let spawn_response = read_message(&mut lines).await;
+    assert_eq!(spawn_response["result"]["status"], "completed");
+
+    for request_id in 4..24 {
+        write_rpc(
+            &mut client_writer,
+            rpc(
+                request_id,
+                "queue/list",
+                json!({"sessionId": "root", "queue": "steering"}),
+            ),
+        )
+        .await;
+        let queue_response = read_message(&mut lines).await;
+        let queue = queue_response["result"]
+            .as_array()
+            .expect("queue/list returns an array");
+        if let Some(queued) = queue.first() {
+            assert_eq!(queued["intent"], "observation");
+            let text = queued["message"]["content"][0]["text"]
+                .as_str()
+                .expect("observation has text");
+            assert!(text.contains("<subagent_result>"));
+            assert!(text.contains("session_id: session-1"));
+            assert!(text.contains("status: completed"));
+            assert!(text.contains("final_text:\nok"));
+            write_rpc(&mut client_writer, rpc(24, "shutdown", json!({}))).await;
+            read_message(&mut lines).await;
+            drop(client_writer);
+            server.await.unwrap().unwrap();
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    panic!("subagent result observation was not queued on the parent session");
+}
+
+#[tokio::test]
+async fn interaction_control_child_prompt_observes_result_for_parent() {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server);
+    let server = tokio::spawn(serve_jsonrpc(
+        server_reader,
+        server_writer,
+        test_handler("default").await,
+    ));
+    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let mut lines = BufReader::new(client_reader).lines();
+    let prompt = serde_json::to_value(AgentMessage::user("child-user", "child prompt"))
+        .expect("message serializes");
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "name": "subagent-client",
+                "requestedAuthority": ["subagent.spawn", "agent.run"]
+            }),
+        ),
+    )
+    .await;
+    read_message(&mut lines).await;
+    write_rpc(
+        &mut client_writer,
+        rpc(2, "session/create", json!({"sessionId": "root"})),
+    )
+    .await;
+    read_message(&mut lines).await;
+    write_rpc(
+        &mut client_writer,
+        rpc(3, "subagent/spawn", json!({"parentSessionId": "root"})),
+    )
+    .await;
+    let spawn_response = read_message(&mut lines).await;
+    assert_eq!(spawn_response["result"]["status"], "idle");
+    let child_session_id = spawn_response["result"]["sessionId"]
+        .as_str()
+        .expect("child session id");
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            4,
+            "agent/prompt",
+            json!({
+                "sessionId": child_session_id,
+                "input": {"type": "message", "message": prompt},
+            }),
+        ),
+    )
+    .await;
+    let prompt_response = read_message(&mut lines).await;
+    assert_eq!(prompt_response["result"]["status"], "completed");
+
+    for request_id in 5..25 {
+        write_rpc(
+            &mut client_writer,
+            rpc(
+                request_id,
+                "queue/list",
+                json!({"sessionId": "root", "queue": "steering"}),
+            ),
+        )
+        .await;
+        let queue_response = read_message(&mut lines).await;
+        let queue = queue_response["result"]
+            .as_array()
+            .expect("queue/list returns an array");
+        if let Some(queued) = queue.first() {
+            let text = queued["message"]["content"][0]["text"]
+                .as_str()
+                .expect("observation has text");
+            assert_eq!(queued["intent"], "observation");
+            assert!(text.contains("final_text:\nok"));
+            write_rpc(&mut client_writer, rpc(25, "shutdown", json!({}))).await;
+            read_message(&mut lines).await;
+            drop(client_writer);
+            server.await.unwrap().unwrap();
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    panic!("child prompt result observation was not queued on the parent session");
+}
+
+#[tokio::test]
 async fn interaction_control_manages_goal_lifecycle() {
     let handler = test_handler("default").await;
 
@@ -1238,6 +1412,7 @@ fn control_record(session_id: &str) -> AgentSessionRecord {
         profile_id: "default".into(),
         parent_session_id: None,
         role: None,
+        run_id_prefix: format!("stored-{session_id}"),
         manifest: AgentManifest::default(),
         state: AgentState {
             run_id: Some("stored-run".into()),

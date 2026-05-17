@@ -66,6 +66,7 @@ fn snapshot_record_serde_round_trips() {
         profile_id: "default".into(),
         parent_session_id: Some("parent".into()),
         role: Some("worker".into()),
+        run_id_prefix: "persisted-prefix".into(),
         manifest: AgentManifest {
             system_prompt: AgentSystemPrompt::custom("Persisted prompt"),
             ..AgentManifest::default()
@@ -100,6 +101,7 @@ fn snapshot_record_serde_round_trips() {
     let value = serde_json::to_value(&record).unwrap();
     assert_eq!(value["schemaVersion"], AGENT_SESSION_RECORD_SCHEMA_VERSION);
     assert_eq!(value["sessionId"], "root/with space");
+    assert_eq!(value["runIdPrefix"], "persisted-prefix");
     assert_eq!(value["queues"]["steering"]["mode"], "all");
 
     let decoded: AgentSessionRecord = serde_json::from_value(value).unwrap();
@@ -791,6 +793,135 @@ async fn registry_sessions_namespace_run_ids_for_shared_event_store() {
     assert!(beta_run_id.starts_with("run-s"));
     assert!(!event_store.load(&alpha_run_id).await.unwrap().is_empty());
     assert!(!event_store.load(&beta_run_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn registry_restore_advances_run_counter_for_shared_event_store() {
+    let registry_store = Arc::new(InMemoryAgentSessionRegistryStore::default());
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let first_registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![shared_event_store_profile(
+            "default",
+            Arc::new(TextModel),
+            Arc::clone(&event_store),
+        )],
+        Arc::clone(&registry_store) as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+    first_registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("restored".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let first_registered = first_registry
+        .get("restored")
+        .await
+        .unwrap()
+        .expect("session exists");
+    first_registered.agent().prompt("first").await.unwrap();
+    let first_run_id = first_registered
+        .agent()
+        .state()
+        .await
+        .run_id
+        .expect("first run id");
+
+    let second_registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![shared_event_store_profile(
+            "default",
+            Arc::new(TextModel),
+            Arc::clone(&event_store),
+        )],
+        registry_store as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+    let restored = second_registry
+        .get("restored")
+        .await
+        .unwrap()
+        .expect("session restores");
+    restored.agent().prompt("second").await.unwrap();
+    let second_run_id = restored
+        .agent()
+        .state()
+        .await
+        .run_id
+        .expect("second run id");
+
+    assert_ne!(first_run_id, second_run_id);
+    assert!(
+        second_run_id.ends_with("-2"),
+        "restored runtime should continue run ids, got {second_run_id}"
+    );
+    assert!(!event_store.load(&first_run_id).await.unwrap().is_empty());
+    assert!(!event_store.load(&second_run_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn registry_recreated_session_uses_new_run_id_namespace() {
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![shared_event_store_profile(
+            "default",
+            Arc::new(TextModel),
+            Arc::clone(&event_store),
+        )],
+        Arc::new(InMemoryAgentSessionRegistryStore::default()),
+    )
+    .unwrap();
+
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("recreated".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let first_registered = registry
+        .get("recreated")
+        .await
+        .unwrap()
+        .expect("session exists");
+    first_registered.agent().prompt("first").await.unwrap();
+    let first_run_id = first_registered
+        .agent()
+        .state()
+        .await
+        .run_id
+        .expect("first run id");
+
+    registry
+        .delete_session("recreated", AgentSessionDeleteOptions { force_abort: true })
+        .await
+        .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("recreated".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let second_registered = registry
+        .get("recreated")
+        .await
+        .unwrap()
+        .expect("session recreated");
+    second_registered.agent().prompt("second").await.unwrap();
+    let second_run_id = second_registered
+        .agent()
+        .state()
+        .await
+        .run_id
+        .expect("second run id");
+
+    assert_ne!(first_run_id, second_run_id);
+    assert!(!event_store.load(&first_run_id).await.unwrap().is_empty());
+    assert!(!event_store.load(&second_run_id).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2013,6 +2144,7 @@ fn stored_record(session_id: &str) -> AgentSessionRecord {
         profile_id: "default".into(),
         parent_session_id: None,
         role: None,
+        run_id_prefix: format!("stored-{session_id}"),
         manifest: AgentManifest::default(),
         state: AgentState {
             run_id: Some("stored-run".into()),

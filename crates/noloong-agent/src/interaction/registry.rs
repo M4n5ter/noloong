@@ -34,6 +34,7 @@ use std::{
 };
 use tokio::sync::{Notify, RwLock, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
+use uuid::Uuid;
 
 const INTERRUPTED_RUNNING_SESSION_ERROR: &str =
     "agent session was interrupted while running and cannot be resumed automatically";
@@ -404,6 +405,7 @@ impl AgentSessionRegistry {
             profile_id,
             parent_session_id: request.parent_session_id,
             role: request.role,
+            run_id_prefix: new_run_id_prefix_for_session(&session_id),
             manifest,
             state: AgentState::default(),
             queues: AgentSessionQueueSnapshot::default(),
@@ -992,7 +994,7 @@ impl AgentSessionRegistry {
         let active_goal = self.inner.store.get_goal(&record.session_id).await?;
         let session = AgentSession::builder()
             .with_manifest(record.manifest.clone())
-            .with_run_id_prefix(run_id_prefix_for_session(&record.session_id))
+            .with_run_id_prefix(record.run_id_prefix.clone())
             .with_subagent_depth(subagent_depth_for_record(&record))
             .with_subagent_controller(Arc::new(RegistrySubagentController {
                 registry: Arc::downgrade(&self.inner),
@@ -1005,6 +1007,9 @@ impl AgentSessionRegistry {
             .with_active_goal(active_goal.filter(GoalRecord::is_pursuing))
             .build();
         let runtime = profile.build_runtime(&session, &record.manifest).await?;
+        if let Some(run_id) = record.state.run_id.as_deref() {
+            runtime.ensure_run_counter_after_run_id(run_id);
+        }
         let agent = Agent::builder()
             .with_runtime(Arc::new(runtime))
             .with_initial_state(record.state.clone())
@@ -1029,14 +1034,13 @@ impl AgentSessionRegistry {
         record
             .validate_schema_version()
             .map_err(InteractionError::internal)?;
-        if !matches!(record.state.status, RunStatus::Running) {
-            return Ok(record);
+        if matches!(record.state.status, RunStatus::Running) {
+            record.state.status = RunStatus::Failed;
+            record.state.last_error = Some(INTERRUPTED_RUNNING_SESSION_ERROR.into());
+            record.state.active_phase = None;
+            record.updated_at_ms = current_unix_ms();
+            self.inner.store.save(record.clone()).await?;
         }
-        record.state.status = RunStatus::Failed;
-        record.state.last_error = Some(INTERRUPTED_RUNNING_SESSION_ERROR.into());
-        record.state.active_phase = None;
-        record.updated_at_ms = current_unix_ms();
-        self.inner.store.save(record.clone()).await?;
         Ok(record)
     }
 
@@ -1317,6 +1321,14 @@ fn run_id_prefix_for_session(session_id: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("s{hash:016x}")
+}
+
+fn new_run_id_prefix_for_session(session_id: &str) -> String {
+    format!(
+        "{}-{}",
+        run_id_prefix_for_session(session_id),
+        Uuid::new_v4().simple()
+    )
 }
 
 fn subagent_manifest_from_parent(

@@ -4,6 +4,7 @@ members = [
     "crates/noloong-agent-core",
     "crates/noloong-agent",
     "crates/noloong-agent-telegram",
+    "crates/noloong-agent-weixin",
     "crates/noloong-openai",
 ]
 resolver = "3"
@@ -16,20 +17,28 @@ edition = "2024"
 noloong-agent-core = { path = "crates/noloong-agent-core" }
 noloong-agent = { path = "crates/noloong-agent" }
 noloong-agent-telegram = { path = "crates/noloong-agent-telegram" }
+noloong-agent-weixin = { path = "crates/noloong-agent-weixin" }
 noloong-openai = { path = "crates/noloong-openai" }
+aes = "0.9"
 base64 = "0.22"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 bytes = "1.11"
+ecb = { version = "0.2", features = ["alloc"] }
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.4"
+hex = "0.4"
 ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
 jsonc-parser = { version = "0.32", features = ["serde", "serde_json"] }
 jsonschema = { version = "0.46", default-features = false }
 env_logger = "0.11"
 human-panic = "2.0"
 log = "0.4"
+md-5 = "0.10"
 memchr = "2.8"
+mime_guess = "2.0"
 opendal = { version = "0.56", default-features = false, features = ["executors-tokio", "services-fs", "services-memory"] }
+qrcode = "0.14"
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls", "stream"] }
 rusqlite = "0.39"
 schemars = "1.2"
@@ -44,6 +53,7 @@ toasty = { version = "0.6", default-features = false }
 toasty-driver-postgresql = "0.6"
 toasty-driver-sqlite = "0.6"
 url = "2.5"
+uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
 
 [workspace.lints.rust]
@@ -61,6 +71,7 @@ workspace = true
 noloong-agent = { workspace = true, features = ["interaction-http", "json-schema", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
 noloong-agent-core = { workspace = true, features = ["json-schema", "sqlite-store"] }
 noloong-agent-telegram.workspace = true
+noloong-agent-weixin.workspace = true
 noloong-openai.workspace = true
 env_logger.workspace = true
 getrandom.workspace = true

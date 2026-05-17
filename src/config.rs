@@ -35,6 +35,17 @@ pub const DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV: &str =
     "TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE";
 pub const DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV: &str = "TELEGRAM_STARTUP_UPDATE_POLICY";
 pub const DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV: &str = "TELEGRAM_OFFSET_CHECKPOINT";
+pub const DEFAULT_WEIXIN_ACCOUNT_ID_ENV: &str = "WEIXIN_ACCOUNT_ID";
+pub const DEFAULT_WEIXIN_TOKEN_ENV: &str = "WEIXIN_TOKEN";
+pub const DEFAULT_WEIXIN_BASE_URL_ENV: &str = "WEIXIN_BASE_URL";
+pub const DEFAULT_WEIXIN_CDN_BASE_URL_ENV: &str = "WEIXIN_CDN_BASE_URL";
+pub const DEFAULT_WEIXIN_ALLOWED_USERS_ENV: &str = "WEIXIN_ALLOWED_USERS";
+pub const DEFAULT_WEIXIN_ALLOW_ALL_ENV: &str = "WEIXIN_ALLOW_ALL";
+pub const DEFAULT_WEIXIN_LOCALE_ENV: &str = "WEIXIN_LOCALE";
+pub const DEFAULT_WEIXIN_FILE_INLINE_MAX_BYTES_ENV: &str = "WEIXIN_FILE_INLINE_MAX_BYTES";
+pub const DEFAULT_WEIXIN_FILE_MAX_DOWNLOAD_BYTES_ENV: &str = "WEIXIN_FILE_MAX_DOWNLOAD_BYTES";
+pub const DEFAULT_WEIXIN_FILE_MAX_UPLOAD_BYTES_ENV: &str = "WEIXIN_FILE_MAX_UPLOAD_BYTES";
+pub const DEFAULT_WEIXIN_FILE_DOWNLOAD_DIR_ENV: &str = "WEIXIN_FILE_DOWNLOAD_DIR";
 pub const DEFAULT_STATE_DATABASE_URL_ENV: &str = "NOLOONG_STATE_DATABASE_URL";
 pub const DEFAULT_CHATGPT_TOKEN_FILE_ENV: &str = "NOLOONG_CHATGPT_TOKEN_FILE";
 const DEFAULT_STATE_DATABASE_FILE_RELATIVE: &[&str] = &[".agents", "noloong", "state.sqlite"];
@@ -962,6 +973,18 @@ mod tests {
 
         config.validate().unwrap();
         assert_eq!(config.profiles[0].profile_id, "telegram-openrouter-free");
+    }
+
+    #[test]
+    fn profile_config_loads_weixin_chatgpt_example() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/profile-configs/weixin-chatgpt-subscription.json");
+
+        let config = HostProfileConfig::load(path).unwrap();
+
+        config.validate().unwrap();
+        assert_eq!(config.default_profile_id.as_deref(), Some("weixin-chatgpt"));
+        assert_eq!(config.profiles[0].metadata["channel"], "weixin");
     }
 
     #[test]

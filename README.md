@@ -164,6 +164,27 @@ cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatg
 Set `"compaction": {"type": "none"}` in the profile to disable the ChatGPT Codex compact endpoint.
 Use [`examples/profile-configs/chatgpt-codex-subscription-stateful.json`](examples/profile-configs/chatgpt-codex-subscription-stateful.json) only when service-side Responses item storage is desired.
 
+## Weixin iLink
+
+The root `noloong` binary also includes a Weixin iLink interaction bridge. It is DM-first, final-only, and uses numbered text commands instead of buttons because iLink does not provide the same editing and inline-control surface as Telegram.
+
+```bash
+cargo run -p noloong -- weixin login
+cargo run -p noloong -- weixin login --qr-png /tmp/noloong-weixin-login-qr.png
+cargo run -p noloong -- weixin run \
+  --profile-config examples/profile-configs/weixin-chatgpt-subscription.json \
+  --weixin-account-id <account-id> \
+  --weixin-allowed-users <user-id>
+```
+
+Runtime config can also come from environment variables: `WEIXIN_ACCOUNT_ID`, `WEIXIN_TOKEN`, `WEIXIN_ALLOWED_USERS`, `WEIXIN_BASE_URL`, `WEIXIN_CDN_BASE_URL`, `WEIXIN_LOCALE`, and the `WEIXIN_FILE_*` size/download settings. Bridge state uses the unified SQLite state database and stores iLink `sync_buf` plus per-peer `context_token`; credentials saved by `weixin login` live under `~/.agents/noloong/weixin/accounts/`.
+
+`weixin login` renders a terminal QR and writes a PNG QR image to `/tmp/noloong-weixin-login-qr.png` by default; use `--qr-png` to choose a different path.
+
+Weixin cockpit commands must start with `/` or `／`; text without a prefix is ordinary agent input. Supported commands include `/帮助`, `/状态`, `/新会话`, `/会话`, `/切换 1`, `/删除 1`, `/运行配置`, `/队列`, `/清空队列`, `/审批`, `/同意 1`, `/拒绝 1`, `/进程 1`, and `/子任务 <prompt>`. Outbound text is split around a conservative 2000-character Weixin limit by default, and run progress uses iLink typing when the API returns a typing ticket.
+
+See [`crates/noloong-agent-weixin/docs/WEIXIN.md`](crates/noloong-agent-weixin/docs/WEIXIN.md) for media behavior, troubleshooting, and the live smoke checklist.
+
 ## Profile Config Schema
 
 Root profile config has a checked-in JSON Schema at [`schemas/profile-config.schema.json`](schemas/profile-config.schema.json). Editors can reference it with a `$schema` field:

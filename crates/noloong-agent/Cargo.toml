@@ -38,6 +38,7 @@ toasty = { workspace = true, optional = true }
 toasty-driver-postgresql = { workspace = true, optional = true }
 toasty-driver-sqlite = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+uuid.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
