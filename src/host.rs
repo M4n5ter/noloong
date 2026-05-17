@@ -926,35 +926,42 @@ mod tests {
     }
 
     fn models_dev_registry() -> ModelsDevRegistry {
-        ModelsDevRegistry::from_json_for_tests(
-            r#"{
-                "openai": {
-                    "models": {
-                        "gpt-5.4-mini": {
-                            "limit": {"context": 400000, "input": 272000, "output": 128000}
-                        },
-                        "compact-only": {
-                            "limit": {"context": 64000, "input": 32000, "output": 8192}
-                        }
+        ModelsDevRegistry::from_value_for_tests(serde_json::json!({
+            "openai": {
+                "models": {
+                    "gpt-5.4-mini": {
+                        "limit": {"context": 400000, "input": 272000, "output": 128000}
+                    },
+                    "compact-only": {
+                        "limit": {"context": 64000, "input": 32000, "output": 8192}
                     }
                 }
-            }"#,
-        )
+            }
+        }))
     }
 
     #[tokio::test]
     async fn profile_config_builds_registry_store() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "registryStore": {"type": "memory"},
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "chat_completions", "model": "gpt-5.4-mini"},
-                    "eventStore": {"type": "memory"}
-                }]
-            }"#,
-        )
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "registryStore": {
+                    "type": "memory"
+                },
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chat_completions",
+                            "model": "gpt-5.4-mini"
+                        },
+                        "eventStore": {
+                            "type": "memory"
+                        }
+                    }
+                ]
+            }
+        ))
         .unwrap();
 
         assert!(!config_uses_default_state_database(&config));
@@ -968,15 +975,20 @@ mod tests {
     #[tokio::test]
     async fn profile_config_omits_registry_store_and_uses_state_database() {
         let db = TempSqliteDb::new("default-registry-store");
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "chat_completions", "model": "gpt-5.4-mini"}
-                }]
-            }"#,
-        )
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chat_completions",
+                            "model": "gpt-5.4-mini"
+                        }
+                    }
+                ]
+            }
+        ))
         .unwrap();
         let database_url = sqlite_database_url(&db.path);
 
@@ -1340,35 +1352,47 @@ mod tests {
 
     #[tokio::test]
     async fn profile_default_plugins_become_default_manifest_patches() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
-                "provider": {"type": "responses", "model": "gpt-5.4-mini"},
-                "plugins": [{
-                    "pluginId": "echo",
-                    "displayName": "Echo",
-                    "components": [
-                        {
-                            "type": "noloong_extension",
-                            "transport": {
-                                "type": "stdio",
-                                "command": "node",
-                                "args": ["examples/extensions/echo.mjs"]
-                            },
-                            "allowedCapabilities": [
-                                {"type": "tool", "name": "echo.run"}
-                            ]
-                        }
-                    ]
-                }],
-                "manifestPatches": [{
-                    "op": "set_plugin_enabled",
-                    "pluginId": "echo",
-                    "enabled": true
-                }]
-            }"#,
-        )
+                "provider": {
+                    "type": "responses",
+                    "model": "gpt-5.4-mini"
+                },
+                "plugins": [
+                    {
+                        "pluginId": "echo",
+                        "displayName": "Echo",
+                        "components": [
+                            {
+                                "type": "noloong_extension",
+                                "transport": {
+                                    "type": "stdio",
+                                    "command": "node",
+                                    "args": [
+                                        "examples/extensions/echo.mjs"
+                                    ]
+                                },
+                                "allowedCapabilities": [
+                                    {
+                                        "type": "tool",
+                                        "name": "echo.run"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "manifestPatches": [
+                    {
+                        "op": "set_plugin_enabled",
+                        "pluginId": "echo",
+                        "enabled": true
+                    }
+                ]
+            }
+        ))
         .unwrap();
 
         let profile = runtime_profile(&config).await.unwrap();
@@ -1422,13 +1446,16 @@ mod tests {
 
     #[tokio::test]
     async fn chatgpt_profile_auto_compaction_registers_codex_compactor() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "chatgpt",
                 "displayName": "ChatGPT",
-                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"}
-            }"#,
-        )
+                "provider": {
+                    "type": "chatgpt_responses",
+                    "model": "gpt-5.4-mini"
+                }
+            }
+        ))
         .unwrap();
         let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();
@@ -1451,18 +1478,21 @@ mod tests {
 
     #[tokio::test]
     async fn chatgpt_compaction_can_lookup_input_limit_model_separately() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "chatgpt",
                 "displayName": "ChatGPT",
-                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
+                "provider": {
+                    "type": "chatgpt_responses",
+                    "model": "gpt-5.4-mini"
+                },
                 "compaction": {
                     "type": "openai_responses",
                     "inputLimitModel": "compact-only",
                     "compactModel": "gpt-5.4-mini"
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
         let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();
@@ -1481,14 +1511,19 @@ mod tests {
 
     #[tokio::test]
     async fn chatgpt_profile_can_disable_auto_compaction() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "chatgpt",
                 "displayName": "ChatGPT",
-                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
-                "compaction": {"type": "none"}
-            }"#,
-        )
+                "provider": {
+                    "type": "chatgpt_responses",
+                    "model": "gpt-5.4-mini"
+                },
+                "compaction": {
+                    "type": "none"
+                }
+            }
+        ))
         .unwrap();
         let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();
@@ -1501,11 +1536,14 @@ mod tests {
 
     #[tokio::test]
     async fn chatgpt_profile_openai_responses_compaction_honors_overrides() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "chatgpt",
                 "displayName": "ChatGPT",
-                "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
+                "provider": {
+                    "type": "chatgpt_responses",
+                    "model": "gpt-5.4-mini"
+                },
                 "compaction": {
                     "type": "openai_responses",
                     "inputLimitModel": "compact-only",
@@ -1517,8 +1555,8 @@ mod tests {
                     "mode": "request_only",
                     "requestTimeoutSecs": 120
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
         let profile = runtime_profile(&config).await.unwrap();
         let session = AgentSession::builder().build();

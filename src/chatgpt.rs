@@ -177,7 +177,7 @@ pub enum ChatGptCliError {
 #[cfg(test)]
 mod tests {
     use super::{ChatGptLoginFlow, ChatGptTokenFileOptions, token_status_message};
-    use crate::{Cli, CliCommand};
+    use crate::cli::{Cli, CliCommand};
     use clap::Parser;
     use noloong_openai::auth::ChatGptTokenData;
     use std::path::Path;

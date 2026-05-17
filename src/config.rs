@@ -691,19 +691,21 @@ mod tests {
 
     #[test]
     fn profile_config_loads_chat_completions() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {
-                        "type": "chat_completions",
-                        "model": "gpt-5.4-mini",
-                        "apiKeyEnv": "OPENROUTER_API_KEY"
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chat_completions",
+                            "model": "gpt-5.4-mini",
+                            "apiKeyEnv": "OPENROUTER_API_KEY"
+                        }
                     }
-                }]
-            }"#,
-        )
+                ]
+            }
+        ))
         .unwrap();
 
         assert!(config.validate().is_ok());
@@ -716,8 +718,8 @@ mod tests {
 
     #[test]
     fn profile_config_loads_chat_completions_reasoning() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
                 "provider": {
@@ -728,8 +730,8 @@ mod tests {
                         "effort": "xhigh"
                     }
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::ChatCompletions {
@@ -748,8 +750,8 @@ mod tests {
 
     #[test]
     fn profile_config_loads_responses_reasoning() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
                 "provider": {
@@ -761,8 +763,8 @@ mod tests {
                         "includeEncrypted": true
                     }
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::Responses {
@@ -786,8 +788,8 @@ mod tests {
 
     #[test]
     fn profile_config_loads_responses_state_mode() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
                 "provider": {
@@ -795,8 +797,8 @@ mod tests {
                     "model": "gpt-5.4-mini",
                     "stateMode": "stateful"
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::Responses { state_mode, .. } = config.provider else {
@@ -807,8 +809,8 @@ mod tests {
 
     #[test]
     fn profile_config_loads_responses_file_data_url_opt_in() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
                 "provider": {
@@ -816,8 +818,8 @@ mod tests {
                     "model": "gpt-5.4-mini",
                     "allowFileDataUrlInput": true
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::Responses {
@@ -832,23 +834,25 @@ mod tests {
 
     #[test]
     fn profile_config_rejects_stateless_reasoning_without_encrypted_replay() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {
-                        "type": "chatgpt_responses",
-                        "model": "gpt-5.4-mini",
-                        "stateMode": "stateless",
-                        "reasoning": {
-                            "enabled": true,
-                            "includeEncrypted": false
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chatgpt_responses",
+                            "model": "gpt-5.4-mini",
+                            "stateMode": "stateless",
+                            "reasoning": {
+                                "enabled": true,
+                                "includeEncrypted": false
+                            }
                         }
                     }
-                }]
-            }"#,
-        )
+                ]
+            }
+        ))
         .unwrap();
 
         let error = config
@@ -860,8 +864,8 @@ mod tests {
 
     #[test]
     fn profile_config_loads_anthropic_reasoning() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
                 "provider": {
@@ -872,8 +876,8 @@ mod tests {
                         "thinking": "adaptive"
                     }
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::AnthropicMessages {
@@ -979,17 +983,20 @@ mod tests {
 
     #[test]
     fn runtime_profile_config_loads_sqlite_event_store() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
-                "provider": {"type": "responses", "model": "gpt-5.4-mini"},
+                "provider": {
+                    "type": "responses",
+                    "model": "gpt-5.4-mini"
+                },
                 "eventStore": {
                     "type": "sqlite",
                     "databaseUrl": "sqlite:target/noloong-events.sqlite"
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         assert_eq!(
@@ -1003,18 +1010,21 @@ mod tests {
 
     #[test]
     fn runtime_profile_config_loads_sqlite_event_store_without_migrations() {
-        let config = serde_json::from_str::<RuntimeProfileConfig>(
-            r#"{
+        let config = serde_json::from_value::<RuntimeProfileConfig>(serde_json::json!(
+            {
                 "profileId": "default",
                 "displayName": "Default",
-                "provider": {"type": "responses", "model": "gpt-5.4-mini"},
+                "provider": {
+                    "type": "responses",
+                    "model": "gpt-5.4-mini"
+                },
                 "eventStore": {
                     "type": "sqlite",
                     "databaseUrl": "sqlite:target/noloong-events.sqlite",
                     "migrateOnConnect": false
                 }
-            }"#,
-        )
+            }
+        ))
         .unwrap();
 
         assert_eq!(
@@ -1028,15 +1038,20 @@ mod tests {
 
     #[test]
     fn profile_config_rejects_unknown_provider() {
-        let error = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "unknown", "model": "x"}
-                }]
-            }"#,
-        )
+        let error = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "unknown",
+                            "model": "x"
+                        }
+                    }
+                ]
+            }
+        ))
         .unwrap_err();
 
         assert!(error.to_string().contains("unknown variant"));
@@ -1044,16 +1059,24 @@ mod tests {
 
     #[test]
     fn profile_config_builds_registry_store_config() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "registryStore": {"type": "sqlite", "databaseUrl": "sqlite::memory:"},
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.4-mini"}
-                }]
-            }"#,
-        )
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "registryStore": {
+                    "type": "sqlite",
+                    "databaseUrl": "sqlite::memory:"
+                },
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "responses",
+                            "model": "gpt-5.4-mini"
+                        }
+                    }
+                ]
+            }
+        ))
         .unwrap();
 
         assert!(config.validate().is_ok());
@@ -1118,39 +1141,51 @@ mod tests {
 
     #[test]
     fn profile_config_loads_default_plugins() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "responses", "model": "gpt-5.4-mini"},
-                    "plugins": [{
-                    "pluginId": "echo",
-                    "displayName": "Echo",
-                    "enabled": true,
-                    "components": [
-                        {
-                            "type": "noloong_extension",
-                            "transport": {
-                                "type": "stdio",
-                                "command": "node",
-                                "args": ["examples/extensions/echo.mjs"],
-                                "env": {
-                                    "PATH": {
-                                        "type": "host_env",
-                                        "name": "PATH"
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "responses",
+                            "model": "gpt-5.4-mini"
+                        },
+                        "plugins": [
+                            {
+                                "pluginId": "echo",
+                                "displayName": "Echo",
+                                "enabled": true,
+                                "components": [
+                                    {
+                                        "type": "noloong_extension",
+                                        "transport": {
+                                            "type": "stdio",
+                                            "command": "node",
+                                            "args": [
+                                                "examples/extensions/echo.mjs"
+                                            ],
+                                            "env": {
+                                                "PATH": {
+                                                    "type": "host_env",
+                                                    "name": "PATH"
+                                                }
+                                            }
+                                        },
+                                        "allowedCapabilities": [
+                                            {
+                                                "type": "tool",
+                                                "name": "echo.run"
+                                            }
+                                        ]
                                     }
-                                }
-                            },
-                            "allowedCapabilities": [
-                                {"type": "tool", "name": "echo.run"}
-                            ]
-                        }
-                    ]
-                }]
-                }]
-            }"#,
-        )
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ))
         .unwrap();
 
         config.validate().unwrap();
@@ -1160,15 +1195,20 @@ mod tests {
 
     #[test]
     fn profile_config_loads_chatgpt_responses_with_default_token_file_auth() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"}
-                }]
-            }"#,
-        )
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chatgpt_responses",
+                            "model": "gpt-5.4-mini"
+                        }
+                    }
+                ]
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::ChatgptResponses { auth, .. } = &config.profiles[0].provider
@@ -1181,19 +1221,21 @@ mod tests {
 
     #[test]
     fn profile_config_loads_chatgpt_responses_file_data_url_opt_in() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {
-                        "type": "chatgpt_responses",
-                        "model": "gpt-5.4-mini",
-                        "allowFileDataUrlInput": true
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chatgpt_responses",
+                            "model": "gpt-5.4-mini",
+                            "allowFileDataUrlInput": true
+                        }
                     }
-                }]
-            }"#,
-        )
+                ]
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::ChatgptResponses {
@@ -1208,27 +1250,31 @@ mod tests {
 
     #[test]
     fn profile_config_loads_chatgpt_env_headers_escape_hatch() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {
-                        "type": "chatgpt_responses",
-                        "model": "gpt-5.4-mini",
-                        "auth": {
-                            "type": "env_headers",
-                            "id": "custom-auth",
-                            "headers": [{
-                                "name": "Authorization",
-                                "env": "CHATGPT_ACCESS_TOKEN",
-                                "valuePrefix": "Bearer "
-                            }]
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chatgpt_responses",
+                            "model": "gpt-5.4-mini",
+                            "auth": {
+                                "type": "env_headers",
+                                "id": "custom-auth",
+                                "headers": [
+                                    {
+                                        "name": "Authorization",
+                                        "env": "CHATGPT_ACCESS_TOKEN",
+                                        "valuePrefix": "Bearer "
+                                    }
+                                ]
+                            }
                         }
                     }
-                }]
-            }"#,
-        )
+                ]
+            }
+        ))
         .unwrap();
 
         let BuiltInProviderConfig::ChatgptResponses { auth, .. } = &config.profiles[0].provider
@@ -1240,26 +1286,31 @@ mod tests {
 
     #[test]
     fn profile_config_loads_openai_responses_compaction() {
-        let config = serde_json::from_str::<HostProfileConfig>(
-            r#"{
-                "profiles": [{
-                    "profileId": "default",
-                    "displayName": "Default",
-                    "provider": {"type": "chatgpt_responses", "model": "gpt-5.4-mini"},
-                    "compaction": {
-                        "type": "openai_responses",
-                        "inputLimitModel": "gpt-5.4-mini",
-                        "compactModel": "gpt-5.4-mini",
-                        "inputLimitTokens": 200000,
-                        "triggerRatio": 0.8,
-                        "summaryBudgetTokens": 32000,
-                        "keepRecentTokens": 64000,
-                        "mode": "request_only",
-                        "requestTimeoutSecs": 120
+        let config = serde_json::from_value::<HostProfileConfig>(serde_json::json!(
+            {
+                "profiles": [
+                    {
+                        "profileId": "default",
+                        "displayName": "Default",
+                        "provider": {
+                            "type": "chatgpt_responses",
+                            "model": "gpt-5.4-mini"
+                        },
+                        "compaction": {
+                            "type": "openai_responses",
+                            "inputLimitModel": "gpt-5.4-mini",
+                            "compactModel": "gpt-5.4-mini",
+                            "inputLimitTokens": 200000,
+                            "triggerRatio": 0.8,
+                            "summaryBudgetTokens": 32000,
+                            "keepRecentTokens": 64000,
+                            "mode": "request_only",
+                            "requestTimeoutSecs": 120
+                        }
                     }
-                }]
-            }"#,
-        )
+                ]
+            }
+        ))
         .unwrap();
 
         let ProfileCompactionConfig::OpenaiResponses {

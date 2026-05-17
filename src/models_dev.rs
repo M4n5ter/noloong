@@ -99,6 +99,17 @@ impl ModelsDevRegistry {
             refresh_enabled: false,
         }
     }
+
+    #[cfg(test)]
+    pub fn from_value_for_tests(value: serde_json::Value) -> Self {
+        Self {
+            providers: serde_json::from_value(value)
+                .expect("test Models.dev registry value deserializes"),
+            cache_path: PathBuf::new(),
+            source_url: String::new(),
+            refresh_enabled: false,
+        }
+    }
 }
 
 async fn load_cache(path: &Path) -> Option<ModelsDevProviders> {
@@ -215,36 +226,32 @@ mod tests {
 
     #[test]
     fn input_limit_falls_back_to_context_limit() {
-        let registry = ModelsDevRegistry::from_json_for_tests(
-            r#"{
-                "acme": {
-                    "models": {
-                        "acme-1": {
-                            "limit": {"context": 128000, "output": 8192}
-                        }
+        let registry = ModelsDevRegistry::from_value_for_tests(serde_json::json!({
+            "acme": {
+                "models": {
+                    "acme-1": {
+                        "limit": {"context": 128000, "output": 8192}
                     }
                 }
-            }"#,
-        );
+            }
+        }));
 
         assert_eq!(registry.input_limit("acme", "acme-1"), Some(128_000));
     }
 
     #[tokio::test]
     async fn cache_loads_valid_registry_and_rejects_invalid_json() {
-        let path = write_temp_file(
-            "models-dev-cache",
-            "json",
-            r#"{
-                "openai": {
-                    "models": {
-                        "test-model": {
-                            "limit": {"context": 1000, "input": 900, "output": 100}
-                        }
+        let cache_json = serde_json::json!({
+            "openai": {
+                "models": {
+                    "test-model": {
+                        "limit": {"context": 1000, "input": 900, "output": 100}
                     }
                 }
-            }"#,
-        );
+            }
+        })
+        .to_string();
+        let path = write_temp_file("models-dev-cache", "json", &cache_json);
 
         let providers = super::load_cache(&path).await.expect("cache should parse");
         assert_eq!(
@@ -262,19 +269,17 @@ mod tests {
 
     #[tokio::test]
     async fn load_prefers_cache_over_snapshot_and_falls_back_when_cache_is_invalid() {
-        let path = write_temp_file(
-            "models-dev-load",
-            "json",
-            r#"{
-                "openai": {
-                    "models": {
-                        "gpt-5.4-mini": {
-                            "limit": {"context": 1000, "input": 900, "output": 100}
-                        }
+        let cache_json = serde_json::json!({
+            "openai": {
+                "models": {
+                    "gpt-5.4-mini": {
+                        "limit": {"context": 1000, "input": 900, "output": 100}
                     }
                 }
-            }"#,
-        );
+            }
+        })
+        .to_string();
+        let path = write_temp_file("models-dev-load", "json", &cache_json);
 
         let registry = ModelsDevRegistry::load(path.clone(), String::new(), false).await;
         assert_eq!(registry.input_limit("openai", "gpt-5.4-mini"), Some(900));
