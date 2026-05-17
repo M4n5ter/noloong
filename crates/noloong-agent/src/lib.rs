@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod client_state;
 pub mod host;
 pub mod i18n;
 pub mod interaction;
@@ -14,6 +15,9 @@ pub mod tools;
 mod text;
 
 pub use approval::{ApprovalPolicy, ApprovalReviewer, BuiltInApprovalHook};
+#[cfg(feature = "client-state-sqlite")]
+pub use client_state::SqliteClientStateStore;
+pub use client_state::{ClientStateError, ClientStateKey, ClientStateStore};
 pub use host::{HostEnvironment, Locale, PathStyle};
 pub use i18n::{Catalog, MessageKey};
 pub use interaction::{

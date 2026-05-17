@@ -1,5 +1,8 @@
 use super::{AgentSessionRecord, AutomationRecord, AutomationScheduleScan, GoalRecord};
-use crate::interaction::{InteractionError, InteractionFuture};
+use crate::interaction::{
+    AgentSessionListFilter, InteractionError, InteractionFuture, InteractionSessionStatus,
+};
+use serde_json::Value;
 
 pub trait AgentSessionRegistryStore: Send + Sync {
     /// Inserts a new session record.
@@ -15,7 +18,10 @@ pub trait AgentSessionRegistryStore: Send + Sync {
 
     fn get<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, Option<AgentSessionRecord>>;
 
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>>;
+    fn list<'a>(
+        &'a self,
+        filter: &'a AgentSessionListFilter,
+    ) -> InteractionFuture<'a, Vec<AgentSessionRecord>>;
 
     fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()>;
 
@@ -58,4 +64,46 @@ pub(in crate::interaction) fn duplicate_automation_error(automation_id: &str) ->
 
 pub(in crate::interaction) fn missing_automation_error(automation_id: &str) -> InteractionError {
     InteractionError::not_found(format!("automation not found: {automation_id}"))
+}
+
+pub(in crate::interaction) fn record_matches_session_list_filter(
+    record: &AgentSessionRecord,
+    filter: &AgentSessionListFilter,
+) -> bool {
+    if filter
+        .parent_session_id
+        .as_ref()
+        .is_some_and(|parent| record.parent_session_id.as_ref() != Some(parent))
+    {
+        return false;
+    }
+    if filter
+        .profile_id
+        .as_ref()
+        .is_some_and(|profile| &record.profile_id != profile)
+    {
+        return false;
+    }
+    if filter.status.as_ref().is_some_and(|status| {
+        *status != InteractionSessionStatus::from(record.state.status.clone())
+    }) {
+        return false;
+    }
+    filter
+        .metadata_equals
+        .iter()
+        .all(|(key, expected)| record.metadata.get(key) == Some(expected))
+}
+
+pub(in crate::interaction) fn session_metadata_filter_value_supported(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+}
+
+#[cfg(any(
+    feature = "registry-store-object",
+    feature = "registry-store-sqlite",
+    feature = "registry-store-postgres"
+))]
+pub(in crate::interaction) fn session_metadata_index_value(value: &Value) -> Option<String> {
+    session_metadata_filter_value_supported(value).then(|| value.to_string())
 }

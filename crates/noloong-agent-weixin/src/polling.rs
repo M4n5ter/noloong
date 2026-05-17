@@ -150,23 +150,35 @@ pub enum WeixinPollOutcome {
 #[derive(Clone)]
 struct MessageDeduplicator {
     ttl: Duration,
+    cleanup_interval: Duration,
+    next_cleanup_at: Instant,
     seen: BTreeMap<String, Instant>,
 }
 
 impl MessageDeduplicator {
     fn new(ttl: Duration) -> Self {
+        let cleanup_interval = ttl.min(Duration::from_secs(60)).max(Duration::from_secs(1));
+        let now = Instant::now();
         Self {
             ttl,
+            cleanup_interval,
+            next_cleanup_at: now + cleanup_interval,
             seen: BTreeMap::new(),
         }
     }
 
     fn seen(&mut self, key: &str) -> bool {
         let now = Instant::now();
-        self.seen
-            .retain(|_, seen_at| now.duration_since(*seen_at) <= self.ttl);
-        if self.seen.contains_key(key) {
-            return true;
+        if now >= self.next_cleanup_at {
+            self.seen
+                .retain(|_, seen_at| now.duration_since(*seen_at) <= self.ttl);
+            self.next_cleanup_at = now + self.cleanup_interval;
+        }
+        if let Some(seen_at) = self.seen.get(key).copied() {
+            if now.duration_since(seen_at) <= self.ttl {
+                return true;
+            }
+            self.seen.remove(key);
         }
         self.seen.insert(key.into(), now);
         false
@@ -248,10 +260,9 @@ mod tests {
             "noloong-weixin-polling-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let state = Arc::new(SqliteWeixinStateStore::new(
-            path.to_string_lossy().to_string(),
-            "account",
-        ));
+        let state = Arc::new(
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap(),
+        );
         let api = Arc::new(FakeWeixinApi {
             response: Mutex::new(WeixinUpdatesResponse {
                 get_updates_buf: "sync-2".into(),
@@ -280,10 +291,9 @@ mod tests {
             "noloong-weixin-polling-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let state = Arc::new(SqliteWeixinStateStore::new(
-            path.to_string_lossy().to_string(),
-            "account",
-        ));
+        let state = Arc::new(
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap(),
+        );
         let message = |message_id: &str| WeixinMessage {
             message_id: Some(message_id.into()),
             from_user_id: Some("u1".into()),

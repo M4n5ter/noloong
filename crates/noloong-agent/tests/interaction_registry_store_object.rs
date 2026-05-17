@@ -4,10 +4,10 @@ use noloong_agent::{
     AgentManifest, AgentSession, AutomationRecord, AutomationStatus, AutomationTarget,
     AutomationTimeSchedule, AutomationTrigger, GoalRecord,
     interaction::{
-        AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionRecord,
-        AgentSessionRegistry, AgentSessionRegistryStore, InteractionError, InteractionFuture,
-        InteractionProfileDescriptor, InteractionSessionStatus, OpenDalAgentSessionRegistryStore,
-        OpenDalAgentSessionRegistryStoreConfig,
+        AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionListFilter,
+        AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore, InteractionError,
+        InteractionFuture, InteractionProfileDescriptor, InteractionSessionStatus,
+        OpenDalAgentSessionRegistryStore, OpenDalAgentSessionRegistryStoreConfig,
     },
 };
 use noloong_agent_core::{
@@ -15,7 +15,7 @@ use noloong_agent_core::{
     ModelRequest, ModelStreamEvent, ModelStreamSink, RunStatus, StopReason,
 };
 use opendal::{Operator, services::Memory};
-use serde_json::Map;
+use serde_json::{Map, json};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -35,7 +35,10 @@ async fn object_store_insert_get_list_save_remove() {
     stored.role = Some("updated".into());
     store.save(stored).await.unwrap();
 
-    let listed = store.list().await.unwrap();
+    let listed = store
+        .list(&AgentSessionListFilter::default())
+        .await
+        .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].role.as_deref(), Some("updated"));
 
@@ -49,10 +52,42 @@ async fn object_store_key_encoding_is_path_safe() {
     let session_id = "root/with space/中文";
     store.insert(record(session_id)).await.unwrap();
 
-    let listed = store.list().await.unwrap();
+    let listed = store
+        .list(&AgentSessionListFilter::default())
+        .await
+        .unwrap();
 
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].session_id, session_id);
+}
+
+#[tokio::test]
+async fn object_store_filters_session_list_by_metadata() {
+    let store = object_store("session-metadata");
+    let mut telegram = record("telegram");
+    telegram
+        .metadata
+        .insert("channel".into(), json!("telegram"));
+    telegram.metadata.insert("chatId".into(), json!(42));
+    let mut weixin = record("weixin");
+    weixin.metadata.insert("channel".into(), json!("weixin"));
+    weixin.metadata.insert("chatId".into(), json!("42"));
+    store.insert(telegram).await.unwrap();
+    store.insert(weixin).await.unwrap();
+
+    let listed = store
+        .list(&AgentSessionListFilter {
+            metadata_equals: Map::from_iter([
+                ("channel".into(), json!("telegram")),
+                ("chatId".into(), json!(42)),
+            ]),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_id, "telegram");
 }
 
 #[tokio::test]
@@ -143,8 +178,21 @@ async fn object_store_prefix_isolation() {
 
     first.insert(record("root")).await.unwrap();
 
-    assert_eq!(first.list().await.unwrap().len(), 1);
-    assert!(second.list().await.unwrap().is_empty());
+    assert_eq!(
+        first
+            .list(&AgentSessionListFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        second
+            .list(&AgentSessionListFilter::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

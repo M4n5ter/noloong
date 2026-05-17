@@ -661,7 +661,10 @@ impl TelegramBridge {
         key: &TelegramSessionKey,
     ) -> TelegramBridgeResult<Vec<InteractionSessionDescriptor>> {
         let sessions = self
-            .request_as::<Vec<InteractionSessionDescriptor>>(METHOD_SESSION_LIST, json!({}))
+            .request_as::<Vec<InteractionSessionDescriptor>>(
+                METHOD_SESSION_LIST,
+                json!({"metadataEquals": telegram_session_metadata_filter(key)}),
+            )
             .await?;
         Ok(sessions
             .into_iter()
@@ -1042,6 +1045,19 @@ impl TelegramBridge {
         serde_json::from_value(value)
             .map_err(|error| TelegramBridgeError::Decode(error.to_string()))
     }
+}
+
+fn telegram_session_metadata_filter(key: &TelegramSessionKey) -> serde_json::Map<String, Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert(
+        TELEGRAM_METADATA_CHANNEL.into(),
+        json!(TELEGRAM_METADATA_CHANNEL_TELEGRAM),
+    );
+    filter.insert(TELEGRAM_METADATA_CHAT_ID.into(), json!(key.chat_id));
+    if let Some(thread_id) = key.thread_id {
+        filter.insert(TELEGRAM_METADATA_THREAD_ID.into(), json!(thread_id));
+    }
+    filter
 }
 
 fn session_belongs_to_telegram_key(
@@ -1567,7 +1583,6 @@ mod tests {
                 network: Default::default(),
                 file_policy: Default::default(),
                 startup_update_policy: Default::default(),
-                offset_checkpoint_path: None,
                 show_tool_status: true,
                 locale: noloong_agent::Locale::En,
             },

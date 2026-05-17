@@ -31,8 +31,6 @@ pub struct TelegramBridgeConfig {
     pub file_policy: TelegramFilePolicy,
     #[serde(default)]
     pub startup_update_policy: TelegramStartupUpdatePolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offset_checkpoint_path: Option<PathBuf>,
     #[serde(default = "default_show_tool_status")]
     pub show_tool_status: bool,
     #[serde(default = "default_locale")]
@@ -257,7 +255,7 @@ fn mime_type_matches(mime_types: &[String], mime_type: &str) -> bool {
 pub enum TelegramStartupUpdatePolicy {
     ProcessPending,
     #[default]
-    SkipPendingWithoutCheckpoint,
+    SkipPendingWithoutOffset,
 }
 
 impl FromStr for TelegramStartupUpdatePolicy {
@@ -266,7 +264,7 @@ impl FromStr for TelegramStartupUpdatePolicy {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "process_pending" => Ok(Self::ProcessPending),
-            "skip_pending_without_checkpoint" => Ok(Self::SkipPendingWithoutCheckpoint),
+            "skip_pending_without_offset" => Ok(Self::SkipPendingWithoutOffset),
             _ => Err(TelegramStartupUpdatePolicyParseError(value.into())),
         }
     }
@@ -346,7 +344,6 @@ mod tests {
             network: Default::default(),
             file_policy: Default::default(),
             startup_update_policy: Default::default(),
-            offset_checkpoint_path: None,
             show_tool_status: true,
             locale: noloong_agent::Locale::En,
         };
@@ -373,7 +370,6 @@ mod tests {
             network: Default::default(),
             file_policy: Default::default(),
             startup_update_policy: Default::default(),
-            offset_checkpoint_path: None,
             show_tool_status: true,
             locale: noloong_agent::Locale::En,
         };
@@ -395,10 +391,10 @@ mod tests {
             TelegramStartupUpdatePolicy::ProcessPending
         );
         assert_eq!(
-            "skip_pending_without_checkpoint"
+            "skip_pending_without_offset"
                 .parse::<TelegramStartupUpdatePolicy>()
                 .unwrap(),
-            TelegramStartupUpdatePolicy::SkipPendingWithoutCheckpoint
+            TelegramStartupUpdatePolicy::SkipPendingWithoutOffset
         );
         assert!("unknown".parse::<TelegramStartupUpdatePolicy>().is_err());
     }

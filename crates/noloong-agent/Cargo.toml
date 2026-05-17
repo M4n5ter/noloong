@@ -10,6 +10,7 @@ workspace = true
 default = []
 interaction-client = ["dep:futures-util", "dep:tokio-tungstenite"]
 interaction-http = ["dep:axum", "dep:futures-util"]
+client-state-sqlite = ["dep:rusqlite"]
 json-schema = ["dep:schemars", "noloong-agent-core/json-schema"]
 openai = ["dep:noloong-openai"]
 registry-store-object = ["dep:base64", "dep:opendal"]

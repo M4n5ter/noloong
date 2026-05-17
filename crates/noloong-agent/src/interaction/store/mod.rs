@@ -25,7 +25,14 @@ pub use snapshot::{
 #[cfg(any(feature = "registry-store-sqlite", feature = "registry-store-postgres"))]
 pub use sql::{SqlAgentSessionRegistryStore, SqlAgentSessionRegistryStoreConfig};
 pub use traits::AgentSessionRegistryStore;
+#[cfg(any(
+    feature = "registry-store-object",
+    feature = "registry-store-sqlite",
+    feature = "registry-store-postgres"
+))]
+pub(super) use traits::session_metadata_index_value;
 pub(super) use traits::{
     duplicate_automation_error, duplicate_session_error, missing_automation_error,
-    missing_session_error,
+    missing_session_error, record_matches_session_list_filter,
+    session_metadata_filter_value_supported,
 };

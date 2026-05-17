@@ -1,9 +1,11 @@
-use rusqlite::OptionalExtension;
+use noloong_agent::{ClientStateError, ClientStateKey, ClientStateStore, SqliteClientStateStore};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     future::Future,
     path::PathBuf,
     pin::Pin,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
@@ -48,16 +50,39 @@ pub trait WeixinStateStore: Send + Sync {
     ) -> WeixinStateFuture<'a, ()>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SqliteWeixinStateStore {
-    database_url: String,
+    state: Arc<dyn ClientStateStore>,
     account_fingerprint: String,
 }
 
+impl std::fmt::Debug for SqliteWeixinStateStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteWeixinStateStore")
+            .field("account_fingerprint", &self.account_fingerprint)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteWeixinStateStore {
-    pub fn new(database_url: impl Into<String>, account_fingerprint: impl Into<String>) -> Self {
+    pub fn new(
+        database_url: impl Into<String>,
+        account_fingerprint: impl Into<String>,
+    ) -> Result<Self, WeixinStateError> {
+        let state = SqliteClientStateStore::new(database_url.into())?;
+        Ok(Self::from_client_state(
+            Arc::new(state),
+            account_fingerprint,
+        ))
+    }
+
+    pub fn from_client_state(
+        state: Arc<dyn ClientStateStore>,
+        account_fingerprint: impl Into<String>,
+    ) -> Self {
         Self {
-            database_url: database_url.into(),
+            state,
             account_fingerprint: account_fingerprint.into(),
         }
     }
@@ -65,76 +90,51 @@ impl SqliteWeixinStateStore {
     pub fn account_fingerprint(&self) -> &str {
         &self.account_fingerprint
     }
+
+    fn key(&self, scope: &str, key: impl Into<String>) -> Result<ClientStateKey, WeixinStateError> {
+        ClientStateKey::new("weixin", &self.account_fingerprint, scope, key.into())
+            .map_err(WeixinStateError::client_state)
+    }
+
+    fn active_session_key(peer_id: &str, chat_kind: WeixinChatKind) -> String {
+        format!("{}:{peer_id}", chat_kind.as_str())
+    }
 }
 
 impl WeixinStateStore for SqliteWeixinStateStore {
     fn load_sync_buf<'a>(&'a self) -> WeixinStateFuture<'a, String> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .query_row(
-                        "SELECT sync_buf FROM weixin_sync_state WHERE account_fingerprint = ?1",
-                        [account_fingerprint],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map(|value| value.unwrap_or_default())
-                    .map_err(WeixinStateError::sqlite)
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key("sync", "buf")?;
+            match self.state.get(&key).await? {
+                Some(Value::String(sync_buf)) => Ok(sync_buf),
+                Some(value) => Err(WeixinStateError::Decode(format!(
+                    "weixin sync buffer is not a string: {value}"
+                ))),
+                None => Ok(String::new()),
+            }
         })
     }
 
     fn save_sync_buf<'a>(&'a self, sync_buf: &'a str) -> WeixinStateFuture<'a, ()> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let sync_buf = sync_buf.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .execute(
-                        "INSERT INTO weixin_sync_state (account_fingerprint, sync_buf, updated_at_ms)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(account_fingerprint) DO UPDATE SET
-                             sync_buf = excluded.sync_buf,
-                             updated_at_ms = excluded.updated_at_ms",
-                        rusqlite::params![account_fingerprint, sync_buf, current_unix_ms_i64()],
-                    )
-                    .map_err(WeixinStateError::sqlite)?;
-                Ok(())
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key("sync", "buf")?;
+            self.state.set(&key, &Value::String(sync_buf)).await?;
+            Ok(())
         })
     }
 
     fn context_token<'a>(&'a self, peer_id: &'a str) -> WeixinStateFuture<'a, Option<String>> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let peer_id = peer_id.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .query_row(
-                        "SELECT context_token FROM weixin_context_tokens
-                         WHERE account_fingerprint = ?1 AND peer_id = ?2",
-                        rusqlite::params![account_fingerprint, peer_id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(WeixinStateError::sqlite)
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key("contextToken", peer_id)?;
+            match self.state.get(&key).await? {
+                Some(Value::String(context_token)) => Ok(Some(context_token)),
+                Some(value) => Err(WeixinStateError::Decode(format!(
+                    "weixin context token is not a string: {value}"
+                ))),
+                None => Ok(None),
+            }
         })
     }
 
@@ -143,56 +143,21 @@ impl WeixinStateStore for SqliteWeixinStateStore {
         peer_id: &'a str,
         context_token: &'a str,
     ) -> WeixinStateFuture<'a, ()> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let peer_id = peer_id.to_owned();
         let context_token = context_token.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .execute(
-                        "INSERT INTO weixin_context_tokens
-                             (account_fingerprint, peer_id, context_token, updated_at_ms)
-                         VALUES (?1, ?2, ?3, ?4)
-                         ON CONFLICT(account_fingerprint, peer_id) DO UPDATE SET
-                             context_token = excluded.context_token,
-                             updated_at_ms = excluded.updated_at_ms",
-                        rusqlite::params![
-                            account_fingerprint,
-                            peer_id,
-                            context_token,
-                            current_unix_ms_i64()
-                        ],
-                    )
-                    .map_err(WeixinStateError::sqlite)?;
-                Ok(())
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key("contextToken", peer_id)?;
+            self.state.set(&key, &Value::String(context_token)).await?;
+            Ok(())
         })
     }
 
     fn delete_context_token<'a>(&'a self, peer_id: &'a str) -> WeixinStateFuture<'a, ()> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let peer_id = peer_id.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .execute(
-                        "DELETE FROM weixin_context_tokens
-                         WHERE account_fingerprint = ?1 AND peer_id = ?2",
-                        rusqlite::params![account_fingerprint, peer_id],
-                    )
-                    .map_err(WeixinStateError::sqlite)?;
-                Ok(())
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key("contextToken", peer_id)?;
+            self.state.delete(&key).await?;
+            Ok(())
         })
     }
 
@@ -201,25 +166,19 @@ impl WeixinStateStore for SqliteWeixinStateStore {
         peer_id: &'a str,
         chat_kind: WeixinChatKind,
     ) -> WeixinStateFuture<'a, Option<String>> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let peer_id = peer_id.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .query_row(
-                        "SELECT session_id FROM weixin_active_sessions
-                         WHERE account_fingerprint = ?1 AND peer_id = ?2 AND chat_kind = ?3",
-                        rusqlite::params![account_fingerprint, peer_id, chat_kind.as_str()],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(WeixinStateError::sqlite)
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key(
+                "activeSession",
+                SqliteWeixinStateStore::active_session_key(&peer_id, chat_kind),
+            )?;
+            match self.state.get(&key).await? {
+                Some(Value::String(session_id)) => Ok(Some(session_id)),
+                Some(value) => Err(WeixinStateError::Decode(format!(
+                    "weixin active session id is not a string: {value}"
+                ))),
+                None => Ok(None),
+            }
         })
     }
 
@@ -229,35 +188,15 @@ impl WeixinStateStore for SqliteWeixinStateStore {
         chat_kind: WeixinChatKind,
         session_id: &'a str,
     ) -> WeixinStateFuture<'a, ()> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let peer_id = peer_id.to_owned();
         let session_id = session_id.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .execute(
-                        "INSERT INTO weixin_active_sessions
-                             (account_fingerprint, peer_id, chat_kind, session_id, updated_at_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5)
-                         ON CONFLICT(account_fingerprint, peer_id, chat_kind) DO UPDATE SET
-                             session_id = excluded.session_id,
-                             updated_at_ms = excluded.updated_at_ms",
-                        rusqlite::params![
-                            account_fingerprint,
-                            peer_id,
-                            chat_kind.as_str(),
-                            session_id,
-                            current_unix_ms_i64()
-                        ],
-                    )
-                    .map_err(WeixinStateError::sqlite)?;
-                Ok(())
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key(
+                "activeSession",
+                SqliteWeixinStateStore::active_session_key(&peer_id, chat_kind),
+            )?;
+            self.state.set(&key, &Value::String(session_id)).await?;
+            Ok(())
         })
     }
 
@@ -266,24 +205,14 @@ impl WeixinStateStore for SqliteWeixinStateStore {
         peer_id: &'a str,
         chat_kind: WeixinChatKind,
     ) -> WeixinStateFuture<'a, ()> {
-        let database_url = self.database_url.clone();
-        let account_fingerprint = self.account_fingerprint.clone();
         let peer_id = peer_id.to_owned();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                let connection = open_sqlite_connection(&database_url)?;
-                ensure_schema(&connection)?;
-                connection
-                    .execute(
-                        "DELETE FROM weixin_active_sessions
-                         WHERE account_fingerprint = ?1 AND peer_id = ?2 AND chat_kind = ?3",
-                        rusqlite::params![account_fingerprint, peer_id, chat_kind.as_str()],
-                    )
-                    .map_err(WeixinStateError::sqlite)?;
-                Ok(())
-            })
-            .await
-            .map_err(WeixinStateError::join)?
+            let key = self.key(
+                "activeSession",
+                SqliteWeixinStateStore::active_session_key(&peer_id, chat_kind),
+            )?;
+            self.state.delete(&key).await?;
+            Ok(())
         })
     }
 }
@@ -362,82 +291,6 @@ fn set_owner_only_permissions(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn set_owner_only_permissions(_path: &std::path::Path) {}
 
-fn open_sqlite_connection(database_url: &str) -> Result<rusqlite::Connection, WeixinStateError> {
-    match sqlite_database_path(database_url)? {
-        Some(path) => {
-            if let Some(parent) = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    WeixinStateError::Io(format!("{}: {error}", parent.display()))
-                })?;
-            }
-            rusqlite::Connection::open(path).map_err(WeixinStateError::sqlite)
-        }
-        None => rusqlite::Connection::open_in_memory().map_err(WeixinStateError::sqlite),
-    }
-}
-
-fn ensure_schema(connection: &rusqlite::Connection) -> Result<(), WeixinStateError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS weixin_sync_state (
-                account_fingerprint TEXT PRIMARY KEY NOT NULL,
-                sync_buf TEXT NOT NULL,
-                updated_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS weixin_context_tokens (
-                account_fingerprint TEXT NOT NULL,
-                peer_id TEXT NOT NULL,
-                context_token TEXT NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                PRIMARY KEY(account_fingerprint, peer_id)
-            );
-            CREATE TABLE IF NOT EXISTS weixin_active_sessions (
-                account_fingerprint TEXT NOT NULL,
-                peer_id TEXT NOT NULL,
-                chat_kind TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                PRIMARY KEY(account_fingerprint, peer_id, chat_kind)
-            );",
-        )
-        .map_err(WeixinStateError::sqlite)?;
-    Ok(())
-}
-
-fn sqlite_database_path(database_url: &str) -> Result<Option<PathBuf>, WeixinStateError> {
-    match database_url {
-        "" => Err(WeixinStateError::Sqlite(
-            "sqlite database url is empty".into(),
-        )),
-        "sqlite::memory:" | "sqlite://memory" | ":memory:" => Ok(None),
-        url if url.starts_with("sqlite://") => {
-            sqlite_path_from_suffix(url.strip_prefix("sqlite://").unwrap_or_default())
-        }
-        url if url.starts_with("sqlite:") => {
-            sqlite_path_from_suffix(url.strip_prefix("sqlite:").unwrap_or_default())
-        }
-        url if url.contains("://") => Err(WeixinStateError::Sqlite(format!(
-            "weixin state database URL must be sqlite, got: {url}"
-        ))),
-        path => Ok(Some(PathBuf::from(path))),
-    }
-}
-
-fn sqlite_path_from_suffix(path: &str) -> Result<Option<PathBuf>, WeixinStateError> {
-    if path.is_empty() {
-        return Err(WeixinStateError::Sqlite(
-            "sqlite database path is empty".into(),
-        ));
-    }
-    if path == ":memory:" || path == "memory" {
-        return Ok(None);
-    }
-    Ok(Some(PathBuf::from(path)))
-}
-
 pub fn account_fingerprint(account_id: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in account_id.as_bytes() {
@@ -452,10 +305,6 @@ pub fn current_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or(0)
-}
-
-fn current_unix_ms_i64() -> i64 {
-    current_unix_ms().min(i64::MAX as u64) as i64
 }
 
 fn sanitize_file_component(value: &str) -> String {
@@ -482,6 +331,8 @@ pub enum WeixinStateError {
     Io(String),
     #[error("Weixin state decode failed: {0}")]
     Decode(String),
+    #[error("Weixin client state failed: {0}")]
+    ClientState(String),
     #[error("Weixin state sqlite failed: {0}")]
     Sqlite(String),
     #[error("Weixin state task failed: {0}")]
@@ -489,12 +340,14 @@ pub enum WeixinStateError {
 }
 
 impl WeixinStateError {
-    fn sqlite(error: impl std::fmt::Display) -> Self {
-        Self::Sqlite(error.to_string())
+    fn client_state(error: impl std::fmt::Display) -> Self {
+        Self::ClientState(error.to_string())
     }
+}
 
-    fn join(error: impl std::fmt::Display) -> Self {
-        Self::Join(error.to_string())
+impl From<ClientStateError> for WeixinStateError {
+    fn from(error: ClientStateError) -> Self {
+        Self::client_state(error)
     }
 }
 
@@ -509,7 +362,8 @@ mod tests {
             "noloong-weixin-state-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let store = SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account");
+        let store =
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap();
 
         assert_eq!(store.load_sync_buf().await.unwrap(), "");
         store.save_sync_buf("sync-1").await.unwrap();

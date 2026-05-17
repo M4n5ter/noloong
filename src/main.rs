@@ -16,9 +16,8 @@ use crate::{
         DEFAULT_TELEGRAM_DISABLE_FALLBACK_IPS_ENV, DEFAULT_TELEGRAM_FALLBACK_IPS_ENV,
         DEFAULT_TELEGRAM_FILE_DOWNLOAD_DIR_ENV, DEFAULT_TELEGRAM_FILE_INLINE_MAX_BYTES_ENV,
         DEFAULT_TELEGRAM_FILE_MAX_DOWNLOAD_BYTES_ENV, DEFAULT_TELEGRAM_FILE_RETENTION_SECONDS_ENV,
-        DEFAULT_TELEGRAM_LOCALE_ENV, DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV,
-        DEFAULT_TELEGRAM_PROXY_ENV, DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV,
-        DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
+        DEFAULT_TELEGRAM_LOCALE_ENV, DEFAULT_TELEGRAM_PROXY_ENV,
+        DEFAULT_TELEGRAM_REQUIRE_MENTION_ENV, DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV,
         DEFAULT_TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_ENV, DEFAULT_WEIXIN_ACCOUNT_ID_ENV,
         DEFAULT_WEIXIN_ALLOW_ALL_ENV, DEFAULT_WEIXIN_ALLOWED_USERS_ENV,
         DEFAULT_WEIXIN_BASE_URL_ENV, DEFAULT_WEIXIN_CDN_BASE_URL_ENV,
@@ -32,7 +31,7 @@ use crate::{
 };
 use clap::{Args, Parser, Subcommand};
 use noloong_agent::{
-    Locale, ManifestPatch,
+    Locale, ManifestPatch, SqliteClientStateStore,
     approval::{allow_decision, deny_decision},
     interaction::{
         InteractionCapabilityPolicy, InteractionClientError, InteractionControlHandler,
@@ -69,9 +68,8 @@ use noloong_agent_telegram::{
         discover_fallback_addrs, network_resolution_mode,
     },
     polling::{
-        FileTelegramOffsetStore, SqliteTelegramOffsetStore, TelegramCallbackQuery,
-        TelegramPollOutcome, TelegramPoller, TelegramPollingError, TelegramUpdate,
-        TelegramUpdateHandler, TelegramUpdateHandlerFuture,
+        ClientStateTelegramOffsetStore, TelegramCallbackQuery, TelegramPollOutcome, TelegramPoller,
+        TelegramPollingError, TelegramUpdate, TelegramUpdateHandler, TelegramUpdateHandlerFuture,
     },
     process::{
         PROCESS_OUTPUT_INLINE_CHAR_LIMIT, process_output_document_bytes, process_output_filename,
@@ -438,18 +436,15 @@ async fn run_telegram_bridge_with_config(
         catalog,
         bot_username: config.bot_username.clone(),
     });
+    let state_database_url = resolve_state_database_url()?;
+    ensure_sqlite_database_parent(&state_database_url)?;
+    let client_state = Arc::new(SqliteClientStateStore::new(&state_database_url)?);
     let mut poller = TelegramPoller::new(Arc::clone(&handler.api), handler)
-        .with_startup_update_policy(config.startup_update_policy);
-    if let Some(path) = config.offset_checkpoint_path.clone() {
-        poller = poller.with_offset_store(Arc::new(FileTelegramOffsetStore::new(path)));
-    } else {
-        let state_database_url = resolve_state_database_url()?;
-        ensure_sqlite_database_parent(&state_database_url)?;
-        poller = poller.with_offset_store(Arc::new(SqliteTelegramOffsetStore::new(
-            state_database_url,
+        .with_startup_update_policy(config.startup_update_policy)
+        .with_offset_store(Arc::new(ClientStateTelegramOffsetStore::new(
+            client_state,
             stable_fingerprint(&config.bot_token),
         )));
-    }
     poller.initialize().await.map_err(CliError::Polling)?;
     log::info!("telegram bridge initialized; polling started");
 
@@ -2226,9 +2221,6 @@ fn telegram_config_from_values(
         options.startup_update_policy,
         env_source(DEFAULT_TELEGRAM_STARTUP_UPDATE_POLICY_ENV),
     )?;
-    let offset_checkpoint_path = options.offset_checkpoint_path.clone().or_else(|| {
-        non_empty_option(env_source(DEFAULT_TELEGRAM_OFFSET_CHECKPOINT_ENV)).map(PathBuf::from)
-    });
     let network = TelegramNetworkConfig {
         proxy_url: non_empty_option(env_source(DEFAULT_TELEGRAM_PROXY_ENV)),
         fallback_ips: env_source(DEFAULT_TELEGRAM_FALLBACK_IPS_ENV)
@@ -2274,7 +2266,6 @@ fn telegram_config_from_values(
         network,
         file_policy,
         startup_update_policy,
-        offset_checkpoint_path,
         show_tool_status: true,
         locale,
     };
@@ -2573,8 +2564,6 @@ struct TelegramBridgeOptions {
     unsupported_media_fallback_to_file: Option<String>,
     #[arg(long = "telegram-startup-update-policy", value_parser = parse_telegram_startup_update_policy_arg)]
     startup_update_policy: Option<TelegramStartupUpdatePolicy>,
-    #[arg(long = "telegram-offset-checkpoint")]
-    offset_checkpoint_path: Option<PathBuf>,
     #[arg(long = "profile-id")]
     profile_id: Option<String>,
 }
@@ -2776,6 +2765,8 @@ enum CliError {
     Interaction(#[from] noloong_agent::interaction::InteractionError),
     #[error("interaction client failed: {0}")]
     InteractionClient(#[from] noloong_agent::interaction::InteractionClientError),
+    #[error("client state failed: {0}")]
+    ClientState(#[from] noloong_agent::ClientStateError),
     #[error("Telegram bridge failed: {0}")]
     TelegramBridge(#[from] noloong_agent_telegram::bridge::TelegramBridgeError),
     #[error("Telegram config failed: {0}")]
@@ -3586,7 +3577,11 @@ mod tests {
             .unwrap();
 
         let calls = fixture.interaction.calls();
-        assert!(calls.iter().any(|(method, _)| method == "session/list"));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "session/list"
+                && params["metadataEquals"]["channel"] == "telegram"
+                && params["metadataEquals"]["chatId"] == 42
+        }));
         assert!(calls.iter().any(|(method, params)| {
             method == "session/get" && params["sessionId"] == "telegram:42:session:9"
         }));

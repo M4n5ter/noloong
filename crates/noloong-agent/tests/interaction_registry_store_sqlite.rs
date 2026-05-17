@@ -5,9 +5,10 @@ use noloong_agent::{
     AutomationTimeSchedule, AutomationTrigger, GoalRecord,
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
-        AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore, InteractionError,
-        InteractionFuture, InteractionProfileDescriptor, InteractionSessionStatus,
-        SqlAgentSessionRegistryStore, SqlAgentSessionRegistryStoreConfig,
+        AgentSessionListFilter, AgentSessionRecord, AgentSessionRegistry,
+        AgentSessionRegistryStore, InteractionError, InteractionFuture,
+        InteractionProfileDescriptor, InteractionSessionStatus, SqlAgentSessionRegistryStore,
+        SqlAgentSessionRegistryStoreConfig,
     },
 };
 use noloong_agent_core::{
@@ -45,12 +46,48 @@ async fn sqlite_store_insert_get_list_save_remove() {
     stored.metadata.insert("updated".into(), json!(true));
     store.save(stored).await.unwrap();
 
-    let listed = store.list().await.unwrap();
+    let listed = store
+        .list(&AgentSessionListFilter::default())
+        .await
+        .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].metadata["updated"], true);
 
     store.remove("root").await.unwrap();
     assert!(store.get("root").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn sqlite_store_filters_session_list_by_metadata() {
+    let store = SqlAgentSessionRegistryStore::connect(
+        SqlAgentSessionRegistryStoreConfig::sqlite_in_memory(),
+    )
+    .await
+    .unwrap();
+    let mut telegram = record("telegram");
+    telegram
+        .metadata
+        .insert("channel".into(), json!("telegram"));
+    telegram.metadata.insert("chatId".into(), json!(42));
+    let mut weixin = record("weixin");
+    weixin.metadata.insert("channel".into(), json!("weixin"));
+    weixin.metadata.insert("chatId".into(), json!("42"));
+    store.insert(telegram).await.unwrap();
+    store.insert(weixin).await.unwrap();
+
+    let listed = store
+        .list(&AgentSessionListFilter {
+            metadata_equals: Map::from_iter([
+                ("channel".into(), json!("telegram")),
+                ("chatId".into(), json!(42)),
+            ]),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_id, "telegram");
 }
 
 #[tokio::test]

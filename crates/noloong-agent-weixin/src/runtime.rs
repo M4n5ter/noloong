@@ -51,7 +51,7 @@ pub async fn run_weixin_bridge_with_config(
     let state = Arc::new(SqliteWeixinStateStore::new(
         state_database_url,
         account_fingerprint,
-    )) as Arc<dyn WeixinStateStore>;
+    )?) as Arc<dyn WeixinStateStore>;
     let interaction = InteractionWsClient::connect(client_config).await?;
     let bridge = Arc::new(WeixinBridge::from_ws_client_with_state_store(
         config.clone(),
@@ -1343,6 +1343,8 @@ pub enum WeixinRuntimeError {
     Interaction(#[from] noloong_agent::interaction::InteractionError),
     #[error("HTTP client failed: {0}")]
     HttpClient(String),
+    #[error("{0}")]
+    State(#[from] crate::state::WeixinStateError),
     #[error("Weixin command failed: {0}")]
     Command(String),
     #[error("background task failed: {0}")]

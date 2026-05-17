@@ -14,12 +14,17 @@ use crate::{
 };
 use md5::{Digest, Md5};
 use noloong_agent_core::{AgentMessage, ContentBlock, MediaKind};
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
 const MEDIA_IMAGE: i64 = 1;
 const MEDIA_FILE: i64 = 3;
+const TYPING_TICKET_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct WeixinDelivery {
@@ -28,6 +33,19 @@ pub struct WeixinDelivery {
     cdn_base_url: String,
     max_message_chars: usize,
     max_upload_bytes: usize,
+    typing_tickets: Arc<Mutex<BTreeMap<TypingTicketKey, TypingTicketEntry>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TypingTicketKey {
+    peer_id: String,
+    context_token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct TypingTicketEntry {
+    ticket: String,
+    expires_at: Instant,
 }
 
 impl WeixinDelivery {
@@ -44,6 +62,7 @@ impl WeixinDelivery {
             cdn_base_url: cdn_base_url.into(),
             max_message_chars,
             max_upload_bytes,
+            typing_tickets: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -108,6 +127,22 @@ impl WeixinDelivery {
         active: bool,
     ) -> Result<(), WeixinDeliveryError> {
         let context_token = self.state.context_token(peer_id).await?;
+        let key = TypingTicketKey {
+            peer_id: peer_id.into(),
+            context_token: context_token.clone(),
+        };
+        if !active {
+            let Some(typing_ticket) = self.cached_typing_ticket(&key) else {
+                log::debug!(
+                    "weixin typing stop skipped; peer={} cached_ticket=false",
+                    safe_log_id(peer_id)
+                );
+                return Ok(());
+            };
+            return self
+                .send_typing_with_ticket(peer_id, typing_ticket, false, Some(&key))
+                .await;
+        }
         let config = self
             .api
             .get_config(WeixinGetConfigRequest {
@@ -122,18 +157,73 @@ impl WeixinDelivery {
             );
             return Ok(());
         };
-        self.api
+        self.remember_typing_ticket(key.clone(), typing_ticket.clone());
+        self.send_typing_with_ticket(peer_id, typing_ticket, true, Some(&key))
+            .await?;
+        Ok(())
+    }
+
+    async fn send_typing_with_ticket(
+        &self,
+        peer_id: &str,
+        typing_ticket: String,
+        active: bool,
+        key: Option<&TypingTicketKey>,
+    ) -> Result<(), WeixinDeliveryError> {
+        if let Err(error) = self
+            .api
             .send_typing(WeixinSendTypingRequest {
                 ilink_user_id: peer_id.into(),
                 typing_ticket,
                 status: if active { TYPING_START } else { TYPING_STOP },
             })
-            .await?;
+            .await
+        {
+            if let Some(key) = key {
+                self.forget_typing_ticket(key);
+            }
+            return Err(error.into());
+        }
         log::debug!(
             "weixin typing delivered; peer={} active={active}",
             safe_log_id(peer_id)
         );
         Ok(())
+    }
+
+    fn cached_typing_ticket(&self, key: &TypingTicketKey) -> Option<String> {
+        let now = Instant::now();
+        let mut tickets = self
+            .typing_tickets
+            .lock()
+            .expect("weixin typing ticket cache lock poisoned");
+        if let Some(entry) = tickets.get(key)
+            && entry.expires_at > now
+        {
+            return Some(entry.ticket.clone());
+        }
+        tickets.remove(key);
+        None
+    }
+
+    fn remember_typing_ticket(&self, key: TypingTicketKey, ticket: String) {
+        self.typing_tickets
+            .lock()
+            .expect("weixin typing ticket cache lock poisoned")
+            .insert(
+                key,
+                TypingTicketEntry {
+                    ticket,
+                    expires_at: Instant::now() + TYPING_TICKET_TTL,
+                },
+            );
+    }
+
+    fn forget_typing_ticket(&self, key: &TypingTicketKey) {
+        self.typing_tickets
+            .lock()
+            .expect("weixin typing ticket cache lock poisoned")
+            .remove(key);
     }
 
     async fn send_text_chunk(&self, peer_id: &str, text: &str) -> Result<(), WeixinDeliveryError> {
@@ -313,9 +403,9 @@ pub enum WeixinDeliveryError {
 mod tests {
     use crate::{
         ilink_api::{
-            ITEM_IMAGE, WeixinApi, WeixinApiError, WeixinApiFuture, WeixinConfigResponse,
-            WeixinGetConfigRequest, WeixinGetUploadUrlRequest, WeixinQrCode, WeixinQrStatus,
-            WeixinRawResponse, WeixinSendMessageRequest, WeixinSendMessageResponse,
+            ITEM_IMAGE, TYPING_START, TYPING_STOP, WeixinApi, WeixinApiError, WeixinApiFuture,
+            WeixinConfigResponse, WeixinGetConfigRequest, WeixinGetUploadUrlRequest, WeixinQrCode,
+            WeixinQrStatus, WeixinRawResponse, WeixinSendMessageRequest, WeixinSendMessageResponse,
             WeixinSendTypingRequest, WeixinUpdatesResponse, WeixinUploadUrlResponse,
         },
         media::aes128_ecb_decrypt,
@@ -334,10 +424,9 @@ mod tests {
             "noloong-weixin-delivery-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let state = Arc::new(SqliteWeixinStateStore::new(
-            path.to_string_lossy().to_string(),
-            "account",
-        ));
+        let state = Arc::new(
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap(),
+        );
         state.save_context_token("user", "ctx").await.unwrap();
         let api = Arc::new(FakeWeixinApi::session_expired_once());
         let delivery = WeixinDelivery::new(
@@ -366,10 +455,9 @@ mod tests {
             "noloong-weixin-delivery-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let state = Arc::new(SqliteWeixinStateStore::new(
-            path.to_string_lossy().to_string(),
-            "account",
-        ));
+        let state = Arc::new(
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap(),
+        );
         state.save_context_token("user", "ctx").await.unwrap();
         let api = Arc::new(FakeWeixinApi::with_upload_param("upload param"));
         let delivery = WeixinDelivery::new(
@@ -438,10 +526,9 @@ mod tests {
             "noloong-weixin-display-media-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let state = Arc::new(SqliteWeixinStateStore::new(
-            path.to_string_lossy().to_string(),
-            "account",
-        ));
+        let state = Arc::new(
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap(),
+        );
         state.save_context_token("user", "ctx").await.unwrap();
         let api = Arc::new(FakeWeixinApi::with_upload_param("upload param"));
         let delivery = WeixinDelivery::new(
@@ -498,13 +585,46 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn typing_stop_reuses_cached_ticket_without_get_config() {
+        let path = std::env::temp_dir().join(format!(
+            "noloong-weixin-typing-{}.sqlite",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let state = Arc::new(
+            SqliteWeixinStateStore::new(path.to_string_lossy().to_string(), "account").unwrap(),
+        );
+        state.save_context_token("user", "ctx").await.unwrap();
+        let api = Arc::new(FakeWeixinApi::with_typing_ticket("ticket-1"));
+        let delivery = WeixinDelivery::new(
+            api.clone(),
+            state,
+            "https://novac2c.cdn.weixin.qq.com/c2c",
+            3500,
+            1024,
+        );
+
+        delivery.send_typing("user", true).await.unwrap();
+        delivery.send_typing("user", false).await.unwrap();
+
+        assert_eq!(api.config_requests.lock().unwrap().len(), 1);
+        let typing_requests = api.typing_requests.lock().unwrap();
+        assert_eq!(typing_requests.len(), 2);
+        assert_eq!(typing_requests[0].status, TYPING_START);
+        assert_eq!(typing_requests[1].status, TYPING_STOP);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[derive(Default)]
     struct FakeWeixinApi {
         fail_first: Mutex<bool>,
         requests: Mutex<Vec<WeixinSendMessageRequest>>,
+        typing_requests: Mutex<Vec<WeixinSendTypingRequest>>,
+        config_requests: Mutex<Vec<WeixinGetConfigRequest>>,
         upload_requests: Mutex<Vec<WeixinGetUploadUrlRequest>>,
         uploads: Mutex<Vec<(String, Vec<u8>)>>,
         upload_response: Mutex<WeixinUploadUrlResponse>,
+        typing_ticket: Mutex<Option<String>>,
     }
 
     impl FakeWeixinApi {
@@ -512,9 +632,12 @@ mod tests {
             Self {
                 fail_first: Mutex::new(true),
                 requests: Mutex::new(Vec::new()),
+                typing_requests: Mutex::new(Vec::new()),
+                config_requests: Mutex::new(Vec::new()),
                 upload_requests: Mutex::new(Vec::new()),
                 uploads: Mutex::new(Vec::new()),
                 upload_response: Mutex::new(WeixinUploadUrlResponse::default()),
+                typing_ticket: Mutex::new(None),
             }
         }
 
@@ -524,6 +647,13 @@ mod tests {
                     upload_param: Some(upload_param.into()),
                     ..Default::default()
                 }),
+                ..Default::default()
+            }
+        }
+
+        fn with_typing_ticket(ticket: impl Into<String>) -> Self {
+            Self {
+                typing_ticket: Mutex::new(Some(ticket.into())),
                 ..Default::default()
             }
         }
@@ -558,16 +688,25 @@ mod tests {
 
         fn send_typing<'a>(
             &'a self,
-            _request: WeixinSendTypingRequest,
+            request: WeixinSendTypingRequest,
         ) -> WeixinApiFuture<'a, WeixinRawResponse> {
-            Box::pin(async { Ok(WeixinRawResponse::default()) })
+            Box::pin(async move {
+                self.typing_requests.lock().unwrap().push(request);
+                Ok(WeixinRawResponse::default())
+            })
         }
 
         fn get_config<'a>(
             &'a self,
-            _request: WeixinGetConfigRequest,
+            request: WeixinGetConfigRequest,
         ) -> WeixinApiFuture<'a, WeixinConfigResponse> {
-            Box::pin(async { Ok(WeixinConfigResponse::default()) })
+            Box::pin(async move {
+                self.config_requests.lock().unwrap().push(request);
+                Ok(WeixinConfigResponse {
+                    typing_ticket: self.typing_ticket.lock().unwrap().clone(),
+                    ..Default::default()
+                })
+            })
         }
 
         fn get_upload_url<'a>(

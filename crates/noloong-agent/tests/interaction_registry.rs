@@ -301,12 +301,65 @@ async fn registry_filters_unloaded_sessions() {
             parent_session_id: Some("parent".into()),
             profile_id: Some("default".into()),
             status: Some(InteractionSessionStatus::Completed),
+            ..AgentSessionListFilter::default()
         })
         .await
         .unwrap();
 
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].session_id, "child");
+}
+
+#[tokio::test]
+async fn registry_filters_sessions_by_metadata_equals() {
+    let store = Arc::new(InMemoryAgentSessionRegistryStore::default());
+    let mut telegram = stored_record("telegram");
+    telegram
+        .metadata
+        .insert("channel".into(), json!("telegram"));
+    telegram.metadata.insert("chatId".into(), json!(42));
+    telegram.metadata.insert("threaded".into(), json!(false));
+    let mut weixin = stored_record("weixin");
+    weixin.metadata.insert("channel".into(), json!("weixin"));
+    weixin.metadata.insert("chatId".into(), json!("42"));
+    store.insert(telegram).await.unwrap();
+    store.insert(weixin).await.unwrap();
+    let registry = AgentSessionRegistry::with_store(
+        "default",
+        vec![text_profile("default")],
+        store as Arc<dyn AgentSessionRegistryStore>,
+    )
+    .unwrap();
+
+    let listed = registry
+        .list(AgentSessionListFilter {
+            metadata_equals: Map::from_iter([
+                ("channel".into(), json!("telegram")),
+                ("chatId".into(), json!(42)),
+                ("threaded".into(), json!(false)),
+            ]),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_id, "telegram");
+}
+
+#[tokio::test]
+async fn registry_rejects_non_scalar_metadata_filter_values() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+
+    let error = registry
+        .list(AgentSessionListFilter {
+            metadata_equals: Map::from_iter([("channel".into(), json!({"name": "telegram"}))]),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.message.contains("must be a string, number, or bool"));
 }
 
 #[tokio::test]
@@ -1035,6 +1088,7 @@ async fn interaction_registry_filters_by_parent_profile_and_status() {
             parent_session_id: Some("parent".into()),
             profile_id: Some("default".into()),
             status: Some(InteractionSessionStatus::Idle),
+            ..AgentSessionListFilter::default()
         })
         .await
         .unwrap();
@@ -2205,8 +2259,11 @@ impl AgentSessionRegistryStore for CountingSaveStore {
         self.inner.get(session_id)
     }
 
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
-        self.inner.list()
+    fn list<'a>(
+        &'a self,
+        filter: &'a AgentSessionListFilter,
+    ) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
+        self.inner.list(filter)
     }
 
     fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()> {
@@ -2290,8 +2347,11 @@ impl AgentSessionRegistryStore for FailingSaveStore {
         self.inner.get(session_id)
     }
 
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
-        self.inner.list()
+    fn list<'a>(
+        &'a self,
+        filter: &'a AgentSessionListFilter,
+    ) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
+        self.inner.list(filter)
     }
 
     fn save_goal<'a>(&'a self, goal: GoalRecord) -> InteractionFuture<'a, ()> {

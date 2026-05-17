@@ -1,9 +1,9 @@
 use super::{
     AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, AutomationScheduleScan,
     AutomationScheduleScanBuilder, GoalRecord, duplicate_automation_error, duplicate_session_error,
-    missing_automation_error, missing_session_error,
+    missing_automation_error, missing_session_error, record_matches_session_list_filter,
 };
-use crate::interaction::InteractionFuture;
+use crate::interaction::{AgentSessionListFilter, InteractionFuture};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -66,13 +66,17 @@ impl AgentSessionRegistryStore for InMemoryAgentSessionRegistryStore {
         })
     }
 
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
+    fn list<'a>(
+        &'a self,
+        filter: &'a AgentSessionListFilter,
+    ) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
         Box::pin(async move {
             Ok(self
                 .records
                 .lock()
                 .expect("interaction session store lock poisoned")
                 .values()
+                .filter(|record| record_matches_session_list_filter(record, filter))
                 .cloned()
                 .collect())
         })

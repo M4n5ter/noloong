@@ -842,7 +842,10 @@ impl WeixinBridge {
         key: &WeixinSessionKey,
     ) -> WeixinBridgeResult<Vec<InteractionSessionDescriptor>> {
         let sessions = self
-            .request_as::<Vec<InteractionSessionDescriptor>>(METHOD_SESSION_LIST, json!({}))
+            .request_as::<Vec<InteractionSessionDescriptor>>(
+                METHOD_SESSION_LIST,
+                json!({"metadataEquals": weixin_session_metadata_filter(key)}),
+            )
             .await?;
         Ok(sessions
             .into_iter()
@@ -1053,6 +1056,10 @@ impl WeixinBridge {
         let value = self.interaction.request_value(method, params).await?;
         serde_json::from_value(value).map_err(|error| WeixinBridgeError::Decode(error.to_string()))
     }
+}
+
+fn weixin_session_metadata_filter(key: &WeixinSessionKey) -> serde_json::Map<String, Value> {
+    weixin_session_metadata(&key.account_id, &key.peer_id, key.chat_kind)
 }
 
 fn session_belongs_to_weixin_key(
@@ -1291,6 +1298,10 @@ mod tests {
         assert_eq!(calls[0].0, "initialize");
         assert_eq!(calls[0].1["requestedUx"]["streamText"], false);
         assert_eq!(calls[1].0, "session/list");
+        assert_eq!(calls[1].1["metadataEquals"]["channel"], "weixin");
+        assert_eq!(calls[1].1["metadataEquals"]["accountId"], "bot");
+        assert_eq!(calls[1].1["metadataEquals"]["peerId"], "u1");
+        assert_eq!(calls[1].1["metadataEquals"]["chatKind"], "dm");
         assert_eq!(calls[2].0, "session/create");
         assert_eq!(calls[2].1["metadata"]["channel"], "weixin");
         assert_eq!(calls[3].0, "display/subscribe");
@@ -1352,6 +1363,10 @@ mod tests {
 
         let calls = fake.calls();
         assert_eq!(calls[1].0, "session/list");
+        assert_eq!(calls[1].1["metadataEquals"]["channel"], "weixin");
+        assert_eq!(calls[1].1["metadataEquals"]["accountId"], "bot");
+        assert_eq!(calls[1].1["metadataEquals"]["peerId"], "u1");
+        assert_eq!(calls[1].1["metadataEquals"]["chatKind"], "dm");
         assert_eq!(calls[2].0, "display/subscribe");
         assert_eq!(calls[3].0, "agent/prompt");
         assert!(!calls.iter().any(|(method, _)| method == "session/create"));
@@ -1363,10 +1378,13 @@ mod tests {
             "noloong-weixin-active-session-{}.sqlite",
             uuid::Uuid::new_v4().simple()
         ));
-        let state = Arc::new(crate::state::SqliteWeixinStateStore::new(
-            path.to_string_lossy().to_string(),
-            "account",
-        ));
+        let state = Arc::new(
+            crate::state::SqliteWeixinStateStore::new(
+                path.to_string_lossy().to_string(),
+                "account",
+            )
+            .unwrap(),
+        );
         let state_store: Arc<dyn crate::state::WeixinStateStore> = state.clone();
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
@@ -1481,6 +1499,10 @@ mod tests {
 
         let calls = fake.calls();
         assert_eq!(calls[1].0, "session/list");
+        assert_eq!(calls[1].1["metadataEquals"]["channel"], "weixin");
+        assert_eq!(calls[1].1["metadataEquals"]["accountId"], "bot");
+        assert_eq!(calls[1].1["metadataEquals"]["peerId"], "u1");
+        assert_eq!(calls[1].1["metadataEquals"]["chatKind"], "dm");
         assert_eq!(calls[2].0, "session/delete");
         assert_eq!(calls[2].1["sessionId"], "weixin:bot:u1");
         assert_eq!(calls[2].1["forceAbort"], true);

@@ -1082,6 +1082,58 @@ async fn interaction_control_get_reports_interrupted_session() {
 }
 
 #[tokio::test]
+async fn interaction_control_session_list_filters_metadata_and_rejects_nested_values() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("telegram".into()),
+            metadata: Map::from_iter([
+                ("channel".into(), json!("telegram")),
+                ("chatId".into(), json!(42)),
+            ]),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("weixin".into()),
+            metadata: Map::from_iter([("channel".into(), json!("weixin"))]),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let handler =
+        InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all());
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(1, "initialize", json!({"name": "session-client"})),
+            rpc(
+                2,
+                "session/list",
+                json!({"metadataEquals": {"channel": "telegram", "chatId": 42}}),
+            ),
+            rpc(
+                3,
+                "session/list",
+                json!({"metadataEquals": {"channel": {"nested": true}}}),
+            ),
+            rpc(4, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response(&messages, 2)["result"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(response(&messages, 2)["result"][0]["sessionId"], "telegram");
+    assert_eq!(response(&messages, 3)["error"]["code"], -32602);
+}
+
+#[tokio::test]
 async fn interaction_control_lists_reads_and_controls_processes() {
     let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
     registry

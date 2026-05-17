@@ -2,10 +2,14 @@ use super::codec::{decode_record_json, encode_record_json};
 use super::{
     AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, AutomationScheduleScan,
     AutomationScheduleScanBuilder, GoalRecord, duplicate_automation_error, duplicate_session_error,
-    missing_automation_error,
+    missing_automation_error, record_matches_session_list_filter, session_metadata_index_value,
 };
-use crate::interaction::{AutomationStatus, GoalStatus, InteractionError, InteractionFuture};
+use crate::interaction::{
+    AgentSessionListFilter, AutomationStatus, GoalStatus, InteractionError, InteractionFuture,
+};
 use noloong_agent_core::RunStatus;
+use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 #[cfg(feature = "registry-store-sqlite")]
 use std::path::{Path, PathBuf};
 use toasty::stmt::{List, Query};
@@ -18,6 +22,7 @@ use toasty_driver_sqlite::Sqlite;
 #[cfg(feature = "registry-store-sqlite")]
 const SQLITE_REGISTRY_TABLES: &[&str] = &[
     "stored_agent_sessions",
+    "stored_agent_session_metadata",
     "stored_goals",
     "stored_automations",
 ];
@@ -86,6 +91,91 @@ impl SqlAgentSessionRegistryStore {
         }
         Ok(Self { db })
     }
+
+    async fn save_session_metadata_index(
+        &self,
+        session_id: &str,
+        metadata: &Map<String, Value>,
+    ) -> Result<(), InteractionError> {
+        let mut db = self.db.clone();
+        session_metadata_query_for_session(session_id)
+            .delete()
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+        for (key, value) in metadata {
+            let Some(metadata_value) = session_metadata_index_value(value) else {
+                continue;
+            };
+            toasty::create!(StoredAgentSessionMetadata {
+                metadata_id: session_metadata_id(session_id, key),
+                session_id: session_id.to_owned(),
+                metadata_key: key.clone(),
+                metadata_value,
+            })
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+        }
+        Ok(())
+    }
+
+    async fn remove_session_metadata_index(
+        &self,
+        session_id: &str,
+    ) -> Result<(), InteractionError> {
+        let mut db = self.db.clone();
+        session_metadata_query_for_session(session_id)
+            .delete()
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+        Ok(())
+    }
+
+    async fn metadata_session_candidates(
+        &self,
+        filter: &AgentSessionListFilter,
+    ) -> Result<Option<BTreeSet<String>>, InteractionError> {
+        if filter.metadata_equals.is_empty() {
+            return Ok(None);
+        }
+        let mut candidate_ids: Option<BTreeSet<String>> = None;
+        for (key, value) in &filter.metadata_equals {
+            let Some(metadata_value) = session_metadata_index_value(value) else {
+                return Ok(Some(BTreeSet::new()));
+            };
+            let mut db = self.db.clone();
+            let rows = Query::<List<StoredAgentSessionMetadata>>::filter(
+                StoredAgentSessionMetadata::fields()
+                    .metadata_key()
+                    .eq(key.clone())
+                    .and(
+                        StoredAgentSessionMetadata::fields()
+                            .metadata_value()
+                            .eq(metadata_value),
+                    ),
+            )
+            .exec(&mut db)
+            .await
+            .map_err(to_store_error)?;
+            let matching_ids = rows
+                .into_iter()
+                .map(|row| row.session_id)
+                .collect::<BTreeSet<_>>();
+            candidate_ids = Some(match candidate_ids {
+                Some(existing) => existing
+                    .intersection(&matching_ids)
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                None => matching_ids,
+            });
+            if candidate_ids.as_ref().is_some_and(BTreeSet::is_empty) {
+                break;
+            }
+        }
+        Ok(candidate_ids)
+    }
 }
 
 impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
@@ -94,8 +184,10 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
             if self.get(&record.session_id).await?.is_some() {
                 return Err(duplicate_session_error(&record.session_id));
             }
+            let metadata = record.metadata.clone();
             let mut db = self.db.clone();
             let row = row_from_record(record)?;
+            let session_id = row.session_id.clone();
             toasty::create!(StoredAgentSession {
                 session_id: row.session_id,
                 profile_id: row.profile_id,
@@ -109,6 +201,8 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
             .exec(&mut db)
             .await
             .map_err(to_store_error)?;
+            self.save_session_metadata_index(&session_id, &metadata)
+                .await?;
             Ok(())
         })
     }
@@ -118,8 +212,10 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
             if self.get(&record.session_id).await?.is_none() {
                 return Err(super::missing_session_error(&record.session_id));
             }
+            let metadata = record.metadata.clone();
             let mut db = self.db.clone();
             let row = row_from_record(record)?;
+            let session_id = row.session_id.clone();
             StoredAgentSession::filter_by_session_id(row.session_id)
                 .update()
                 .profile_id(row.profile_id)
@@ -132,6 +228,8 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
                 .exec(&mut db)
                 .await
                 .map_err(to_store_error)?;
+            self.save_session_metadata_index(&session_id, &metadata)
+                .await?;
             Ok(())
         })
     }
@@ -144,6 +242,7 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
                 .exec(&mut db)
                 .await
                 .map_err(to_store_error)?;
+            self.remove_session_metadata_index(session_id).await?;
             Ok(())
         })
     }
@@ -159,14 +258,42 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
         })
     }
 
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
+    fn list<'a>(
+        &'a self,
+        filter: &'a AgentSessionListFilter,
+    ) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
         Box::pin(async move {
-            let mut db = self.db.clone();
-            let rows = Query::<List<StoredAgentSession>>::all()
-                .exec(&mut db)
-                .await
-                .map_err(to_store_error)?;
-            rows.into_iter().map(decode_row).collect()
+            let rows = if let Some(candidate_ids) = self.metadata_session_candidates(filter).await?
+            {
+                let mut rows = Vec::new();
+                for session_id in candidate_ids {
+                    let mut db = self.db.clone();
+                    rows.extend(
+                        session_query(&session_id)
+                            .exec(&mut db)
+                            .await
+                            .map_err(to_store_error)?,
+                    );
+                }
+                rows
+            } else {
+                let mut db = self.db.clone();
+                Query::<List<StoredAgentSession>>::all()
+                    .exec(&mut db)
+                    .await
+                    .map_err(to_store_error)?
+            };
+            rows.into_iter()
+                .filter(|row| session_row_matches_filter(row, filter))
+                .map(decode_row)
+                .filter_map(|record| match record {
+                    Ok(record) if record_matches_session_list_filter(&record, filter) => {
+                        Some(Ok(record))
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect()
         })
     }
 
@@ -389,6 +516,16 @@ struct StoredAgentSession {
 }
 
 #[derive(Debug, toasty::Model)]
+#[table = "stored_agent_session_metadata"]
+struct StoredAgentSessionMetadata {
+    #[key]
+    metadata_id: String,
+    session_id: String,
+    metadata_key: String,
+    metadata_value: String,
+}
+
+#[derive(Debug, toasty::Model)]
 #[table = "stored_goals"]
 struct StoredGoal {
     #[key]
@@ -452,6 +589,7 @@ impl SqlStoreLocation {
         let mut builder = toasty::Db::builder();
         builder.models(toasty::models!(
             StoredAgentSession,
+            StoredAgentSessionMetadata,
             StoredGoal,
             StoredAutomation
         ));
@@ -592,6 +730,31 @@ fn row_from_record(record: AgentSessionRecord) -> Result<StoredAgentSession, Int
     })
 }
 
+fn session_row_matches_filter(row: &StoredAgentSession, filter: &AgentSessionListFilter) -> bool {
+    if filter
+        .parent_session_id
+        .as_ref()
+        .is_some_and(|parent| row.parent_session_id.as_ref() != Some(parent))
+    {
+        return false;
+    }
+    if filter
+        .profile_id
+        .as_ref()
+        .is_some_and(|profile| &row.profile_id != profile)
+    {
+        return false;
+    }
+    if filter
+        .status
+        .as_ref()
+        .is_some_and(|status| row.status != status.as_str())
+    {
+        return false;
+    }
+    true
+}
+
 fn decode_row(row: StoredAgentSession) -> Result<AgentSessionRecord, InteractionError> {
     let record = decode_record_json(&row.session_id, row.record_json.as_bytes())?;
     validate_row_consistency(&row, &record)?;
@@ -626,6 +789,18 @@ fn session_query(session_id: &str) -> Query<List<StoredAgentSession>> {
             .session_id()
             .eq(session_id.to_string()),
     )
+}
+
+fn session_metadata_query_for_session(session_id: &str) -> Query<List<StoredAgentSessionMetadata>> {
+    Query::<List<StoredAgentSessionMetadata>>::filter(
+        StoredAgentSessionMetadata::fields()
+            .session_id()
+            .eq(session_id.to_string()),
+    )
+}
+
+fn session_metadata_id(session_id: &str, key: &str) -> String {
+    serde_json::to_string(&(session_id, key)).expect("metadata id tuple serializes")
 }
 
 fn goal_query(session_id: &str) -> Query<List<StoredGoal>> {

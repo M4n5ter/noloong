@@ -3,8 +3,9 @@
 use noloong_agent::{
     AgentManifest,
     interaction::{
-        AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentSessionRecord, AgentSessionRegistryStore,
-        SqlAgentSessionRegistryStore, SqlAgentSessionRegistryStoreConfig,
+        AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentSessionListFilter, AgentSessionRecord,
+        AgentSessionRegistryStore, SqlAgentSessionRegistryStore,
+        SqlAgentSessionRegistryStoreConfig,
     },
 };
 use noloong_agent_core::{AgentMessage, AgentState, RunStatus};
@@ -32,7 +33,10 @@ async fn postgres_store_round_trips_when_url_is_available() {
     stored.metadata.insert("backend".into(), json!("postgres"));
     store.save(stored).await.unwrap();
 
-    let listed = store.list().await.unwrap();
+    let listed = store
+        .list(&AgentSessionListFilter::default())
+        .await
+        .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].metadata["backend"], "postgres");
 

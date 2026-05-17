@@ -10,6 +10,7 @@ use super::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentSessionQueueSnapshot, AgentSessionQueueState,
         AgentSessionRecord, AgentSessionRegistryStore, InMemoryAgentSessionRegistryStore,
         current_unix_ms, duplicate_session_error, missing_automation_error, missing_session_error,
+        record_matches_session_list_filter, session_metadata_filter_value_supported,
     },
     trim_non_empty,
 };
@@ -150,6 +151,26 @@ pub struct AgentSessionListFilter {
     pub profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<InteractionSessionStatus>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub metadata_equals: Map<String, Value>,
+}
+
+impl AgentSessionListFilter {
+    pub fn validate(&self) -> Result<(), InteractionError> {
+        for (key, value) in &self.metadata_equals {
+            if key.trim().is_empty() {
+                return Err(InteractionError::invalid_params(
+                    "session metadata filter keys must not be empty",
+                ));
+            }
+            if !session_metadata_filter_value_supported(value) {
+                return Err(InteractionError::invalid_params(format!(
+                    "session metadata filter value for {key} must be a string, number, or bool"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -460,16 +481,15 @@ impl AgentSessionRegistry {
         &self,
         filter: AgentSessionListFilter,
     ) -> Result<Vec<InteractionSessionDescriptor>, InteractionError> {
+        filter.validate()?;
         let mut descriptors = BTreeMap::new();
-        for record in self.inner.store.list().await? {
+        for record in self.inner.store.list(&filter).await? {
             let record = self.normalize_record(record).await?;
-            if !record_filter_matches(&record, &filter) {
+            if !record_matches_session_list_filter(&record, &filter) {
                 continue;
             }
             let descriptor = descriptor_from_record(&record);
-            if status_filter_matches(&descriptor, &filter) {
-                descriptors.insert(descriptor.session_id.clone(), descriptor);
-            }
+            descriptors.insert(descriptor.session_id.clone(), descriptor);
         }
 
         let sessions = self
@@ -481,13 +501,11 @@ impl AgentSessionRegistry {
             .cloned()
             .collect::<Vec<_>>();
         for session in sessions {
-            if !record_filter_matches(&session.record(), &filter) {
+            if !record_matches_session_list_filter(&session.record(), &filter) {
                 continue;
             }
             let descriptor = session.descriptor().await;
-            if status_filter_matches(&descriptor, &filter) {
-                descriptors.insert(descriptor.session_id.clone(), descriptor);
-            }
+            descriptors.insert(descriptor.session_id.clone(), descriptor);
         }
         Ok(descriptors.into_values().collect())
     }
@@ -1609,38 +1627,6 @@ fn manifest_for_request(
         .validate()
         .map_err(|error| InteractionError::invalid_params(error.to_string()))?;
     Ok(manifest)
-}
-
-fn record_filter_matches(record: &AgentSessionRecord, filter: &AgentSessionListFilter) -> bool {
-    if filter
-        .parent_session_id
-        .as_ref()
-        .is_some_and(|parent| record.parent_session_id.as_ref() != Some(parent))
-    {
-        return false;
-    }
-    if filter
-        .profile_id
-        .as_ref()
-        .is_some_and(|profile| &record.profile_id != profile)
-    {
-        return false;
-    }
-    true
-}
-
-fn status_filter_matches(
-    descriptor: &InteractionSessionDescriptor,
-    filter: &AgentSessionListFilter,
-) -> bool {
-    if filter
-        .status
-        .as_ref()
-        .is_some_and(|status| &descriptor.status != status)
-    {
-        return false;
-    }
-    true
 }
 
 impl From<RunStatus> for AgentSessionListFilter {

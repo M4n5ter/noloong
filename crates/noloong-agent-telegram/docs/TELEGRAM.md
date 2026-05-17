@@ -93,7 +93,7 @@ The JSONC variant, `examples/profile-configs/telegram-openrouter-free.jsonc`, in
       "video": { "mode": "native" }
     }
   },
-  "startupUpdatePolicy": "skip_pending_without_checkpoint"
+  "startupUpdatePolicy": "skip_pending_without_offset"
 }
 ```
 
@@ -156,7 +156,6 @@ Bridge environment variables:
 - `TELEGRAM_FILE_RETENTION_SECONDS`
 - `TELEGRAM_UNSUPPORTED_MEDIA_FALLBACK_TO_FILE`
 - `TELEGRAM_STARTUP_UPDATE_POLICY`
-- `TELEGRAM_OFFSET_CHECKPOINT`
 - `NOLOONG_INTERACTION_URL`
 - `NOLOONG_INTERACTION_TOKEN`
 
@@ -208,7 +207,7 @@ The bridge uses a hybrid file policy:
 - Provider-only media that cannot be uploaded is rendered as a readable fallback card.
 - Long process output is truncated for chat readability and can be sent as a Telegram document.
 
-`startupUpdatePolicy` defaults to `skip_pending_without_checkpoint`. Telegram polling offset is stored in the unified SQLite state database by bot token fingerprint, using `~/.agents/noloong/state.sqlite` or `NOLOONG_STATE_DATABASE_URL`. On first startup with no stored offset, the bridge consumes pending updates and starts from new messages to avoid replaying old user input after restart. `--telegram-offset-checkpoint` / `TELEGRAM_OFFSET_CHECKPOINT` remains available as an explicit file-store diagnostic path.
+`startupUpdatePolicy` defaults to `skip_pending_without_offset`. Telegram polling offset is stored in the unified SQLite state database by bot token fingerprint, using `~/.agents/noloong/state.sqlite` or `NOLOONG_STATE_DATABASE_URL`. On first startup with no stored offset, the bridge consumes pending updates and starts from new messages to avoid replaying old user input after restart.
 
 ## Live Smoke SOP
 

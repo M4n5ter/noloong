@@ -33,10 +33,9 @@ async fn live_weixin_outbound_image_smoke() {
         env::var("WEIXIN_CDN_BASE_URL").unwrap_or_else(|_| WEIXIN_CDN_BASE_URL.into());
     let state_database_url =
         env::var("NOLOONG_STATE_DATABASE_URL").unwrap_or_else(|_| default_state_database_url());
-    let state = Arc::new(SqliteWeixinStateStore::new(
-        state_database_url,
-        account_fingerprint(&account_id),
-    ));
+    let state = Arc::new(
+        SqliteWeixinStateStore::new(state_database_url, account_fingerprint(&account_id)).unwrap(),
+    );
     let api = Arc::new(
         ReqwestWeixinApi::new(reqwest::Client::new(), Some(token))
             .with_base_url(base_url)

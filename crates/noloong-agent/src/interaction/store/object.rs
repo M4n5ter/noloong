@@ -2,12 +2,16 @@ use super::codec::{decode_record_json, encode_record_json};
 use super::{
     AgentSessionRecord, AgentSessionRegistryStore, AutomationRecord, AutomationScheduleScan,
     AutomationScheduleScanBuilder, GoalRecord, duplicate_automation_error, duplicate_session_error,
-    missing_automation_error, missing_session_error,
+    missing_automation_error, missing_session_error, record_matches_session_list_filter,
+    session_metadata_index_value,
 };
-use crate::interaction::{AutomationStatus, InteractionError, InteractionFuture};
+use crate::interaction::{
+    AgentSessionListFilter, AutomationStatus, InteractionError, InteractionFuture,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use opendal::{ErrorKind, Operator};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct OpenDalAgentSessionRegistryStoreConfig {
@@ -44,6 +48,28 @@ impl OpenDalAgentSessionRegistryStore {
     fn goal_path(&self, session_id: &str) -> String {
         let encoded = URL_SAFE_NO_PAD.encode(session_id.as_bytes());
         format!("{}goals/{encoded}.json", self.prefix)
+    }
+
+    fn session_index_path(&self, session_id: &str) -> String {
+        let encoded = URL_SAFE_NO_PAD.encode(session_id.as_bytes());
+        format!("{}session-index/{encoded}.json", self.prefix)
+    }
+
+    fn session_metadata_index_prefix(&self, key: &str, value: &str) -> String {
+        let encoded_key = URL_SAFE_NO_PAD.encode(key.as_bytes());
+        let encoded_value = URL_SAFE_NO_PAD.encode(value.as_bytes());
+        format!(
+            "{}session-metadata/{encoded_key}/{encoded_value}/",
+            self.prefix
+        )
+    }
+
+    fn session_metadata_index_path(&self, key: &str, value: &str, session_id: &str) -> String {
+        let encoded_session_id = URL_SAFE_NO_PAD.encode(session_id.as_bytes());
+        format!(
+            "{}{encoded_session_id}.json",
+            self.session_metadata_index_prefix(key, value)
+        )
     }
 
     fn automation_path(&self, automation_id: &str) -> String {
@@ -84,6 +110,219 @@ impl OpenDalAgentSessionRegistryStore {
             .map_err(to_store_error)?;
         Ok(())
     }
+
+    async fn save_session_index(
+        &self,
+        record: &AgentSessionRecord,
+    ) -> Result<(), InteractionError> {
+        let bytes =
+            serde_json::to_vec(&ObjectSessionIndexEntry::from(record)).map_err(to_store_error)?;
+        self.operator
+            .write(&self.session_index_path(&record.session_id), bytes)
+            .await
+            .map_err(to_store_error)?;
+        Ok(())
+    }
+
+    async fn save_session_metadata_index(
+        &self,
+        record: &AgentSessionRecord,
+    ) -> Result<(), InteractionError> {
+        let bytes = serde_json::to_vec(&ObjectSessionMetadataIndexEntry::from(record))
+            .map_err(to_store_error)?;
+        for (key, value) in &record.metadata {
+            let Some(value) = session_metadata_index_value(value) else {
+                continue;
+            };
+            self.operator
+                .write(
+                    &self.session_metadata_index_path(key, &value, &record.session_id),
+                    bytes.clone(),
+                )
+                .await
+                .map_err(to_store_error)?;
+        }
+        Ok(())
+    }
+
+    async fn remove_session_index(&self, session_id: &str) -> Result<(), InteractionError> {
+        self.operator
+            .delete(&self.session_index_path(session_id))
+            .await
+            .map_err(to_store_error)?;
+        Ok(())
+    }
+
+    async fn remove_session_metadata_index(
+        &self,
+        record: &AgentSessionRecord,
+    ) -> Result<(), InteractionError> {
+        for (key, value) in &record.metadata {
+            let Some(value) = session_metadata_index_value(value) else {
+                continue;
+            };
+            self.operator
+                .delete(&self.session_metadata_index_path(key, &value, &record.session_id))
+                .await
+                .map_err(to_store_error)?;
+        }
+        Ok(())
+    }
+
+    async fn remove_session_metadata_index_entry(
+        &self,
+        index: &ObjectSessionIndexEntry,
+    ) -> Result<(), InteractionError> {
+        for (key, value) in &index.metadata {
+            self.operator
+                .delete(&self.session_metadata_index_path(key, value, &index.session_id))
+                .await
+                .map_err(to_store_error)?;
+        }
+        Ok(())
+    }
+
+    async fn remove_stale_filter_metadata_index_entries(
+        &self,
+        index: &ObjectSessionIndexEntry,
+        filter: &AgentSessionListFilter,
+    ) -> Result<(), InteractionError> {
+        for (key, value) in &filter.metadata_equals {
+            let Some(value) = session_metadata_index_value(value) else {
+                continue;
+            };
+            if index.metadata.get(key) == Some(&value) {
+                continue;
+            }
+            self.operator
+                .delete(&self.session_metadata_index_path(key, &value, &index.session_id))
+                .await
+                .map_err(to_store_error)?;
+        }
+        Ok(())
+    }
+
+    async fn metadata_session_candidates(
+        &self,
+        filter: &AgentSessionListFilter,
+    ) -> Result<Option<BTreeMap<String, ObjectSessionMetadataIndexEntry>>, InteractionError> {
+        if filter.metadata_equals.is_empty() {
+            return Ok(None);
+        }
+        let mut candidates: Option<BTreeMap<String, ObjectSessionMetadataIndexEntry>> = None;
+        for (key, value) in &filter.metadata_equals {
+            let Some(value) = session_metadata_index_value(value) else {
+                return Ok(Some(BTreeMap::new()));
+            };
+            let prefix = self.session_metadata_index_prefix(key, &value);
+            let entries = self.operator.list(&prefix).await.map_err(to_store_error)?;
+            let mut matching = BTreeMap::new();
+            for entry in entries {
+                if !entry.path().ends_with(".json") {
+                    continue;
+                }
+                let bytes = self
+                    .operator
+                    .read(entry.path())
+                    .await
+                    .map_err(to_store_error)?
+                    .to_bytes();
+                let index: ObjectSessionMetadataIndexEntry =
+                    serde_json::from_slice(bytes.as_ref()).map_err(to_store_error)?;
+                matching.insert(index.session_id.clone(), index);
+            }
+            candidates = Some(match candidates {
+                Some(existing) => existing
+                    .into_iter()
+                    .filter(|(session_id, _)| matching.contains_key(session_id))
+                    .collect(),
+                None => matching,
+            });
+            if candidates.as_ref().is_some_and(BTreeMap::is_empty) {
+                break;
+            }
+        }
+        Ok(candidates)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectSessionIndexEntry {
+    session_id: String,
+    profile_id: String,
+    parent_session_id: Option<String>,
+    status: String,
+    metadata: BTreeMap<String, String>,
+    updated_at_ms: u64,
+}
+
+impl ObjectSessionIndexEntry {
+    fn matches_filter(&self, filter: &AgentSessionListFilter) -> bool {
+        if filter
+            .parent_session_id
+            .as_ref()
+            .is_some_and(|parent| self.parent_session_id.as_ref() != Some(parent))
+        {
+            return false;
+        }
+        if filter
+            .profile_id
+            .as_ref()
+            .is_some_and(|profile| &self.profile_id != profile)
+        {
+            return false;
+        }
+        if filter
+            .status
+            .as_ref()
+            .is_some_and(|status| self.status != status.as_str())
+        {
+            return false;
+        }
+        filter.metadata_equals.iter().all(|(key, value)| {
+            session_metadata_index_value(value)
+                .as_ref()
+                .is_some_and(|expected| self.metadata.get(key) == Some(expected))
+        })
+    }
+}
+
+impl From<&AgentSessionRecord> for ObjectSessionIndexEntry {
+    fn from(record: &AgentSessionRecord) -> Self {
+        Self {
+            session_id: record.session_id.clone(),
+            profile_id: record.profile_id.clone(),
+            parent_session_id: record.parent_session_id.clone(),
+            status: crate::interaction::InteractionSessionStatus::from(record.state.status.clone())
+                .as_str()
+                .to_owned(),
+            metadata: record
+                .metadata
+                .iter()
+                .filter_map(|(key, value)| {
+                    session_metadata_index_value(value).map(|value| (key.clone(), value))
+                })
+                .collect(),
+            updated_at_ms: record.updated_at_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectSessionMetadataIndexEntry {
+    session_id: String,
+    updated_at_ms: u64,
+}
+
+impl From<&AgentSessionRecord> for ObjectSessionMetadataIndexEntry {
+    fn from(record: &AgentSessionRecord) -> Self {
+        Self {
+            session_id: record.session_id.clone(),
+            updated_at_ms: record.updated_at_ms,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +357,8 @@ impl AgentSessionRegistryStore for OpenDalAgentSessionRegistryStore {
                 .write(&path, bytes)
                 .await
                 .map_err(to_store_error)?;
+            self.save_session_index(&record).await?;
+            self.save_session_metadata_index(&record).await?;
             Ok(())
         })
     }
@@ -125,22 +366,38 @@ impl AgentSessionRegistryStore for OpenDalAgentSessionRegistryStore {
     fn save<'a>(&'a self, record: AgentSessionRecord) -> InteractionFuture<'a, ()> {
         Box::pin(async move {
             let path = self.session_path(&record.session_id);
+            let previous = self
+                .get(&record.session_id)
+                .await?
+                .ok_or_else(|| missing_session_error(&record.session_id))?;
             if !self.operator.exists(&path).await.map_err(to_store_error)? {
                 return Err(missing_session_error(&record.session_id));
             }
             let bytes = encode_record_json(&record)?.into_bytes();
-            self.operator
-                .write(&path, bytes)
-                .await
-                .map_err(to_store_error)?;
-            Ok(())
+            self.save_session_index(&record).await?;
+            self.remove_session_metadata_index(&previous).await?;
+            self.save_session_metadata_index(&record).await?;
+            match self.operator.write(&path, bytes).await {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    let _ = self.save_session_index(&previous).await;
+                    let _ = self.remove_session_metadata_index(&record).await;
+                    let _ = self.save_session_metadata_index(&previous).await;
+                    Err(to_store_error(error))
+                }
+            }
         })
     }
 
     fn remove<'a>(&'a self, session_id: &'a str) -> InteractionFuture<'a, ()> {
         Box::pin(async move {
+            let previous = self.get(session_id).await?;
             let path = self.session_path(session_id);
             self.operator.delete(&path).await.map_err(to_store_error)?;
+            self.remove_session_index(session_id).await?;
+            if let Some(previous) = previous {
+                self.remove_session_metadata_index(&previous).await?;
+            }
             Ok(())
         })
     }
@@ -157,33 +414,72 @@ impl AgentSessionRegistryStore for OpenDalAgentSessionRegistryStore {
         })
     }
 
-    fn list<'a>(&'a self) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
+    fn list<'a>(
+        &'a self,
+        filter: &'a AgentSessionListFilter,
+    ) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
         Box::pin(async move {
-            let entries = self
-                .operator
-                .list(&self.prefix)
-                .await
-                .map_err(to_store_error)?;
+            let indexes =
+                if let Some(candidate_ids) = self.metadata_session_candidates(filter).await? {
+                    let mut indexes = Vec::new();
+                    for session_id in candidate_ids.keys() {
+                        let bytes = match self
+                            .operator
+                            .read(&self.session_index_path(session_id))
+                            .await
+                        {
+                            Ok(bytes) => bytes.to_bytes(),
+                            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                            Err(error) => return Err(to_store_error(error)),
+                        };
+                        indexes.push(
+                            serde_json::from_slice::<ObjectSessionIndexEntry>(bytes.as_ref())
+                                .map_err(to_store_error)?,
+                        );
+                    }
+                    indexes
+                } else {
+                    let prefix = format!("{}session-index/", self.prefix);
+                    let entries = self.operator.list(&prefix).await.map_err(to_store_error)?;
+                    let mut indexes = Vec::new();
+                    for entry in entries {
+                        if !entry.path().ends_with(".json") {
+                            continue;
+                        }
+                        let index_bytes = self
+                            .operator
+                            .read(entry.path())
+                            .await
+                            .map_err(to_store_error)?
+                            .to_bytes();
+                        indexes.push(
+                            serde_json::from_slice(index_bytes.as_ref()).map_err(to_store_error)?,
+                        );
+                    }
+                    indexes
+                };
             let mut records = Vec::new();
-            for entry in entries {
-                if !entry.path().ends_with(".json")
-                    || entry.path().starts_with(&format!("{}goals/", self.prefix))
-                    || entry
-                        .path()
-                        .starts_with(&format!("{}automations/", self.prefix))
-                    || entry
-                        .path()
-                        .starts_with(&format!("{}automation-schedule/", self.prefix))
-                {
+            for index in indexes {
+                if !index.matches_filter(filter) {
+                    self.remove_stale_filter_metadata_index_entries(&index, filter)
+                        .await?;
                     continue;
                 }
-                let bytes = self
-                    .operator
-                    .read(entry.path())
-                    .await
-                    .map_err(to_store_error)?
-                    .to_bytes();
-                records.push(decode_record_json(entry.path(), bytes.as_ref())?);
+                let Some(record) = self.get(&index.session_id).await? else {
+                    self.remove_session_index(&index.session_id).await?;
+                    continue;
+                };
+                let current_index = ObjectSessionIndexEntry::from(&record);
+                if current_index.updated_at_ms != index.updated_at_ms
+                    || current_index.metadata != index.metadata
+                {
+                    self.save_session_index(&record).await?;
+                    self.remove_session_metadata_index_entry(&index).await?;
+                    self.save_session_metadata_index(&record).await?;
+                }
+                if record_matches_session_list_filter(&record, filter) {
+                    records.push(record);
+                }
             }
             records.sort_by(|left, right| left.session_id.cmp(&right.session_id));
             Ok(records)

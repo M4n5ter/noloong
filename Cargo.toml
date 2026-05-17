@@ -68,7 +68,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-noloong-agent = { workspace = true, features = ["interaction-http", "json-schema", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
+noloong-agent = { workspace = true, features = ["client-state-sqlite", "interaction-http", "json-schema", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }
 noloong-agent-core = { workspace = true, features = ["json-schema", "sqlite-store"] }
 noloong-agent-telegram.workspace = true
 noloong-agent-weixin.workspace = true
