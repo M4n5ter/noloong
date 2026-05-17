@@ -2,10 +2,9 @@
   "$defs": {
     "AgentPluginDeclaration": {
       "properties": {
-        "allowedCapabilities": {
-          "default": [],
+        "components": {
           "items": {
-            "$ref": "#/$defs/ExtensionCapabilitySelector"
+            "$ref": "#/$defs/PluginComponent"
           },
           "type": "array"
         },
@@ -28,15 +27,12 @@
         },
         "pluginId": {
           "type": "string"
-        },
-        "transport": {
-          "$ref": "#/$defs/PluginTransport"
         }
       },
       "required": [
         "pluginId",
         "displayName",
-        "transport"
+        "components"
       ],
       "type": "object"
     },
@@ -378,7 +374,7 @@
       "enum": [
         "auto",
         "general",
-        "gpt_5_5"
+        "open_ai"
       ],
       "type": "string"
     },
@@ -952,6 +948,272 @@
         }
       ]
     },
+    "McpHeaderSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "static",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "host_env",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "McpPluginComponent": {
+      "properties": {
+        "disabledTools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabledTools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "serverId": {
+          "type": "string"
+        },
+        "toolNamePrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "$ref": "#/$defs/McpPluginTransport"
+        }
+      },
+      "required": [
+        "serverId",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "McpPluginTransport": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/McpStdioTransport",
+          "properties": {
+            "type": {
+              "const": "stdio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/McpStreamableHttpTransport",
+          "properties": {
+            "type": {
+              "const": "streamable_http",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "McpStdioTransport": {
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PluginEnvSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "McpStreamableHttpTransport": {
+      "properties": {
+        "connectTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/McpHeaderSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "NoloongExtensionPluginComponent": {
+      "properties": {
+        "allowedCapabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExtensionCapabilitySelector"
+          },
+          "type": "array"
+        },
+        "transport": {
+          "$ref": "#/$defs/NoloongExtensionTransport"
+        }
+      },
+      "required": [
+        "transport"
+      ],
+      "type": "object"
+    },
+    "NoloongExtensionTransport": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StdioPluginTransport",
+          "properties": {
+            "type": {
+              "const": "stdio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginComponent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SkillsPluginComponent",
+          "properties": {
+            "type": {
+              "const": "skills",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/McpPluginComponent",
+          "properties": {
+            "type": {
+              "const": "mcp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/NoloongExtensionPluginComponent",
+          "properties": {
+            "type": {
+              "const": "noloong_extension",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "PluginEnvSource": {
       "oneOf": [
         {
@@ -978,23 +1240,6 @@
         "fail_run"
       ],
       "type": "string"
-    },
-    "PluginTransport": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/StdioPluginTransport",
-          "properties": {
-            "type": {
-              "const": "stdio",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "ProfileCompactionConfig": {
       "oneOf": [
@@ -1337,6 +1582,20 @@
         "profileId",
         "displayName",
         "provider"
+      ],
+      "type": "object"
+    },
+    "SkillsPluginComponent": {
+      "properties": {
+        "roots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "roots"
       ],
       "type": "object"
     },

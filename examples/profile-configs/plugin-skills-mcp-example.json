@@ -1,0 +1,86 @@
+{
+  "defaultProfileId": "plugin-skills-mcp-example",
+  "profiles": [
+    {
+      "profileId": "plugin-skills-mcp-example",
+      "displayName": "Plugin skills and MCP example",
+      "description": "Example profile that loads local skills metadata and MCP tools through native plugin components.",
+      "provider": {
+        "type": "chatgpt_responses",
+        "model": "gpt-5.4-mini",
+        "stateMode": "stateless"
+      },
+      "plugins": [
+        {
+          "pluginId": "local-workspace",
+          "displayName": "Local workspace plugin",
+          "enabled": true,
+          "onLoadFailure": "disable_for_run",
+          "components": [
+            {
+              "type": "skills",
+              "roots": [
+                "./skills"
+              ]
+            },
+            {
+              "type": "mcp",
+              "serverId": "filesystem",
+              "transport": {
+                "type": "stdio",
+                "command": "node",
+                "args": [
+                  "./servers/filesystem-mcp.mjs"
+                ],
+                "env": {
+                  "PATH": {
+                    "type": "host_env",
+                    "name": "PATH"
+                  }
+                },
+                "requestTimeoutSecs": 30
+              },
+              "toolNamePrefix": "fs",
+              "enabledTools": [
+                "read_file",
+                "list_directory"
+              ],
+              "requestTimeoutSecs": 30
+            },
+            {
+              "type": "mcp",
+              "serverId": "remote-docs",
+              "transport": {
+                "type": "streamable_http",
+                "url": "https://example.com/mcp",
+                "headers": {
+                  "Authorization": {
+                    "type": "host_env",
+                    "name": "REMOTE_DOCS_MCP_TOKEN",
+                    "prefix": "Bearer "
+                  }
+                },
+                "connectTimeoutSecs": 10,
+                "requestTimeoutSecs": 30
+              },
+              "toolNamePrefix": "docs"
+            }
+          ]
+        }
+      ],
+      "manifestPatches": [
+        {
+          "op": "set_locale",
+          "locale": "zh"
+        }
+      ],
+      "metadata": {
+        "example": true,
+        "pluginComponents": [
+          "skills",
+          "mcp"
+        ]
+      }
+    }
+  ]
+}

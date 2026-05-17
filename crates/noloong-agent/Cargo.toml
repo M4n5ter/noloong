@@ -12,6 +12,7 @@ interaction-client = ["dep:futures-util", "dep:tokio-tungstenite"]
 interaction-http = ["dep:axum", "dep:futures-util"]
 client-state-sqlite = ["dep:rusqlite"]
 json-schema = ["dep:schemars", "noloong-agent-core/json-schema"]
+mcp = ["dep:reqwest", "dep:rmcp"]
 openai = ["dep:noloong-openai"]
 registry-store-object = ["dep:base64", "dep:opendal"]
 registry-store-postgres = ["dep:toasty", "dep:toasty-driver-postgresql", "toasty/postgresql"]
@@ -29,6 +30,8 @@ futures-util = { workspace = true, optional = true }
 noloong-agent-core.workspace = true
 noloong-openai = { workspace = true, optional = true }
 opendal = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rmcp = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +45,8 @@ schemars = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 env_logger.workspace = true
 log.workspace = true
 reqwest.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }

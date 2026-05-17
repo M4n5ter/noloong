@@ -4,7 +4,8 @@ use crate::{
     HostEnvironment, HostProcessCompletion, HostProcessEvent, HostProcessManager,
     HostProcessSubscription, ManifestProposalStore, ToolOutputOverflowConfig, WriteFileTool,
     approval::{ApprovalCache, cache_key_from_approval_resolution},
-    plugin::{PluginLoadError, PluginLoadFailurePolicy, PluginLoadWarning},
+    plugin::{PluginComponent, PluginLoadError, PluginLoadFailurePolicy, PluginLoadWarning},
+    skills::{self, LoadedSkills},
     system_prompt::{
         BUILT_IN_SYSTEM_PROMPT_HOOK_ID, ResolvedSystemPrompt, SystemPromptModelContext,
     },
@@ -96,7 +97,16 @@ pub struct AgentSessionRuntimeBuilder {
     catalog: Catalog,
     model_names_by_id: BTreeMap<String, String>,
     default_model_provider: Option<String>,
+    input_limit_tokens: Option<u64>,
     plugin_load_warnings: Vec<PluginLoadWarning>,
+    model_context: Arc<Mutex<Option<SystemPromptModelContext>>>,
+    skills_context: Arc<Mutex<RuntimeSkillsContext>>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeSkillsContext {
+    loaded: LoadedSkills,
+    metadata: Option<skills::SkillRender>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,10 +184,14 @@ impl AgentSession {
     pub fn runtime_builder(&self) -> AgentSessionRuntimeBuilder {
         let manifest = self.manifest();
         let catalog = Catalog::new(manifest.locale);
+        let model_context = Arc::new(Mutex::new(None));
+        let skills_context = Arc::new(Mutex::new(RuntimeSkillsContext::default()));
         let mut builder = AgentRuntime::builder()
-            .with_phase_hook(Arc::new(BuiltInSystemPromptHook::new(Arc::clone(
-                &self.inner,
-            ))))
+            .with_phase_hook(Arc::new(BuiltInSystemPromptHook::new(
+                Arc::clone(&self.inner),
+                Arc::clone(&model_context),
+                Arc::clone(&skills_context),
+            )))
             .with_context_provider(Arc::new(BuiltInHostContextProvider::new(
                 self.inner.environment.clone(),
                 catalog.clone(),
@@ -203,7 +217,10 @@ impl AgentSession {
             catalog,
             model_names_by_id: BTreeMap::new(),
             default_model_provider: None,
+            input_limit_tokens: None,
             plugin_load_warnings: Vec::new(),
+            model_context,
+            skills_context,
         }
     }
 
@@ -321,11 +338,21 @@ impl AgentSession {
 
 struct BuiltInSystemPromptHook {
     inner: Arc<AgentSessionInner>,
+    model_context: Arc<Mutex<Option<SystemPromptModelContext>>>,
+    skills_context: Arc<Mutex<RuntimeSkillsContext>>,
 }
 
 impl BuiltInSystemPromptHook {
-    fn new(inner: Arc<AgentSessionInner>) -> Self {
-        Self { inner }
+    fn new(
+        inner: Arc<AgentSessionInner>,
+        model_context: Arc<Mutex<Option<SystemPromptModelContext>>>,
+        skills_context: Arc<Mutex<RuntimeSkillsContext>>,
+    ) -> Self {
+        Self {
+            inner,
+            model_context,
+            skills_context,
+        }
     }
 }
 
@@ -341,15 +368,21 @@ impl PhaseHook for BuiltInSystemPromptHook {
     ) -> noloong_agent_core::BoxFuture<'a, Option<BeforeModelRequestHookResult>> {
         Box::pin(async move {
             cancellation.throw_if_cancelled()?;
-            let prompt = resolved_system_prompt_from_inner(&self.inner);
+            let prompt = resolved_system_prompt_for_model(&self.inner, &self.model_context);
             let mut request = context.request.clone();
             if !goal_update_tool_available(&self.inner) {
                 request
                     .tools
                     .retain(|tool| tool.name != BuiltInToolName::GoalUpdate.as_str());
             }
-            let prompt_text =
-                render_model_system_prompt(&self.inner, &prompt, &context.request.context);
+            let prompt_text = render_model_system_prompt(
+                &self.inner,
+                &self.model_context,
+                &self.skills_context,
+                &prompt,
+                &context.request.context,
+                &request.messages,
+            );
             request.messages.insert(
                 0,
                 system_prompt_message(&prompt, prompt_text, context.run_id, context.turn_id),
@@ -369,6 +402,13 @@ fn goal_update_tool_available(inner: &AgentSessionInner) -> bool {
 }
 
 fn resolved_system_prompt_from_inner(inner: &AgentSessionInner) -> ResolvedSystemPrompt {
+    resolved_system_prompt_for_model(inner, &inner.system_prompt_model_context)
+}
+
+fn resolved_system_prompt_for_model(
+    inner: &AgentSessionInner,
+    model_context: &Mutex<Option<SystemPromptModelContext>>,
+) -> ResolvedSystemPrompt {
     let (locale, system_prompt) = {
         let manifest = inner
             .manifest
@@ -376,8 +416,7 @@ fn resolved_system_prompt_from_inner(inner: &AgentSessionInner) -> ResolvedSyste
             .expect("agent session manifest lock poisoned");
         (manifest.locale, manifest.system_prompt.clone())
     };
-    let model = inner
-        .system_prompt_model_context
+    let model = model_context
         .lock()
         .expect("agent session model context lock poisoned")
         .clone();
@@ -419,20 +458,62 @@ fn system_prompt_message(
 
 fn render_model_system_prompt(
     inner: &AgentSessionInner,
+    model_context: &Mutex<Option<SystemPromptModelContext>>,
+    skills_context: &Mutex<RuntimeSkillsContext>,
     prompt: &ResolvedSystemPrompt,
     context: &Map<String, Value>,
+    messages: &[AgentMessage],
 ) -> String {
-    let runtime_context = render_runtime_context(inner, context);
-    format!(
-        "{}\n\n{}",
-        prompt.effective_text.trim_end(),
-        runtime_context
-    )
+    let runtime_context = render_runtime_context(inner, model_context, context);
+    let mut blocks = vec![prompt.effective_text.trim_end().to_owned(), runtime_context];
+    if let Some(skills_text) = render_skills_context(skills_context, messages) {
+        blocks.push(skills_text);
+    }
+    blocks.join("\n\n")
 }
 
-fn render_runtime_context(inner: &AgentSessionInner, context: &Map<String, Value>) -> String {
+fn render_skills_context(
+    skills_context: &Mutex<RuntimeSkillsContext>,
+    messages: &[AgentMessage],
+) -> Option<String> {
+    let skills_context = skills_context
+        .lock()
+        .expect("agent session skills context lock poisoned");
+    if skills_context.loaded.is_empty() {
+        return None;
+    }
     let mut blocks = Vec::new();
-    blocks.push(render_runtime_policy(inner));
+    let mut warnings = Vec::new();
+    if let Some(render) = &skills_context.metadata {
+        if !render.text.trim().is_empty() {
+            blocks.push(render.text.clone());
+        }
+        warnings.extend(render.warnings.iter().cloned());
+    }
+    if let Some(render) =
+        skills::render_explicit_skill_instructions(&skills_context.loaded, messages)
+    {
+        if !render.text.trim().is_empty() {
+            blocks.push(render.text);
+        }
+        warnings.extend(render.warnings);
+    }
+    if !warnings.is_empty() {
+        blocks.push(format!(
+            "<skills_warnings>\n{}\n</skills_warnings>",
+            warnings.join("\n")
+        ));
+    }
+    (!blocks.is_empty()).then(|| blocks.join("\n\n"))
+}
+
+fn render_runtime_context(
+    inner: &AgentSessionInner,
+    model_context: &Mutex<Option<SystemPromptModelContext>>,
+    context: &Map<String, Value>,
+) -> String {
+    let mut blocks = Vec::new();
+    blocks.push(render_runtime_policy(inner, model_context));
 
     let mut context_texts = context
         .iter()
@@ -460,13 +541,15 @@ fn render_runtime_context(inner: &AgentSessionInner, context: &Map<String, Value
     )
 }
 
-fn render_runtime_policy(inner: &AgentSessionInner) -> String {
+fn render_runtime_policy(
+    inner: &AgentSessionInner,
+    model_context: &Mutex<Option<SystemPromptModelContext>>,
+) -> String {
     let manifest = inner
         .manifest
         .lock()
         .expect("agent session manifest lock poisoned");
-    let model = inner
-        .system_prompt_model_context
+    let model = model_context
         .lock()
         .expect("agent session model context lock poisoned")
         .clone();
@@ -646,6 +729,11 @@ impl AgentSessionRuntimeBuilder {
         self
     }
 
+    pub fn with_model_input_limit_tokens(mut self, input_limit_tokens: u64) -> Self {
+        self.input_limit_tokens = Some(input_limit_tokens);
+        self
+    }
+
     pub fn with_tool(mut self, tool: Arc<dyn ToolProvider>) -> Self {
         self.core = self.core.with_tool(tool);
         self
@@ -793,6 +881,10 @@ impl AgentSessionRuntimeBuilder {
     }
 
     pub async fn with_manifest_plugins(mut self) -> Result<Self> {
+        *self
+            .skills_context
+            .lock()
+            .expect("agent session skills context lock poisoned") = RuntimeSkillsContext::default();
         let plugins = self
             .manifest
             .plugins
@@ -803,48 +895,107 @@ impl AgentSessionRuntimeBuilder {
         for plugin in plugins {
             let plugin_id = plugin.plugin_id.clone();
             let on_load_failure = plugin.on_load_failure;
-            let config = match plugin.to_stdio_extension_config(|name| env::var(name).ok()) {
-                Ok(config) => config,
-                Err(error) => match on_load_failure {
-                    PluginLoadFailurePolicy::DisableForRun => {
-                        self.plugin_load_warnings.push(PluginLoadWarning {
-                            plugin_id,
-                            message: error.to_string(),
-                        });
-                        continue;
-                    }
-                    PluginLoadFailurePolicy::FailRun => {
-                        return Err(noloong_agent_core::AgentCoreError::Provider(
-                            error.to_string(),
-                        ));
-                    }
-                },
-            };
-            match self.core.add_stdio_extension(config).await {
-                Ok(()) => {
-                    self.sync_model_provider_metadata_from_core();
-                }
-                Err(error) => match on_load_failure {
-                    PluginLoadFailurePolicy::DisableForRun => {
-                        let error = PluginLoadError::Startup {
-                            plugin_id: plugin_id.clone(),
-                            message: format!("{}: {error}", plugin.summary()),
-                        };
-                        self.plugin_load_warnings.push(PluginLoadWarning {
-                            plugin_id,
-                            message: error.to_string(),
-                        });
-                    }
-                    PluginLoadFailurePolicy::FailRun => {
-                        return Err(noloong_agent_core::AgentCoreError::Provider(
-                            PluginLoadError::Startup {
-                                plugin_id,
-                                message: format!("{}: {error}", plugin.summary()),
+            for component in &plugin.components {
+                match component {
+                    PluginComponent::Skills(component) => {
+                        match skills::load_plugin_skills(
+                            &plugin_id,
+                            component,
+                            &self.inner.environment.cwd,
+                        ) {
+                            Ok(skills) => self
+                                .skills_context
+                                .lock()
+                                .expect("agent session skills context lock poisoned")
+                                .loaded
+                                .merge(skills),
+                            Err(error) => {
+                                self.record_plugin_load_error(
+                                    &plugin_id,
+                                    on_load_failure,
+                                    error.to_string(),
+                                )?;
                             }
-                            .to_string(),
-                        ));
+                        }
                     }
-                },
+                    PluginComponent::Mcp(component) => {
+                        #[cfg(feature = "mcp")]
+                        {
+                            match crate::mcp::load_mcp_tools(
+                                &plugin_id,
+                                &plugin.display_name,
+                                component,
+                                |name| env::var(name).ok(),
+                            )
+                            .await
+                            {
+                                Ok(tools) => {
+                                    for tool in tools {
+                                        let tool_name = tool.spec().name;
+                                        if self.core.has_tool(&tool_name) {
+                                            self.record_plugin_load_error(
+                                                &plugin_id,
+                                                on_load_failure,
+                                                format!(
+                                                    "plugin MCP tool `{tool_name}` conflicts with an existing runtime tool"
+                                                ),
+                                            )?;
+                                            continue;
+                                        }
+                                        self.core = self.core.with_tool(tool);
+                                    }
+                                }
+                                Err(error) => {
+                                    self.record_plugin_load_error(
+                                        &plugin_id,
+                                        on_load_failure,
+                                        error.to_string(),
+                                    )?;
+                                }
+                            }
+                        }
+                        #[cfg(not(feature = "mcp"))]
+                        {
+                            let _ = component;
+                            self.record_plugin_load_error(
+                                &plugin_id,
+                                on_load_failure,
+                                "MCP plugin component requires the `mcp` feature".into(),
+                            )?;
+                        }
+                    }
+                    PluginComponent::NoloongExtension(component) => {
+                        let config = match component
+                            .to_stdio_extension_config(&plugin_id, |name| env::var(name).ok())
+                        {
+                            Ok(config) => config,
+                            Err(error) => {
+                                self.record_plugin_load_error(
+                                    &plugin_id,
+                                    on_load_failure,
+                                    error.to_string(),
+                                )?;
+                                continue;
+                            }
+                        };
+                        match self.core.add_stdio_extension(config).await {
+                            Ok(()) => {
+                                self.sync_model_provider_metadata_from_core();
+                            }
+                            Err(error) => {
+                                let error = PluginLoadError::Startup {
+                                    plugin_id: plugin_id.clone(),
+                                    message: format!("{}: {error}", component.summary()),
+                                };
+                                self.record_plugin_load_error(
+                                    &plugin_id,
+                                    on_load_failure,
+                                    error.to_string(),
+                                )?;
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(self)
@@ -854,9 +1005,51 @@ impl AgentSessionRuntimeBuilder {
         &self.plugin_load_warnings
     }
 
+    fn record_plugin_load_error(
+        &mut self,
+        plugin_id: &str,
+        policy: PluginLoadFailurePolicy,
+        message: String,
+    ) -> Result<()> {
+        match policy {
+            PluginLoadFailurePolicy::DisableForRun => {
+                self.plugin_load_warnings.push(PluginLoadWarning {
+                    plugin_id: plugin_id.into(),
+                    message,
+                });
+                Ok(())
+            }
+            PluginLoadFailurePolicy::FailRun => {
+                Err(noloong_agent_core::AgentCoreError::Provider(message))
+            }
+        }
+    }
+
     pub fn build(mut self) -> Result<AgentRuntime> {
         self.sync_model_provider_metadata_from_core();
         let model_context = self.default_model_context();
+        let input_limit_tokens = model_context
+            .as_ref()
+            .and_then(|model| model.input_limit_tokens);
+        {
+            let mut skills_context = self
+                .skills_context
+                .lock()
+                .expect("agent session skills context lock poisoned");
+            if !skills_context.loaded.is_empty() {
+                let Some(input_limit_tokens) = input_limit_tokens else {
+                    return Err(noloong_agent_core::AgentCoreError::Provider(
+                        "skills metadata rendering requires model inputLimitTokens; configure profile compaction/input-limit resolution before enabling skills".into(),
+                    ));
+                };
+                skills_context.metadata =
+                    skills::render_skills_instructions(&skills_context.loaded, input_limit_tokens);
+            }
+        }
+        *self
+            .model_context
+            .lock()
+            .expect("agent session model context lock poisoned") = model_context.clone();
         *self
             .inner
             .system_prompt_model_context
@@ -908,6 +1101,7 @@ impl AgentSessionRuntimeBuilder {
         Some(SystemPromptModelContext {
             provider_id: provider_id.to_owned(),
             model_name,
+            input_limit_tokens: self.input_limit_tokens,
         })
     }
 

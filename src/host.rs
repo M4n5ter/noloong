@@ -8,7 +8,7 @@ use crate::config::{
 };
 use crate::models_dev::ModelsDevRegistry;
 use noloong_agent::{
-    AgentManifest, AgentSession, ManifestPatch,
+    AgentManifest, AgentSession, ManifestPatch, PluginComponent,
     interaction::{
         AgentRuntimeProfile, AgentSessionRegistry, AgentSessionRegistryStore,
         InMemoryAgentSessionRegistryStore, InteractionError, InteractionFuture,
@@ -113,18 +113,100 @@ fn config_uses_default_state_database(config: &HostProfileConfig) -> bool {
 }
 
 fn profile_needs_models_dev(config: &RuntimeProfileConfig) -> bool {
-    if !matches!(
+    let compaction_needs_models_dev = matches!(
         config.provider,
         BuiltInProviderConfig::ChatgptResponses { .. }
-    ) {
-        return false;
-    }
-    match &config.compaction {
+    ) && match &config.compaction {
         ProfileCompactionConfig::Auto => true,
         ProfileCompactionConfig::OpenaiResponses {
             input_limit_tokens, ..
         } => input_limit_tokens.is_none(),
         ProfileCompactionConfig::None => false,
+    };
+    compaction_needs_models_dev
+        || (profile_has_enabled_skills(config) && profile_models_dev_lookup(config).is_some())
+}
+
+fn profile_has_enabled_skills(config: &RuntimeProfileConfig) -> bool {
+    default_profile_manifest(config)
+        .map(|manifest| manifest_has_enabled_skills(&manifest))
+        .unwrap_or(false)
+}
+
+fn manifest_has_enabled_skills(manifest: &AgentManifest) -> bool {
+    manifest.plugins.values().any(|plugin| {
+        plugin.enabled
+            && plugin
+                .components
+                .iter()
+                .any(|component| matches!(component, PluginComponent::Skills(_)))
+    })
+}
+
+fn default_manifest_patches(config: &RuntimeProfileConfig) -> Vec<ManifestPatch> {
+    let mut patches = config
+        .plugins
+        .iter()
+        .cloned()
+        .map(|plugin| ManifestPatch::RegisterPlugin { plugin })
+        .collect::<Vec<_>>();
+    patches.extend(config.manifest_patches.iter().cloned());
+    patches
+}
+
+fn default_profile_manifest(
+    config: &RuntimeProfileConfig,
+) -> Result<AgentManifest, HostBuildError> {
+    profile_manifest_from_patches(&default_manifest_patches(config))
+}
+
+fn profile_manifest_from_patches(
+    patches: &[ManifestPatch],
+) -> Result<AgentManifest, HostBuildError> {
+    let mut manifest = AgentManifest::default();
+    for patch in patches {
+        manifest.apply_patch(patch.clone()).map_err(|error| {
+            HostBuildError::Config(CliConfigError::ParseConfig(error.to_string()))
+        })?;
+    }
+    Ok(manifest)
+}
+
+fn resolve_profile_input_limit(
+    config: &RuntimeProfileConfig,
+    models_dev: Option<&ModelsDevRegistry>,
+) -> Option<u64> {
+    let (provider_id, model_id) = profile_models_dev_lookup(config)?;
+    models_dev?.input_limit(provider_id, model_id)
+}
+
+fn profile_models_dev_lookup(config: &RuntimeProfileConfig) -> Option<(&'static str, &str)> {
+    match &config.provider {
+        BuiltInProviderConfig::ChatgptResponses { model, .. } => {
+            Some((MODELS_DEV_OPENAI_PROVIDER_ID, model))
+        }
+        BuiltInProviderConfig::Responses {
+            provider_id,
+            model,
+            base_url,
+            ..
+        }
+        | BuiltInProviderConfig::ChatCompletions {
+            provider_id,
+            model,
+            base_url,
+            ..
+        } => {
+            let provider = provider_id.as_deref().unwrap_or("openai");
+            let openaiish_provider = provider.eq_ignore_ascii_case("openai");
+            let openaiish_model = model.to_ascii_lowercase().starts_with("gpt-");
+            if base_url.is_none() && (openaiish_provider || openaiish_model) {
+                Some((MODELS_DEV_OPENAI_PROVIDER_ID, model))
+            } else {
+                None
+            }
+        }
+        BuiltInProviderConfig::AnthropicMessages { .. } => None,
     }
 }
 
@@ -219,6 +301,7 @@ struct RuntimeProfile {
     provider: Arc<dyn ModelProvider>,
     event_store: Arc<dyn EventStore>,
     compaction: Option<RuntimeCompaction>,
+    input_limit_tokens: Option<u64>,
 }
 
 impl RuntimeProfile {
@@ -228,21 +311,8 @@ impl RuntimeProfile {
         default_event_store: Option<Arc<dyn EventStore>>,
         state_database_url: Option<&str>,
     ) -> Result<Self, HostBuildError> {
-        let mut validated_manifest = AgentManifest::default();
-        let mut default_manifest_patches = config
-            .plugins
-            .iter()
-            .cloned()
-            .map(|plugin| ManifestPatch::RegisterPlugin { plugin })
-            .collect::<Vec<_>>();
-        default_manifest_patches.extend(config.manifest_patches.iter().cloned());
-        for patch in &default_manifest_patches {
-            validated_manifest
-                .apply_patch(patch.clone())
-                .map_err(|error| {
-                    HostBuildError::Config(CliConfigError::ParseConfig(error.to_string()))
-                })?;
-        }
+        let default_manifest_patches = default_manifest_patches(config);
+        let validated_manifest = profile_manifest_from_patches(&default_manifest_patches)?;
         let provider = build_provider(&config.profile_id, &config.provider)?;
         let compaction = build_profile_compaction(
             &config.profile_id,
@@ -250,6 +320,16 @@ impl RuntimeProfile {
             provider.chatgpt_compact.as_ref(),
             models_dev,
         )?;
+        let input_limit_tokens = compaction
+            .as_ref()
+            .map(|compaction| compaction.config.input_limit_tokens)
+            .or_else(|| resolve_profile_input_limit(config, models_dev));
+        if manifest_has_enabled_skills(&validated_manifest) && input_limit_tokens.is_none() {
+            return Err(CliConfigError::ParseConfig(
+                "profiles with skills plugins require a resolvable main model input limit".into(),
+            )
+            .into());
+        }
         let event_store = match config.event_store.as_ref() {
             Some(event_store_config) => {
                 build_event_store(Some(event_store_config), state_database_url).await?
@@ -270,6 +350,7 @@ impl RuntimeProfile {
             provider: provider.provider,
             event_store,
             compaction,
+            input_limit_tokens,
         })
     }
 }
@@ -289,6 +370,9 @@ impl AgentRuntimeProfile for RuntimeProfile {
                 .runtime_builder()
                 .with_event_store(Arc::clone(&self.event_store))
                 .with_model_provider(Arc::clone(&self.provider));
+            if let Some(input_limit_tokens) = self.input_limit_tokens {
+                builder = builder.with_model_input_limit_tokens(input_limit_tokens);
+            }
             if let Some(compaction) = &self.compaction {
                 builder = builder.with_context_compactor(
                     compaction.config.clone(),
@@ -811,7 +895,8 @@ mod tests {
     };
     use crate::models_dev::ModelsDevRegistry;
     use noloong_agent::{
-        AgentManifest, AgentSession, ManifestPatch,
+        AgentManifest, AgentPluginDeclaration, AgentSession, ManifestPatch, PluginComponent,
+        PluginLoadFailurePolicy, SkillsPluginComponent,
         interaction::{AgentRuntimeProfile, AgentSessionCreateRequest},
     };
     use noloong_agent_core::{
@@ -1263,13 +1348,18 @@ mod tests {
                 "plugins": [{
                     "pluginId": "echo",
                     "displayName": "Echo",
-                    "transport": {
-                        "type": "stdio",
-                        "command": "node",
-                        "args": ["examples/extensions/echo.mjs"]
-                    },
-                    "allowedCapabilities": [
-                        {"type": "tool", "name": "echo.run"}
+                    "components": [
+                        {
+                            "type": "noloong_extension",
+                            "transport": {
+                                "type": "stdio",
+                                "command": "node",
+                                "args": ["examples/extensions/echo.mjs"]
+                            },
+                            "allowedCapabilities": [
+                                {"type": "tool", "name": "echo.run"}
+                            ]
+                        }
                     ]
                 }],
                 "manifestPatches": [{
@@ -1293,6 +1383,41 @@ mod tests {
             ManifestPatch::SetPluginEnabled { plugin_id, enabled }
                 if plugin_id == "echo" && *enabled
         ));
+    }
+
+    #[tokio::test]
+    async fn disabled_skills_plugin_does_not_require_input_limit() {
+        let mut config = runtime_profile_config(ProfileEventStoreConfig::Memory);
+        config.provider = local_responses_provider();
+        config.plugins.push(skills_plugin("skills-test", false));
+
+        runtime_profile(&config)
+            .await
+            .expect("disabled skills plugin should not require an input limit");
+    }
+
+    #[tokio::test]
+    async fn enabled_skills_plugin_requires_input_limit() {
+        let mut config = runtime_profile_config(ProfileEventStoreConfig::Memory);
+        config.provider = local_responses_provider();
+        config.plugins.push(skills_plugin("skills-test", false));
+        config
+            .manifest_patches
+            .push(ManifestPatch::SetPluginEnabled {
+                plugin_id: "skills-test".into(),
+                enabled: true,
+            });
+
+        let error = match runtime_profile(&config).await {
+            Ok(_) => panic!("enabled skills plugin without input limit should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("skills plugins require a resolvable main model input limit")
+        );
     }
 
     #[tokio::test]
@@ -1434,6 +1559,29 @@ mod tests {
             "model": "gpt-5.4-mini"
         }))
         .unwrap()
+    }
+
+    fn local_responses_provider() -> BuiltInProviderConfig {
+        serde_json::from_value(serde_json::json!({
+            "type": "responses",
+            "providerId": "local",
+            "model": "local-model",
+            "baseUrl": "http://127.0.0.1:1/v1"
+        }))
+        .unwrap()
+    }
+
+    fn skills_plugin(plugin_id: &str, enabled: bool) -> AgentPluginDeclaration {
+        AgentPluginDeclaration {
+            plugin_id: plugin_id.into(),
+            display_name: "Skills Test".into(),
+            description: None,
+            components: vec![PluginComponent::Skills(SkillsPluginComponent {
+                roots: vec![PathBuf::from("/tmp")],
+            })],
+            enabled,
+            on_load_failure: PluginLoadFailurePolicy::FailRun,
+        }
     }
 
     fn sqlite_event_store(path: &Path, migrate_on_connect: bool) -> ProfileEventStoreConfig {

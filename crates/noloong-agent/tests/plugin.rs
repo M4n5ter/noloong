@@ -1,6 +1,7 @@
 use noloong_agent::{
-    AgentManifest, AgentPluginDeclaration, AgentSession, PluginEnvSource, PluginLoadFailurePolicy,
-    PluginTransport, StdioPluginTransport,
+    AgentManifest, AgentPluginDeclaration, AgentSession, NoloongExtensionPluginComponent,
+    NoloongExtensionTransport, PluginComponent, PluginEnvSource, PluginLoadFailurePolicy,
+    StdioPluginTransport,
 };
 use noloong_agent_core::{
     BoxFuture, CancellationToken, ExtensionCapabilitySelector, ModelProvider, ModelRequest,
@@ -42,11 +43,15 @@ async fn manifest_disabled_plugin_does_not_start_process() -> Result<()> {
         PluginLoadFailurePolicy::FailRun,
     );
     plugin.enabled = false;
-    match &mut plugin.transport {
-        PluginTransport::Stdio(transport) => {
-            transport.command = "missing-noloong-plugin-command".into();
-        }
-    }
+    extension_component_mut(&mut plugin).transport =
+        NoloongExtensionTransport::Stdio(StdioPluginTransport {
+            command: "missing-noloong-plugin-command".into(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            request_timeout_secs: Some(1),
+            stream_timeout_secs: Some(1),
+        });
     let manifest = AgentManifest::default().with_plugin(plugin).unwrap();
     let session = AgentSession::builder().with_manifest(manifest).build();
 
@@ -109,16 +114,14 @@ async fn plugin_missing_host_env_is_diagnostic() {
         }],
         PluginLoadFailurePolicy::FailRun,
     );
-    match &mut plugin.transport {
-        PluginTransport::Stdio(transport) => {
-            transport.env.insert(
-                "PLUGIN_API_KEY".into(),
-                PluginEnvSource::HostEnv {
-                    name: "NOLOONG_PLUGIN_ENV_SHOULD_NOT_EXIST".into(),
-                },
-            );
-        }
-    }
+    let NoloongExtensionTransport::Stdio(transport) =
+        &mut extension_component_mut(&mut plugin).transport;
+    transport.env.insert(
+        "PLUGIN_API_KEY".into(),
+        PluginEnvSource::HostEnv {
+            name: "NOLOONG_PLUGIN_ENV_SHOULD_NOT_EXIST".into(),
+        },
+    );
     let manifest = AgentManifest::default().with_plugin(plugin).unwrap();
     let session = AgentSession::builder().with_manifest(manifest).build();
 
@@ -146,23 +149,27 @@ fn conformance_plugin(
         plugin_id: plugin_id.into(),
         display_name: "Conformance".into(),
         description: None,
-        transport: PluginTransport::Stdio(StdioPluginTransport {
-            command: "node".into(),
-            args: vec![
-                conformance_fixture().to_string_lossy().into_owned(),
-                "--mode=all-capabilities".into(),
-            ],
-            cwd: None,
-            env: BTreeMap::from([(
-                "PATH".into(),
-                PluginEnvSource::HostEnv {
-                    name: "PATH".into(),
-                },
-            )]),
-            request_timeout_secs: Some(2),
-            stream_timeout_secs: Some(2),
-        }),
-        allowed_capabilities,
+        components: vec![PluginComponent::NoloongExtension(
+            NoloongExtensionPluginComponent {
+                transport: NoloongExtensionTransport::Stdio(StdioPluginTransport {
+                    command: "node".into(),
+                    args: vec![
+                        conformance_fixture().to_string_lossy().into_owned(),
+                        "--mode=all-capabilities".into(),
+                    ],
+                    cwd: None,
+                    env: BTreeMap::from([(
+                        "PATH".into(),
+                        PluginEnvSource::HostEnv {
+                            name: "PATH".into(),
+                        },
+                    )]),
+                    request_timeout_secs: Some(2),
+                    stream_timeout_secs: Some(2),
+                }),
+                allowed_capabilities,
+            },
+        )],
         enabled: true,
         on_load_failure,
     }
@@ -176,18 +183,35 @@ fn missing_command_plugin(
         plugin_id: plugin_id.into(),
         display_name: "Missing".into(),
         description: None,
-        transport: PluginTransport::Stdio(StdioPluginTransport {
-            command: "missing-noloong-plugin-command".into(),
-            args: Vec::new(),
-            cwd: None,
-            env: BTreeMap::new(),
-            request_timeout_secs: Some(1),
-            stream_timeout_secs: Some(1),
-        }),
-        allowed_capabilities: Vec::new(),
+        components: vec![PluginComponent::NoloongExtension(
+            NoloongExtensionPluginComponent {
+                transport: NoloongExtensionTransport::Stdio(StdioPluginTransport {
+                    command: "missing-noloong-plugin-command".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    request_timeout_secs: Some(1),
+                    stream_timeout_secs: Some(1),
+                }),
+                allowed_capabilities: Vec::new(),
+            },
+        )],
         enabled: true,
         on_load_failure,
     }
+}
+
+fn extension_component_mut(
+    plugin: &mut AgentPluginDeclaration,
+) -> &mut NoloongExtensionPluginComponent {
+    plugin
+        .components
+        .iter_mut()
+        .find_map(|component| match component {
+            PluginComponent::NoloongExtension(component) => Some(component),
+            _ => None,
+        })
+        .expect("test plugin has noloong extension component")
 }
 
 fn conformance_fixture() -> PathBuf {

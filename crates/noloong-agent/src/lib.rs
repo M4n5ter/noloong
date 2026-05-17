@@ -4,11 +4,14 @@ pub mod host;
 pub mod i18n;
 pub mod interaction;
 pub mod manifest;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 #[cfg(feature = "openai")]
 pub mod openai;
 pub mod plugin;
 pub mod process;
 pub mod session;
+pub mod skills;
 mod sqlite_database_url;
 pub mod system_prompt;
 pub mod tools;
@@ -36,8 +39,10 @@ pub use manifest::{
     SystemPromptAddition, SystemPromptSource,
 };
 pub use plugin::{
-    AgentPluginDeclaration, PluginEnvSource, PluginLoadError, PluginLoadFailurePolicy,
-    PluginLoadWarning, PluginTransport, StdioPluginTransport,
+    AgentPluginDeclaration, McpHeaderSource, McpPluginComponent, McpPluginTransport,
+    McpStdioTransport, McpStreamableHttpTransport, NoloongExtensionPluginComponent,
+    NoloongExtensionTransport, PluginComponent, PluginEnvSource, PluginLoadError,
+    PluginLoadFailurePolicy, PluginLoadWarning, SkillsPluginComponent, StdioPluginTransport,
 };
 pub use process::{
     HostProcessCompletion, HostProcessEvent, HostProcessManager, HostProcessSubscription, JobId,
@@ -48,6 +53,7 @@ pub use session::{
     AgentSession, AgentSessionBuilder, AgentSessionRuntimeBuilder, BackgroundCompletionConfig,
     BackgroundCompletionSteering, DEFAULT_BACKGROUND_COMPLETION_PREVIEW_BYTES,
 };
+pub use skills::{LoadedSkills, SkillLoadError, SkillMetadata, SkillRender};
 pub use sqlite_database_url::{SqliteDatabaseLocation, SqliteDatabaseUrlError};
 pub use system_prompt::{
     BUILT_IN_SYSTEM_PROMPT_HOOK_ID, ResolvedSystemPrompt, SystemPromptModelContext,

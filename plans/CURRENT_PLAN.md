@@ -1,368 +1,479 @@
-# Implementation Plan: Interaction Store 结构化优化
+# Implementation Plan: Noloong Skills 与 MCP 插件机制
 
 ## Overview
 
-本轮专门处理上一轮审查中适合单独推进的结构性问题：统一 SQLite URL 解析，整理 SQL registry store 的 metadata 查询流程，降低 Object store session list 的串行远端 IO 放大，并收敛 store 过滤语义。目标是不改变外部行为和 JSON-RPC wire shape，只优化内部实现的可靠性、复用性和性能边界。
+本轮为 noloong 增加原生 plugin 机制的第一版可用能力：一个 plugin 可以提供 Skills、MCP servers，以及现有 noloong stdio extension。Skills 行为参考 `openai/codex` 的实际实现：默认只把 skill metadata 和可读取路径注入模型上下文；显式 mention 时 host 自动读取并注入 `SKILL.md` 正文；其它语义匹配场景由 agent 根据 metadata 中的 path 自行读取。MCP 使用官方 `rmcp`，支持 stdio 和 streamable HTTP，不支持 legacy SSE。项目没有兼容性包袱，旧 plugin wire shape 直接替换，不保留迁移分支。
 
 ## Implementation Status
 
-完成于 2026-05-17。
-
-- [x] Phase 1: Shared SQLite URL Parser
-- [x] Phase 2: SQL Metadata Query Cleanup
-- [x] Phase 3: Object Store IO Optimization
-- [x] Phase 4: Regression and Review
-
-已通过：
-
-- [x] `cargo test -p noloong-agent sqlite_database_url`
-- [x] `cargo test -p noloong-agent --features client-state-sqlite client_state`
-- [x] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [x] `cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres`
-- [x] `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object`
-- [x] `cargo test -p noloong-agent --test interaction_registry`
-- [x] `cargo test -p noloong schema`
-- [x] `cargo fmt --all --check`
-- [x] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-- [x] `cargo clippy -p noloong-agent --all-targets --all-features -- -D warnings`
-- [x] `cargo test --workspace`
-- [x] `git diff --check`
+- [x] Phase 1 Plugin Component Foundation：已将旧顶层 plugin transport 替换为 `components`，并完成 manifest schema、summary、i18n 相关测试与 stdio extension runtime 迁移。
+- [x] Phase 2 Skills Loader and Metadata Context：已实现 skills loader、2% input window metadata budget、默认 metadata 注入、`$skill` / `skill://...` / structured selection 的 turn-local `SKILL.md` 正文注入。
+- [x] Phase 3 MCP Runtime：已接入 `rmcp`，支持 stdio 与 streamable HTTP client，MCP tools 映射为 `ToolProvider`，并覆盖 tool filters、secret redaction、真实 stdio/HTTP tool call 测试。
+- [x] Phase 4 Docs, Examples, and Regression：已更新 plugin 示例、增加 skills/MCP 示例、更新 extension/interaction 文档，并完成格式、测试与 clippy 回归。
 
 ## Architecture Decisions
 
-- SQLite URL 解析统一放在 `noloong-agent` host/store 层，不下沉到 `noloong-agent-core`。
-- SQL store 不引入 sqlite/postgres 两套 raw SQL 分叉；优先保持 Toasty 共用实现。
-- Object store 的 record 仍是最终 truth；index 只负责候选收窄，最终结果必须经过 record 校验。
-- Object store 并发读取使用内部常量，默认 `16`，本轮不新增 profile/config surface。
-- 项目无兼容性负担；旧内部 parser 差异和旧 object index 形态可直接清理。
+- 插件是 `noloong-agent` 的 host/runtime 层能力，不下沉到 `noloong-agent-core`；core 继续只认 `ToolProvider`、`ContextProvider` 和 stdio extension bridge。
+- 旧 `AgentPluginDeclaration.transport` 改成 `components`，组件类型为 `skills`、`mcp`、`noloong_extension`；现有 stdio extension 能力保留为 `noloong_extension` 组件。
+- Skills 不是 built-in tools；不新增 `agent.skill.read/search/list`。模型通过注入的 metadata path 使用现有 host 文件/命令能力读取 skill 资源。
+- Skills metadata 预算为当前主模型真实 input window 的 2%；超预算策略按 Codex 风格优先压缩路径和 description，而不是按当前 query 做相关性筛选。
+- 显式 skill mention 采用 Codex 同款 host 注入：`$skill`、`skill://...` 或结构化 skill selection 命中时，host 在本 turn 自动读取 `SKILL.md` 正文并注入。
+- MCP 使用 `rmcp` 官方客户端；v1 支持 stdio 和 streamable HTTP，明确拒绝 legacy SSE 配置。
+- streamable HTTP headers 支持静态值和 host env secret 映射；manifest summary、日志、warning 不输出 secret value。
+
+## Target Config Shape
+
+```json
+{
+  "pluginId": "local-dev",
+  "displayName": "Local Dev",
+  "enabled": true,
+  "onLoadFailure": "disable_for_run",
+  "components": [
+    {
+      "type": "skills",
+      "roots": ["./skills"]
+    },
+    {
+      "type": "mcp",
+      "serverId": "filesystem",
+      "transport": {
+        "type": "stdio",
+        "command": "node",
+        "args": ["./servers/filesystem.js"],
+        "cwd": ".",
+        "env": {}
+      },
+      "enabledTools": ["read_file", "list_directory"],
+      "disabledTools": [],
+      "toolNamePrefix": "fs",
+      "requestTimeoutSecs": 30
+    },
+    {
+      "type": "mcp",
+      "serverId": "remote-docs",
+      "transport": {
+        "type": "streamable_http",
+        "url": "https://example.com/mcp",
+        "headers": {
+          "Authorization": {
+            "type": "host_env",
+            "name": "REMOTE_DOCS_MCP_TOKEN",
+            "prefix": "Bearer "
+          }
+        },
+        "connectTimeoutSecs": 10,
+        "requestTimeoutSecs": 30
+      },
+      "toolNamePrefix": "docs"
+    },
+    {
+      "type": "noloong_extension",
+      "transport": {
+        "type": "stdio",
+        "command": "node",
+        "args": ["./extension.mjs"],
+        "cwd": ".",
+        "env": {}
+      },
+      "allowedCapabilities": [
+        { "type": "tool", "name": "conformance_echo" }
+      ]
+    }
+  ]
+}
+```
 
 ## Dependency Graph
 
 ```text
-Shared SQLite URL parser
-    ├── ClientStateStore SQLite backend
-    ├── Registry SQL store location parser
-    └── CLI state database parent validation
+Plugin component schema
+    ├── Manifest patch/schema/i18n updates
+    ├── Noloong extension component compatibility-in-current-code
+    ├── Skills component loader
+    │       ├── Skills metadata renderer and 2% budget
+    │       └── Explicit skill injection into model request
+    └── MCP component loader
+            ├── rmcp transport clients
+            ├── MCP tool provider adapter
+            └── Approval and output mapping
 
-Session filter candidate semantics
-    ├── SQL metadata candidate collection
-    │       └── SQL list row loading and final record filtering
-    └── Object index candidate collection
-            ├── Path-based metadata candidate decode
-            ├── Bounded concurrent index/record reads
-            └── Stale index cleanup
+Runtime plugin loader
+    ├── with_manifest_plugins component dispatch
+    ├── plugin load warning diagnostics
+    └── docs, examples, regression tests
 ```
 
 ## Task List
 
-### Phase 1: Shared SQLite URL Parser
+### Phase 1: Plugin Component Foundation
 
-#### Task 1: 新增统一 SQLite URL parser
+#### Task 1: 重构 plugin declaration 为 components
 
-**Description:** 在 `noloong-agent` 新增共享 SQLite URL 解析类型，统一当前 client state、registry SQL store、CLI config 中重复的 memory/file/scheme 解析逻辑。该任务只新增 parser 和单元测试，不切换调用点。
+**Description:** 将 `AgentPluginDeclaration` 从单一 `transport` 改为 `components` 列表。新增 `PluginComponent` tagged enum，包含 `skills`、`mcp`、`noloong_extension` 三类。旧顶层 `transport` 形态直接删除，不做兼容。
 
 **Acceptance criteria:**
-- [ ] 新增 `SqliteDatabaseLocation` 或等价类型，至少包含 `Memory` 和 `File(PathBuf)`。
-- [ ] 新增 parser，支持 `:memory:`、`sqlite::memory:`、`sqlite://memory`、`sqlite:<path>`、`sqlite://<path>` 和裸路径。
-- [ ] parser 对空字符串、空 sqlite path、非 sqlite URL scheme 返回结构化错误。
-- [ ] parser 不接受 postgres URL；postgres 仍由 registry SQL store 自己处理。
+- [ ] `AgentPluginDeclaration` 必须包含非空 `pluginId`、`displayName` 和至少一个 component。
+- [ ] `PluginComponent` 使用 `type` tagged enum，serde 字段为 camelCase。
+- [ ] `noloong_extension` 组件复用现有 stdio transport 和 `allowedCapabilities` 语义。
+- [ ] 旧 `transport` 顶层字段不再出现在类型、schema、示例和测试中。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent sqlite_database_url`
-- [ ] Tests pass: `cargo test -p noloong-agent --features client-state-sqlite client_state`
+- [ ] Tests pass: `cargo test -p noloong-agent --test manifest plugin`
+- [ ] Search check: `rg "\"transport\"|PluginTransport|to_stdio_extension_config" crates/noloong-agent examples/profile-configs`
 
 **Dependencies:** None
 
 **Files likely touched:**
-- `crates/noloong-agent/src/client_state.rs`
-- `crates/noloong-agent/src/lib.rs`
-- new shared module under `crates/noloong-agent/src/`
+- `crates/noloong-agent/src/plugin.rs`
+- `crates/noloong-agent/src/manifest.rs`
+- `crates/noloong-agent/tests/manifest.rs`
 
-**Estimated scope:** S
+**Estimated scope:** M
 
-#### Task 2: 将现有调用点切到统一 parser
+#### Task 2: 更新 manifest tool schema、summary 和 i18n
 
-**Description:** 删除 client state、registry SQL store、CLI config 中重复的 SQLite path parser。Client state 和 CLI config 直接复用 Task 1 的 parser；registry SQL store 继续保留 `SqlStoreLocation`，但其 sqlite 分支从共享 parser 映射得到。
+**Description:** 更新 `agent.manifest.propose_patch` 的 JSON schema、patch summary 和中英文 i18n，使注册插件时展示 component 类型、数量和安全摘要。secret/env source 只能显示来源名，不能显示解析后的值。
 
 **Acceptance criteria:**
-- [ ] `SqliteClientStateStore::new` 使用统一 parser，行为与当前测试一致。
-- [ ] `SqlAgentSessionRegistryStore` 的 sqlite URL 分支使用统一 parser，postgres 分支保持原样。
-- [ ] `ensure_sqlite_database_parent` / CLI config 不再维护独立 sqlite parser。
-- [ ] 仓库中不再存在多份 `sqlite_path_from_suffix` / `sqlite_database_path` 变体。
+- [ ] manifest patch schema 接受新 component shape。
+- [ ] `RegisterPlugin` summary 包含 plugin id、enabled、onLoadFailure、component summaries。
+- [ ] env/header secret source 在 summary 和错误文案中只显示 source name。
+- [ ] 中英文 i18n 测试覆盖 plugin register/enable/remove 仍完整。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features client-state-sqlite client_state`
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] Tests pass: `cargo test -p noloong schema sqlite_database_path`
-- [ ] Search check: `rg "sqlite_path_from_suffix|fn sqlite_database_path|fn sqlite_path\\("`
+- [ ] Tests pass: `cargo test -p noloong-agent i18n`
+- [ ] Tests pass: `cargo test -p noloong-agent --test manifest manifest_plugin`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
-- `crates/noloong-agent/src/client_state.rs`
-- `crates/noloong-agent/src/interaction/store/sql.rs`
-- `src/config.rs`
+- `crates/noloong-agent/src/tools/manifest.rs`
+- `crates/noloong-agent/src/i18n.rs`
+- `crates/noloong-agent/tests/manifest.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-### Checkpoint: SQLite Parser
+#### Task 3: 迁移现有 stdio extension plugin runtime
 
-- [ ] `cargo fmt -p noloong-agent --check`
-- [ ] `cargo test -p noloong-agent --features client-state-sqlite client_state`
-- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] `cargo test -p noloong schema`
-
-### Phase 2: SQL Metadata Query Cleanup
-
-#### Task 3: 收敛 SQL metadata candidate 构造
-
-**Description:** 重写 SQL store 的 metadata candidate 构造流程。每个 `metadataEquals` 条件仍通过 `StoredAgentSessionMetadata` 查询候选 session id，但先收集所有条件候选集，按候选数量从小到大做交集，避免低选择性条件先放大内存集合。
+**Description:** 将 `AgentSessionRuntimeBuilder::with_manifest_plugins()` 从“每个 plugin 启动一个 stdio extension”改成“遍历 enabled plugin components”。本任务只接通 `noloong_extension`，确保现有 conformance extension 测试在新 schema 下继续成立。
 
 **Acceptance criteria:**
-- [ ] 空 `metadataEquals` 返回 `None`，保持无 metadata filter 路径。
-- [ ] 非 scalar metadata filter 返回空候选集。
-- [ ] 多条件 filter 按最小候选集优先交集，结果稳定排序。
-- [ ] metadata candidate 逻辑不 decode session record JSON。
+- [ ] disabled plugin 不加载任何 component。
+- [ ] `noloong_extension` 组件会启动 stdio extension 并同步 core metadata。
+- [ ] `DisableForRun` 记录 plugin/component warning 并继续构建 runtime。
+- [ ] `FailRun` 在 component 加载失败时终止 runtime 构建。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite metadata`
-- [ ] Tests pass: `cargo test -p noloong-agent --test interaction_registry metadata`
+- [ ] Tests pass: `cargo test -p noloong-agent --test plugin`
+- [ ] Tests pass: `cargo test -p noloong-agent --test agent_session`
 
 **Dependencies:** Task 2
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/sql.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_sqlite.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/src/plugin.rs`
+- `crates/noloong-agent/tests/plugin.rs`
 
-**Estimated scope:** S
+**Estimated scope:** M
 
-#### Task 4: 优化 SQL candidate session row 读取
+### Checkpoint: Plugin Foundation
 
-**Description:** 替换 metadata 命中后的全表扫描路径。新增 `load_session_rows_for_filter`：无 metadata candidate 时走当前 all rows + row filter；有 candidate 时按 candidate id 点查，避免把全表 `record_json` 拉入内存。
+- [ ] `cargo fmt -p noloong-agent --check`
+- [ ] `cargo test -p noloong-agent --test manifest`
+- [ ] `cargo test -p noloong-agent --test plugin`
+- [ ] `cargo test -p noloong-agent --test agent_session`
+
+### Phase 2: Skills Loader and Metadata Context
+
+#### Task 4: 新增 Skills loader 与 metadata model
+
+**Description:** 新增 agent 层 skills 模块，按 plugin `skills.roots` 递归发现 `SKILL.md`。解析 YAML frontmatter 的 `name`、`description`，记录 canonical `path`、`pluginId`、`scope`。隐藏目录跳过，扫描深度和目录数量有硬限制，避免错误目录拖垮 session 构建。
 
 **Acceptance criteria:**
-- [ ] 小候选集仍只读取候选 session rows。
-- [ ] 大候选集仍只读取 candidate session rows，不回退到全表 `record_json` 扫描。
-- [ ] parent/profile/status row filter 在 decode record 前应用。
-- [ ] 最终结果仍经过 `record_matches_session_list_filter` 校验。
+- [ ] 支持 root 直接包含 `SKILL.md` 和 root 子目录包含多个 `SKILL.md`。
+- [ ] `name` 和 `description` 缺失、为空或超长时产生结构化 load error。
+- [ ] skill path 使用 canonical absolute path；canonicalize 失败时使用原 absolute path。
+- [ ] 同一路径重复发现时去重；同名 skill 允许共存。
+- [ ] `onLoadFailure` 控制 skills component load error 是 warning 还是 fail run。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres`
-- [ ] Tests pass: `cargo test -p noloong-agent --test interaction_registry registry_filters`
+- [ ] Tests pass: `cargo test -p noloong-agent --test skills loader`
+- [ ] Tests pass: `cargo test -p noloong-agent --test plugin skills`
 
 **Dependencies:** Task 3
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/sql.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_sqlite.rs`
+- `crates/noloong-agent/src/skills.rs`
+- `crates/noloong-agent/src/plugin.rs`
+- `crates/noloong-agent/tests/skills.rs`
 
 **Estimated scope:** M
 
-#### Task 5: 明确 SQL filter 真值边界
+#### Task 5: 实现 2% skills metadata 渲染预算
 
-**Description:** 将 SQL row filter 重命名并约束为 candidate prefilter，避免它被误认为最终过滤语义。最终 parent/profile/status/metadata 语义只由 `record_matches_session_list_filter` 决定。
+**Description:** 实现 Codex 风格的 available skills 渲染器。默认预算为 `floor(inputLimitTokens * 0.02)`；使用当前主模型真实 input limit。渲染时先尝试 absolute path，超预算再尝试 skill root alias，仍超预算则均匀截断 description，最后只保留能放下的最小 skill 行。
 
 **Acceptance criteria:**
-- [ ] SQL row helper 名称体现 prefilter/candidate 语义。
-- [ ] SQL row helper 不检查 metadata JSON 语义。
-- [ ] `list(filter)` 的最终输出只在 `record_matches_session_list_filter` 通过后返回。
-- [ ] 相关测试覆盖 row metadata drift 时不会返回错误 record。
+- [ ] 低于预算时完整渲染所有 `name/description/path`。
+- [ ] path 太长导致超预算时，生成 `Skill roots` alias table 并使用短路径。
+- [ ] description 太长导致超预算时，保留所有 skill 行并均匀截断 description。
+- [ ] 最小行也超预算时，按稳定顺序保留能放下的行并产生 warning。
+- [ ] 启用 skills 但无法解析主模型 input limit 时，runtime 构建失败并提示显式配置模型窗口。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] Tests pass: `cargo test -p noloong-agent --test interaction_registry metadata`
+- [ ] Tests pass: `cargo test -p noloong-agent --test skills render`
+- [ ] Tests pass: `cargo test -p noloong-agent --test agent_session skills_context`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/sql.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_sqlite.rs`
+- `crates/noloong-agent/src/skills.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/skills.rs`
 
-**Estimated scope:** S
+**Estimated scope:** M
 
-### Checkpoint: SQL Store
+#### Task 6: 将 available skills 注入模型请求
 
-- [ ] `cargo fmt -p noloong-agent --check`
-- [ ] `cargo test -p noloong-agent --test interaction_registry`
-- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] `cargo test -p noloong-agent --features registry-store-postgres --test interaction_registry_store_postgres`
-
-### Phase 3: Object Store IO Optimization
-
-#### Task 6: 从 object index path 解码 session id
-
-**Description:** Object store 的 metadata candidate 查询不再读取每个 metadata index object body。新增 path decode helper，从 `session-metadata/{key}/{value}/{session}.json` 的文件名恢复 session id；metadata index body 可以保留但不参与 candidate 构造。
+**Description:** 在 system prompt/runtime context 注入路径中加入 `<skills_instructions>`，只进入本次 provider request，不写入持久 transcript、event store 或 compaction 历史。文案包含 skill discovery、trigger rules、progressive disclosure、resources 读取规则和安全 fallback。
 
 **Acceptance criteria:**
-- [ ] metadata candidate 构造只 `list(prefix)`，不对每个 candidate 调用 `read(path)`。
-- [ ] session id decode 使用现有 `URL_SAFE_NO_PAD` 规则。
-- [ ] 非 `.json`、base64 无效或路径层级不匹配的 entry 被视为 stale entry 并跳过。
-- [ ] candidate map 仍按 session id 稳定排序。
+- [ ] 无 enabled skills 时不注入 `<skills_instructions>`。
+- [ ] 有 enabled skills 时每次模型请求都注入 metadata 和 how-to-use。
+- [ ] 注入内容包含路径读取说明，不暗示存在 `agent.skill.*` 工具。
+- [ ] skills warning 可进入 plugin load warnings 或 runtime diagnostics。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object metadata`
-- [ ] Add test/fake assertion proving metadata candidate list does not require readable index body.
+- [ ] Tests pass: `cargo test -p noloong-agent --test agent_session skills_context`
+- [ ] Tests pass: `cargo test -p noloong-agent --test manifest`
 
 **Dependencies:** Task 5
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/object.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_object.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/src/system_prompt.rs`
+- `crates/noloong-agent/tests/agent_session.rs`
 
-**Estimated scope:** M
+**Estimated scope:** S
 
-#### Task 7: 调整 Object store 写入顺序以避免不可见 record
+#### Task 7: 实现显式 skill mention 的正文注入
 
-**Description:** 让 Object store 的 insert/save 先写 index，再写 record，并在 record 写失败时清理新 index。这样 index 写失败不会留下“record 已存在但 list 不可见”的状态；record 是最终 truth，stale index 可在 list 时清理。
+**Description:** 对 `$skill`、`skill://<absolute-path>` 和未来 bridge 可传入的 structured skill selection 做 host 侧解析。命中 enabled skill 后，在本 turn 自动读取对应 `SKILL.md` 正文并作为 turn-local skill instructions 注入模型请求。
 
 **Acceptance criteria:**
-- [ ] insert：如果 session index 或 metadata index 写失败，不写 session record。
-- [ ] insert：如果 session record 写失败，清理已写入的新 index。
-- [ ] save：先加载 previous record；新 index 写失败时不改 record。
-- [ ] save：record 写失败时尽力恢复 previous index 并清理 new index。
-- [ ] remove：删除 record 后清理 session index 和 metadata index，现有行为保持。
+- [ ] `$name` 只有唯一 enabled skill 匹配时才注入；同名冲突时不按 name 注入。
+- [ ] `skill://path` 按 canonical path 精确匹配 enabled skill。
+- [ ] disabled skill 不会被正文注入。
+- [ ] skill 正文读取失败时发送 warning，模型请求继续使用 metadata fallback。
+- [ ] 注入的 skill 正文不写入长期 session transcript。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object`
-- [ ] Add failure-injection or focused unit test for insert index failure not leaving visible/hidden inconsistent record where feasible.
+- [ ] Tests pass: `cargo test -p noloong-agent --test skills injection`
+- [ ] Tests pass: `cargo test -p noloong-agent --test agent_session skill`
 
 **Dependencies:** Task 6
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/object.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_object.rs`
+- `crates/noloong-agent/src/skills.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/skills.rs`
 
 **Estimated scope:** M
 
-#### Task 8: 为 Object store list 增加 bounded 并发读取
+### Checkpoint: Skills
 
-**Description:** Object store list 在读取 session-index 和 session record 时使用 bounded 并发，减少远端对象存储的串行 GET 放大。并发只用于 IO，最终结果仍按 `session_id` 排序。
+- [ ] `cargo fmt -p noloong-agent --check`
+- [ ] `cargo test -p noloong-agent --test skills`
+- [ ] `cargo test -p noloong-agent --test agent_session`
+- [ ] Manual prompt snapshot check: skills metadata appears in model request, `SKILL.md` body appears only for explicit mention.
+
+### Phase 3: MCP Runtime
+
+#### Task 8: 引入 rmcp 并定义 MCP component config
+
+**Description:** 在 `noloong-agent` 增加 `mcp` feature 和 `rmcp` 依赖。定义 MCP component、stdio transport、streamable HTTP transport、tool allow/deny、timeout 和 header/env source 类型。legacy SSE 类型不进入 schema。
 
 **Acceptance criteria:**
-- [ ] 新增内部常量 `OBJECT_STORE_LIST_READ_CONCURRENCY: usize = 16`。
-- [ ] session-index body 读取使用 bounded 并发。
-- [ ] record 读取使用 bounded 并发。
-- [ ] 单个 NotFound stale index 被清理并跳过；其它 read/decode error 仍返回 store error。
-- [ ] 最终 records 仍按 `session_id` 稳定排序。
+- [ ] `mcp` feature 编译时启用 rmcp stdio 和 streamable HTTP client capability。
+- [ ] `McpPluginComponent` 支持 `serverId`、`transport`、`enabledTools`、`disabledTools`、`toolNamePrefix`、`requestTimeoutSecs`。
+- [ ] streamable HTTP 支持 `url`、static headers、host env headers、`connectTimeoutSecs`。
+- [ ] `type = "sse"` 或未知 transport 被 serde/validate 拒绝。
+- [ ] secret header/env value 不进入 Debug、summary 或 error 文案。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object`
-- [ ] Tests pass: `cargo test -p noloong-agent --test interaction_registry registry_lists_unloaded_stored_sessions`
+- [ ] Tests pass: `cargo test -p noloong-agent --features mcp --test manifest mcp`
+- [ ] Tests pass: `cargo check -p noloong-agent --features mcp`
 
-**Dependencies:** Task 7
+**Dependencies:** Task 3
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/object.rs`
+- `crates/noloong-agent/Cargo.toml`
+- `Cargo.toml`
+- `crates/noloong-agent/src/plugin.rs`
 
 **Estimated scope:** M
 
-#### Task 9: 收敛 Object store index prefilter 语义
+#### Task 9: 实现 MCP connection loader
 
-**Description:** 将 `ObjectSessionIndexEntry::matches_filter` 收窄为 candidate prefilter，并确保 filter 不通过时能清理当前 filter 命中的错误 metadata index path。最终输出必须由 record 校验决定。
+**Description:** 在 runtime 构建时为 enabled MCP component 建立 rmcp client connection，初始化 server 并拉取 tool list。加载失败按 `onLoadFailure` 处理。MCP server 生命周期绑定到 runtime，runtime drop 时关闭连接。
 
 **Acceptance criteria:**
-- [ ] object index helper 名称体现 candidate/prefilter 语义。
-- [ ] index prefilter 不作为最终返回依据。
-- [ ] stale metadata candidate path 在当前 filter 下不匹配时会被删除。
-- [ ] session index stale 时会重写 session index 和 metadata index。
+- [ ] stdio MCP server 可启动、initialize、list_tools。
+- [ ] streamable HTTP MCP server 可 initialize、list_tools。
+- [ ] timeout、认证失败、server crash 产生带 pluginId/serverId/component 信息的 warning/error。
+- [ ] duplicate `serverId` 或 duplicate exposed tool name 被拒绝或按 `onLoadFailure` 降级。
+- [ ] runtime 结束时不遗留 stdio child process。
 
 **Verification:**
-- [ ] Tests pass: `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object metadata`
-- [ ] Add test covering stale metadata candidate does not return wrong record and is removed.
+- [ ] Tests pass: `cargo test -p noloong-agent --features mcp --test mcp_plugin stdio`
+- [ ] Tests pass: `cargo test -p noloong-agent --features mcp --test mcp_plugin streamable_http`
 
 **Dependencies:** Task 8
 
 **Files likely touched:**
-- `crates/noloong-agent/src/interaction/store/object.rs`
-- `crates/noloong-agent/tests/interaction_registry_store_object.rs`
+- `crates/noloong-agent/src/mcp.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/mcp_plugin.rs`
 
-**Estimated scope:** S
+**Estimated scope:** M
 
-### Checkpoint: Object Store
+#### Task 10: 将 MCP tools 适配为 ToolProvider
 
-- [ ] `cargo fmt -p noloong-agent --check`
-- [ ] `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object`
-- [ ] `cargo test -p noloong-agent --test interaction_registry`
-- [ ] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-
-### Phase 4: Regression and Review
-
-#### Task 10: 清理计划、命名和残留重复实现
-
-**Description:** 做一次只针对本轮重构的静态清理，确保没有残留重复 parser、命名与实际语义不一致的 helper、或已经无用的 imports/tests。
+**Description:** 为每个 MCP tool 生成 noloong `ToolProvider`。工具名采用确定性前缀，输入 schema 来自 MCP tool schema，调用时把 noloong tool args 转发给 MCP `call_tool`，并把 MCP response 映射回现有 `ToolOutput`。
 
 **Acceptance criteria:**
-- [ ] `rg "sqlite_path_from_suffix|fn sqlite_database_path|fn sqlite_path\\("` 只剩共享 parser 或预期 postgres/sql location 入口。
-- [ ] SQL/Object filter helper 命名均体现 candidate/prefilter/final filter 边界。
-- [ ] 无未使用 imports、无重复测试 fixture helper。
-- [x] `plans/CURRENT_PLAN.md` 状态已同步为已实施。
+- [ ] 默认工具名为 `mcp.<pluginId>.<serverId>.<toolName>`，配置 `toolNamePrefix` 后使用短前缀。
+- [ ] `enabledTools` 为空时默认暴露全部未禁用工具。
+- [ ] `enabledTools` 与 `disabledTools` 同时命中时 disabled 优先。
+- [ ] MCP text content 映射为文本输出；structured/resource/image content 映射为 JSON/metadata 输出。
+- [ ] MCP `isError` 或 call error 标记为 tool error，不伪装成成功。
+- [ ] 大输出继续复用现有 tool output overflow hook。
 
 **Verification:**
-- [ ] Search check: `rg "sqlite_path_from_suffix|fn sqlite_database_path|fn sqlite_path\\("`
-- [ ] Tests pass: `cargo fmt --all --check`
-- [ ] Tests pass: `git diff --check`
+- [ ] Tests pass: `cargo test -p noloong-agent --features mcp --test mcp_plugin tool_call`
+- [ ] Tests pass: `cargo test -p noloong-agent --features mcp --test agent_session mcp`
 
-**Dependencies:** Tasks 1-9
+**Dependencies:** Task 9
 
 **Files likely touched:**
-- `plans/CURRENT_PLAN.md`
-- touched Rust files from earlier tasks
+- `crates/noloong-agent/src/mcp.rs`
+- `crates/noloong-agent/src/session.rs`
+- `crates/noloong-agent/tests/mcp_plugin.rs`
 
-**Estimated scope:** S
+**Estimated scope:** M
 
-#### Task 11: 全量回归
+#### Task 11: 接入 MCP approval 与 runtime diagnostics
 
-**Description:** 跑完整回归，确认 parser、SQL store、Object store 的结构优化没有破坏 client state、registry、Telegram/Weixin 和 schema 路径。
+**Description:** 为 MCP tools 生成清晰的 permission description，复用现有 approval hook。运行配置和 manifest 输出中展示 MCP server/tool 数、transport 和加载状态。
 
 **Acceptance criteria:**
-- [ ] 所有 checkpoint 命令通过。
-- [ ] Workspace tests 通过。
-- [ ] `noloong-agent` clippy 通过。
-- [ ] 最终 diff 无 whitespace error。
+- [ ] 非 built-in MCP tools 默认走现有 unknown tool approval 路径或明确的 MCP permission classification。
+- [ ] approval request 文案包含 plugin display name、serverId、tool name。
+- [ ] `/manifest` 或 runtime config 能看到 MCP server 和 tool count。
+- [ ] approval pause/resume 后 MCP tool call 可继续完成。
 
 **Verification:**
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo test -p noloong-agent --test interaction_registry`
-- [ ] `cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite`
-- [ ] `cargo test -p noloong-agent --features registry-store-object --test interaction_registry_store_object`
-- [ ] `cargo test -p noloong schema`
-- [ ] `cargo clippy -p noloong-agent --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `git diff --check`
+- [ ] Tests pass: `cargo test -p noloong-agent --features mcp --test mcp_plugin approval`
+- [ ] Tests pass: `cargo test -p noloong-agent --test interaction_registry manifest`
 
 **Dependencies:** Task 10
 
 **Files likely touched:**
-- None expected beyond implementation files
+- `crates/noloong-agent/src/approval/hook.rs`
+- `crates/noloong-agent/src/i18n.rs`
+- `crates/noloong-agent/tests/mcp_plugin.rs`
 
 **Estimated scope:** S
 
-## Parallelization Opportunities
+### Checkpoint: MCP
 
-- Tasks 3-5 must stay sequential because they change the same SQL list path.
-- Tasks 6-9 must stay sequential because they change Object store index/read invariants.
-- After Task 2, SQL tasks and Object store tasks can be implemented by separate agents if their write sets stay disjoint.
-- Task 10 can run after SQL and Object store tasks both finish.
+- [ ] `cargo fmt -p noloong-agent --check`
+- [ ] `cargo test -p noloong-agent --features mcp --test mcp_plugin`
+- [ ] `cargo test -p noloong-agent --features mcp --test agent_session`
+- [ ] `cargo clippy -p noloong-agent --all-targets --features mcp -- -D warnings`
+
+### Phase 4: Examples, Docs, and Final Regression
+
+#### Task 12: 更新示例 profile 和文档
+
+**Description:** 更新 plugin stdio 示例为新 component schema，新增 skills 示例和 MCP stdio/streamable HTTP 示例。文档明确 noloong 原生 plugin 与 Codex plugin manifest 不兼容，legacy SSE MCP 不支持。
+
+**Acceptance criteria:**
+- [ ] `examples/profile-configs/plugin-stdio-example.json` 使用 `noloong_extension` component。
+- [ ] 新增或更新示例展示 skills roots、MCP stdio、MCP streamable HTTP。
+- [ ] architecture/interaction docs 说明 plugin components、skills metadata budget、explicit skill injection 和 MCP transport。
+- [ ] 文档中不承诺 Codex plugin 兼容或 computer-use plugin 支持。
+
+**Verification:**
+- [ ] JSON examples parse through profile/config tests.
+- [ ] Search check: `rg "transport\"|legacy SSE|Codex plugin" crates/noloong-agent/docs crates/noloong-agent-core/docs examples`
+
+**Dependencies:** Task 11
+
+**Files likely touched:**
+- `examples/profile-configs/plugin-stdio-example.json`
+- `crates/noloong-agent/docs/ARCHITECTURE.md`
+- `crates/noloong-agent/docs/INTERACTION.md`
+
+**Estimated scope:** S
+
+#### Task 13: 全量回归和 smoke
+
+**Description:** 跑完整回归，确认新 plugin schema、skills 注入和 MCP feature 不破坏现有 interaction、subagent、goal、automation、Telegram/Weixin 客户端路径。对 skills 做一次真实 agent smoke：显式 mention skill 和非显式 metadata 查找各跑一次。
+
+**Acceptance criteria:**
+- [ ] 所有计划内测试通过。
+- [ ] `--all-features` clippy 通过。
+- [ ] 显式 `$skill` smoke 中模型请求包含 `SKILL.md` 正文。
+- [ ] 非显式 smoke 中模型请求只包含 metadata/path，agent 能通过 host 文件能力读取 skill。
+- [ ] MCP stdio fake server smoke 可真实调用 tool。
+- [ ] MCP streamable HTTP fake server smoke 可真实调用 tool。
+
+**Verification:**
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo test -p noloong-agent --test manifest`
+- [ ] `cargo test -p noloong-agent --test agent_session`
+- [ ] `cargo test -p noloong-agent --test plugin`
+- [ ] `cargo test -p noloong-agent --test skills`
+- [ ] `cargo test -p noloong-agent --features mcp --test mcp_plugin`
+- [ ] `cargo test -p noloong-agent --features mcp`
+- [ ] `cargo test --workspace`
+- [ ] `cargo clippy -p noloong-agent --all-targets --all-features -- -D warnings`
+- [ ] `git diff --check`
+
+**Dependencies:** Task 12
+
+**Files likely touched:**
+- Tests and docs only unless regressions require fixes.
+
+**Estimated scope:** M
+
+### Checkpoint: Complete
+
+- [ ] New plugin component schema is the only supported schema.
+- [ ] Skills metadata and explicit injection match the intended Codex-style behavior.
+- [ ] MCP stdio and streamable HTTP both work through `rmcp`.
+- [ ] Legacy SSE and Codex plugin manifest compatibility are explicitly out of scope.
+- [ ] Final regression and smoke complete.
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Toasty lacks efficient batch query primitives | Medium | Use explicit point-lookup threshold and all-row fallback; do not introduce raw SQL split. |
-| Object store index write ordering leaves stale index | Medium | Treat record as final truth, clean stale index during list, and add failure-path tests where feasible. |
-| Path-based metadata candidate decode mishandles malformed entries | Low | Invalid paths are skipped and treated as stale; final record validation remains required. |
-| Shared parser changes CLI error wording | Low | Keep current semantics and verify schema/config tests; exact wording is not public API. |
-| Bounded concurrency changes result order | Medium | Sort final records by `session_id` after all concurrent reads complete. |
+| Skills metadata bloats model request | High | Enforce 2% input-window budget with alias/truncation/minimum-line fallback. |
+| Skill body injection pollutes long-term state | Medium | Inject as request-local context only; do not persist to transcript or compaction history. |
+| MCP transport lifecycle leaks child processes | High | Bind rmcp client handles to runtime lifetime and add stdio drop/shutdown tests. |
+| MCP tool names collide after provider name normalization | Medium | Generate deterministic names and reject collisions during runtime build. |
+| Secret headers leak in logs or summaries | High | Keep secret values out of `Debug`, summaries, warnings, and errors; test with env secret. |
+| Component schema change misses manifest proposal schema | Medium | Update `agent.manifest.propose_patch` schema in the same foundation phase. |
 
-## Not Doing
+## Parallelization Opportunities
 
-- 不新增外部配置项或 profile 字段。
-- 不做通用 object store cache 或后台 reindexer。
-- 不引入 sqlite/postgres raw SQL 双实现。
-- 不保留旧重复 parser 或旧内部 URL 解析差异。
-- 不做旧 object index 兼容迁移；内部项目可以清库重建。
+- After Task 3, Task 4-7 (skills) and Task 8-11 (MCP) can be implemented in parallel if write sets stay separate.
+- Documentation examples can start after Task 1 schema stabilizes, but final docs should wait for Task 11 behavior.
+- Regression/smoke should remain sequential after all feature tasks are merged.
 
 ## Open Questions
 
-- 无。默认选择：复用共享 SQLite parser、SQL 不分叉 raw query、Object store 使用 bounded 并发和 record final validation。
+- None. The current product decision is fixed: no Codex plugin compatibility, no Codex computer-use plugin support, no legacy SSE MCP.

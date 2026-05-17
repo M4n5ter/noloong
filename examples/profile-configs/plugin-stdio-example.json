@@ -18,25 +18,30 @@
           "description": "Loads the Python extension example and allows only its echo tool.",
           "enabled": true,
           "onLoadFailure": "disable_for_run",
-          "transport": {
-            "type": "stdio",
-            "command": "python3",
-            "args": [
-              "examples/extensions/python-conformance/full_conformance_extension.py"
-            ],
-            "env": {
-              "PATH": {
-                "type": "host_env",
-                "name": "PATH"
-              }
-            },
-            "requestTimeoutSecs": 5,
-            "streamTimeoutSecs": 30
-          },
-          "allowedCapabilities": [
+          "components": [
             {
-              "type": "tool",
-              "name": "conformance_echo"
+              "type": "noloong_extension",
+              "transport": {
+                "type": "stdio",
+                "command": "python3",
+                "args": [
+                  "examples/extensions/python-conformance/full_conformance_extension.py"
+                ],
+                "env": {
+                  "PATH": {
+                    "type": "host_env",
+                    "name": "PATH"
+                  }
+                },
+                "requestTimeoutSecs": 5,
+                "streamTimeoutSecs": 30
+              },
+              "allowedCapabilities": [
+                {
+                  "type": "tool",
+                  "name": "conformance_echo"
+                }
+              ]
             }
           ]
         }
@@ -49,7 +54,9 @@
       ],
       "metadata": {
         "example": true,
-        "pluginTransport": "stdio"
+        "pluginComponents": [
+          "noloong_extension"
+        ]
       }
     }
   ]

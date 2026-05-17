@@ -10,6 +10,8 @@ pub const BUILT_IN_SYSTEM_PROMPT_HOOK_ID: &str = "noloong.builtin.system-prompt"
 pub struct SystemPromptModelContext {
     pub provider_id: String,
     pub model_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limit_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

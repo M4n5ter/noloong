@@ -1125,24 +1125,29 @@ mod tests {
                     "displayName": "Default",
                     "provider": {"type": "responses", "model": "gpt-5.4-mini"},
                     "plugins": [{
-                        "pluginId": "echo",
-                        "displayName": "Echo",
-                        "enabled": true,
-                        "transport": {
-                            "type": "stdio",
-                            "command": "node",
-                            "args": ["examples/extensions/echo.mjs"],
-                            "env": {
-                                "PATH": {
-                                    "type": "host_env",
-                                    "name": "PATH"
+                    "pluginId": "echo",
+                    "displayName": "Echo",
+                    "enabled": true,
+                    "components": [
+                        {
+                            "type": "noloong_extension",
+                            "transport": {
+                                "type": "stdio",
+                                "command": "node",
+                                "args": ["examples/extensions/echo.mjs"],
+                                "env": {
+                                    "PATH": {
+                                        "type": "host_env",
+                                        "name": "PATH"
+                                    }
                                 }
-                            }
-                        },
-                        "allowedCapabilities": [
-                            {"type": "tool", "name": "echo.run"}
-                        ]
-                    }]
+                            },
+                            "allowedCapabilities": [
+                                {"type": "tool", "name": "echo.run"}
+                            ]
+                        }
+                    ]
+                }]
                 }]
             }"#,
         )

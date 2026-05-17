@@ -121,6 +121,10 @@ impl AgentRuntimeBuilder {
         self
     }
 
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
     pub fn without_tool(mut self, name: &str) -> Self {
         self.tools.remove(name);
         self

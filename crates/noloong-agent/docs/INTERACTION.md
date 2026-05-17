@@ -326,7 +326,9 @@ The built-in prompt is injected by the Rust host before each model request. It i
 
 Runtime plugins use the same manifest proposal flow. A bridge should not start plugin processes or send provider credentials itself; it asks the agent to propose a manifest patch, lets a human approve it, then calls `manifest/apply_approved`. Enabled plugins are loaded the next time a live runtime is built for a run or mutation. Read-only `session/list` and `session/get` descriptor operations do not start plugin processes, and v1 does not hot-reload an already running runtime.
 
-Register a stdio plugin:
+Plugins are native noloong declarations, not Codex plugin manifests. A plugin contains `components`: `skills` injects skill metadata and readable `SKILL.md` paths into model requests, `mcp` maps stdio or streamable HTTP MCP tools into `ToolProvider`s, and `noloong_extension` starts the existing Noloong JSON-RPC stdio extension bridge. Legacy MCP SSE transport is intentionally unsupported.
+
+Register a plugin with a stdio `noloong_extension` component:
 
 ```json
 {
@@ -354,25 +356,30 @@ Register a stdio plugin:
               "displayName": "Python conformance plugin",
               "enabled": true,
               "onLoadFailure": "disable_for_run",
-              "transport": {
-                "type": "stdio",
-                "command": "python3",
-                "args": [
-                  "examples/extensions/python-conformance/full_conformance_extension.py"
-                ],
-                "env": {
-                  "PATH": {
-                    "type": "host_env",
-                    "name": "PATH"
-                  }
-                },
-                "requestTimeoutSecs": 5,
-                "streamTimeoutSecs": 30
-              },
-              "allowedCapabilities": [
+              "components": [
                 {
-                  "type": "tool",
-                  "name": "conformance_echo"
+                  "type": "noloong_extension",
+                  "transport": {
+                    "type": "stdio",
+                    "command": "python3",
+                    "args": [
+                      "examples/extensions/python-conformance/full_conformance_extension.py"
+                    ],
+                    "env": {
+                      "PATH": {
+                        "type": "host_env",
+                        "name": "PATH"
+                      }
+                    },
+                    "requestTimeoutSecs": 5,
+                    "streamTimeoutSecs": 30
+                  },
+                  "allowedCapabilities": [
+                    {
+                      "type": "tool",
+                      "name": "conformance_echo"
+                    }
+                  ]
                 }
               ]
             }

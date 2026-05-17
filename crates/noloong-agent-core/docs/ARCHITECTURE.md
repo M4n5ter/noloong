@@ -1445,7 +1445,7 @@ cargo test -p noloong-openai --test live_chatgpt -- --ignored --nocapture
 5. thinking redaction/encryption policy：将 raw thinking 的保存、暴露、replay 做成可配置策略。
 6. approval UX adapters：core 已内置 event-sourced pause/resume/timeout 状态机；具体的人机审批 UI、通知、队列持久化和组织策略应作为 hook/应用层适配器实现。
 7. plugin marketplace / signature / version lock：基于当前 product plugin declaration 增加分发、签名校验和可复现版本解析，而不是改变 core JSON-RPC wire contract。
-8. MCP adapter：作为 `noloong-agent` 或独立 extension/plugin 实现，把 MCP server 映射到现有 `ToolProvider`/`ContextProvider`，不直接进入 core runtime。
+8. MCP adapter 扩展：当前 `noloong-agent` plugin component 已把 MCP tools 映射到现有 `ToolProvider`；后续可继续增加 MCP resources/prompts 或独立 extension 形态，但不直接进入 core runtime。
 9. plugin hot reload：需要先定义 run 边界、capability diff、tool availability event 和失败回滚策略；v1 只做下一次 runtime build 生效。
 10. resumable SSE：只在 provider 明确提供可靠 cursor / `Last-Event-ID` / idempotency contract 时，为特定 provider 增加可恢复 stream extension。
 

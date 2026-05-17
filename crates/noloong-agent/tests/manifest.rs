@@ -2,8 +2,9 @@ use noloong_agent::manifest::ManifestError;
 use noloong_agent::{
     AgentManifest, AgentPluginDeclaration, AgentSystemPrompt, ApprovalPolicy,
     BuiltInSystemPromptProfile, BuiltInToolName, FileEditToolPolicy, Locale, ManifestPatch,
-    ManifestProposalStore, PluginEnvSource, PluginLoadFailurePolicy, PluginTransport,
-    StdioPluginTransport, SystemPromptAddition, built_in_system_prompt,
+    ManifestProposalStore, NoloongExtensionPluginComponent, NoloongExtensionTransport,
+    PluginComponent, PluginEnvSource, PluginLoadFailurePolicy, StdioPluginTransport,
+    SystemPromptAddition, built_in_system_prompt,
 };
 use noloong_agent_core::ExtensionCapabilitySelector;
 use std::collections::BTreeMap;
@@ -353,19 +354,43 @@ fn manifest_plugin_declaration_round_trips_and_defaults() {
             "echo": {
                 "pluginId": "echo",
                 "displayName": "Echo",
-                "transport": {
-                    "type": "stdio",
-                    "command": "node",
-                    "args": ["examples/extensions/echo.mjs"],
-                    "env": {
-                        "OPENAI_API_KEY": {
-                            "type": "host_env",
-                            "name": "OPENAI_API_KEY"
+                "components": [
+                    {
+                        "type": "noloong_extension",
+                        "transport": {
+                            "type": "stdio",
+                            "command": "node",
+                            "args": ["examples/extensions/echo.mjs"],
+                            "env": {
+                                "OPENAI_API_KEY": {
+                                    "type": "host_env",
+                                    "name": "OPENAI_API_KEY"
+                                }
+                            }
+                        },
+                        "allowedCapabilities": [
+                            {"type": "tool", "name": "echo.run"}
+                        ]
+                    },
+                    {
+                        "type": "skills",
+                        "roots": ["./skills"]
+                    },
+                    {
+                        "type": "mcp",
+                        "serverId": "docs",
+                        "transport": {
+                            "type": "streamable_http",
+                            "url": "https://example.com/mcp",
+                            "headers": {
+                                "Authorization": {
+                                    "type": "host_env",
+                                    "name": "DOCS_TOKEN",
+                                    "prefix": "Bearer "
+                                }
+                            }
                         }
                     }
-                },
-                "allowedCapabilities": [
-                    {"type": "tool", "name": "echo.run"}
                 ],
                 "enabled": true
             }
@@ -381,11 +406,12 @@ fn manifest_plugin_declaration_round_trips_and_defaults() {
         PluginLoadFailurePolicy::DisableForRun
     );
     assert_eq!(
-        plugin.allowed_capabilities,
+        extension_component(plugin).allowed_capabilities,
         vec![ExtensionCapabilitySelector::Tool {
             name: "echo.run".into(),
         }]
     );
+    assert_eq!(plugin.components.len(), 3);
 }
 
 #[test]
@@ -432,16 +458,14 @@ fn manifest_plugin_patches_apply_and_reject_invalid_state() {
 #[test]
 fn manifest_plugin_patch_summary_is_auditable_without_secret_values() {
     let mut plugin = test_plugin("auth");
-    match &mut plugin.transport {
-        PluginTransport::Stdio(transport) => {
-            transport.env.insert(
-                "API_KEY".into(),
-                PluginEnvSource::HostEnv {
-                    name: "SECRET_API_KEY".into(),
-                },
-            );
-        }
-    }
+    let NoloongExtensionTransport::Stdio(transport) =
+        &mut extension_component_mut(&mut plugin).transport;
+    transport.env.insert(
+        "API_KEY".into(),
+        PluginEnvSource::HostEnv {
+            name: "SECRET_API_KEY".into(),
+        },
+    );
 
     let summary = ManifestPatch::RegisterPlugin { plugin }.summary();
 
@@ -461,20 +485,19 @@ fn manifest_plugin_validation_rejects_empty_ids_and_commands() {
     assert!(error.to_string().contains("pluginId"));
 
     let mut plugin = test_plugin("echo");
-    match &mut plugin.transport {
-        PluginTransport::Stdio(transport) => {
-            transport.command = " ".into();
-        }
-    }
+    let NoloongExtensionTransport::Stdio(transport) =
+        &mut extension_component_mut(&mut plugin).transport;
+    transport.command = " ".into();
     let error = ManifestPatch::RegisterPlugin { plugin }
         .validate()
         .unwrap_err();
     assert!(error.to_string().contains("command"));
 
     let mut plugin = test_plugin("echo");
-    plugin
+    let first_capability = extension_component(&plugin).allowed_capabilities[0].clone();
+    extension_component_mut(&mut plugin)
         .allowed_capabilities
-        .push(plugin.allowed_capabilities[0].clone());
+        .push(first_capability);
     let error = ManifestPatch::RegisterPlugin { plugin }
         .validate()
         .unwrap_err();
@@ -487,11 +510,9 @@ fn manifest_plugin_validation_rejects_empty_ids_and_commands() {
 #[test]
 fn manifest_plugin_validation_rejects_zero_timeouts() {
     let mut plugin = test_plugin("echo");
-    match &mut plugin.transport {
-        PluginTransport::Stdio(transport) => {
-            transport.request_timeout_secs = Some(0);
-        }
-    }
+    let NoloongExtensionTransport::Stdio(transport) =
+        &mut extension_component_mut(&mut plugin).transport;
+    transport.request_timeout_secs = Some(0);
     let error = ManifestPatch::RegisterPlugin { plugin }
         .validate()
         .unwrap_err();
@@ -501,11 +522,9 @@ fn manifest_plugin_validation_rejects_zero_timeouts() {
     );
 
     let mut plugin = test_plugin("echo");
-    match &mut plugin.transport {
-        PluginTransport::Stdio(transport) => {
-            transport.stream_timeout_secs = Some(0);
-        }
-    }
+    let NoloongExtensionTransport::Stdio(transport) =
+        &mut extension_component_mut(&mut plugin).transport;
+    transport.stream_timeout_secs = Some(0);
     let error = ManifestPatch::RegisterPlugin { plugin }
         .validate()
         .unwrap_err();
@@ -520,18 +539,46 @@ fn test_plugin(plugin_id: &str) -> AgentPluginDeclaration {
         plugin_id: plugin_id.into(),
         display_name: "Echo".into(),
         description: None,
-        transport: PluginTransport::Stdio(StdioPluginTransport {
-            command: "node".into(),
-            args: vec!["examples/extensions/echo.mjs".into()],
-            cwd: None,
-            env: BTreeMap::new(),
-            request_timeout_secs: None,
-            stream_timeout_secs: None,
-        }),
-        allowed_capabilities: vec![ExtensionCapabilitySelector::Tool {
-            name: "echo.run".into(),
-        }],
+        components: vec![PluginComponent::NoloongExtension(
+            NoloongExtensionPluginComponent {
+                transport: NoloongExtensionTransport::Stdio(StdioPluginTransport {
+                    command: "node".into(),
+                    args: vec!["examples/extensions/echo.mjs".into()],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    request_timeout_secs: None,
+                    stream_timeout_secs: None,
+                }),
+                allowed_capabilities: vec![ExtensionCapabilitySelector::Tool {
+                    name: "echo.run".into(),
+                }],
+            },
+        )],
         enabled: true,
         on_load_failure: PluginLoadFailurePolicy::DisableForRun,
     }
+}
+
+fn extension_component(plugin: &AgentPluginDeclaration) -> &NoloongExtensionPluginComponent {
+    plugin
+        .components
+        .iter()
+        .find_map(|component| match component {
+            PluginComponent::NoloongExtension(component) => Some(component),
+            _ => None,
+        })
+        .expect("test plugin has noloong extension component")
+}
+
+fn extension_component_mut(
+    plugin: &mut AgentPluginDeclaration,
+) -> &mut NoloongExtensionPluginComponent {
+    plugin
+        .components
+        .iter_mut()
+        .find_map(|component| match component {
+            PluginComponent::NoloongExtension(component) => Some(component),
+            _ => None,
+        })
+        .expect("test plugin has noloong extension component")
 }
