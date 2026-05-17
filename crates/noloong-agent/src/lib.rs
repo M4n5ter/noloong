@@ -9,6 +9,7 @@ pub mod openai;
 pub mod plugin;
 pub mod process;
 pub mod session;
+mod sqlite_database_url;
 pub mod system_prompt;
 pub mod tools;
 
@@ -47,6 +48,7 @@ pub use session::{
     AgentSession, AgentSessionBuilder, AgentSessionRuntimeBuilder, BackgroundCompletionConfig,
     BackgroundCompletionSteering, DEFAULT_BACKGROUND_COMPLETION_PREVIEW_BYTES,
 };
+pub use sqlite_database_url::{SqliteDatabaseLocation, SqliteDatabaseUrlError};
 pub use system_prompt::{
     BUILT_IN_SYSTEM_PROMPT_HOOK_ID, ResolvedSystemPrompt, SystemPromptModelContext,
     built_in_system_prompt, built_in_system_prompt_for_profile,

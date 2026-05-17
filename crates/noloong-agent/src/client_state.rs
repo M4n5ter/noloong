@@ -68,6 +68,7 @@ pub trait ClientStateStore: Send + Sync {
 #[cfg(feature = "client-state-sqlite")]
 mod sqlite {
     use super::{ClientStateError, ClientStateFuture, ClientStateKey, ClientStateStore};
+    use crate::SqliteDatabaseLocation;
     use rusqlite::OptionalExtension;
     use serde_json::Value;
     use std::{
@@ -104,8 +105,10 @@ mod sqlite {
 
     impl SqliteClientStateStore {
         pub fn new(database_url: impl AsRef<str>) -> Result<Self, ClientStateError> {
-            match sqlite_database_path(database_url.as_ref())? {
-                Some(path) => {
+            match SqliteDatabaseLocation::parse(database_url.as_ref())
+                .map_err(|error| ClientStateError::Sqlite(error.to_string()))?
+            {
+                SqliteDatabaseLocation::File(path) => {
                     if let Some(parent) = path
                         .parent()
                         .filter(|parent| !parent.as_os_str().is_empty())
@@ -121,7 +124,7 @@ mod sqlite {
                         backend: SqliteClientStateBackend::File(path),
                     })
                 }
-                None => {
+                SqliteDatabaseLocation::Memory => {
                     let connection =
                         rusqlite::Connection::open_in_memory().map_err(ClientStateError::sqlite)?;
                     ensure_schema(&connection)?;
@@ -239,37 +242,6 @@ mod sqlite {
             )
             .map_err(ClientStateError::sqlite)?;
         Ok(())
-    }
-
-    fn sqlite_database_path(database_url: &str) -> Result<Option<PathBuf>, ClientStateError> {
-        match database_url {
-            "" => Err(ClientStateError::Sqlite(
-                "sqlite database url is empty".into(),
-            )),
-            "sqlite::memory:" | "sqlite://memory" | ":memory:" => Ok(None),
-            url if url.starts_with("sqlite://") => {
-                sqlite_path_from_suffix(url.strip_prefix("sqlite://").unwrap_or_default())
-            }
-            url if url.starts_with("sqlite:") => {
-                sqlite_path_from_suffix(url.strip_prefix("sqlite:").unwrap_or_default())
-            }
-            url if url.contains("://") => Err(ClientStateError::Sqlite(format!(
-                "client state database URL must be sqlite, got: {url}"
-            ))),
-            path => Ok(Some(PathBuf::from(path))),
-        }
-    }
-
-    fn sqlite_path_from_suffix(path: &str) -> Result<Option<PathBuf>, ClientStateError> {
-        if path.is_empty() {
-            return Err(ClientStateError::Sqlite(
-                "sqlite database path is empty".into(),
-            ));
-        }
-        if path == ":memory:" || path == "memory" {
-            return Ok(None);
-        }
-        Ok(Some(PathBuf::from(path)))
     }
 
     fn current_unix_ms_i64() -> i64 {

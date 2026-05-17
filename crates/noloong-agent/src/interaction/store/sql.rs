@@ -4,6 +4,8 @@ use super::{
     AutomationScheduleScanBuilder, GoalRecord, duplicate_automation_error, duplicate_session_error,
     missing_automation_error, record_matches_session_list_filter, session_metadata_index_value,
 };
+#[cfg(feature = "registry-store-sqlite")]
+use crate::SqliteDatabaseLocation;
 use crate::interaction::{
     AgentSessionListFilter, AutomationStatus, GoalStatus, InteractionError, InteractionFuture,
 };
@@ -140,7 +142,7 @@ impl SqlAgentSessionRegistryStore {
         if filter.metadata_equals.is_empty() {
             return Ok(None);
         }
-        let mut candidate_ids: Option<BTreeSet<String>> = None;
+        let mut candidate_sets = Vec::new();
         for (key, value) in &filter.metadata_equals {
             let Some(metadata_value) = session_metadata_index_value(value) else {
                 return Ok(Some(BTreeSet::new()));
@@ -163,18 +165,61 @@ impl SqlAgentSessionRegistryStore {
                 .into_iter()
                 .map(|row| row.session_id)
                 .collect::<BTreeSet<_>>();
-            candidate_ids = Some(match candidate_ids {
-                Some(existing) => existing
-                    .intersection(&matching_ids)
-                    .cloned()
-                    .collect::<BTreeSet<_>>(),
-                None => matching_ids,
-            });
-            if candidate_ids.as_ref().is_some_and(BTreeSet::is_empty) {
+            if matching_ids.is_empty() {
+                return Ok(Some(BTreeSet::new()));
+            }
+            candidate_sets.push(matching_ids);
+        }
+        candidate_sets.sort_by_key(BTreeSet::len);
+        let mut iter = candidate_sets.into_iter();
+        let Some(mut candidate_ids) = iter.next() else {
+            return Ok(None);
+        };
+        for matching_ids in iter {
+            candidate_ids = candidate_ids
+                .intersection(&matching_ids)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if candidate_ids.is_empty() {
                 break;
             }
         }
-        Ok(candidate_ids)
+        Ok(Some(candidate_ids))
+    }
+
+    async fn load_session_rows_for_filter(
+        &self,
+        filter: &AgentSessionListFilter,
+        candidate_ids: Option<BTreeSet<String>>,
+    ) -> Result<Vec<StoredAgentSession>, InteractionError> {
+        match candidate_ids {
+            Some(candidate_ids) if candidate_ids.is_empty() => Ok(Vec::new()),
+            Some(candidate_ids) => {
+                let mut rows = Vec::new();
+                for session_id in candidate_ids {
+                    let mut db = self.db.clone();
+                    rows.extend(
+                        session_query(&session_id)
+                            .exec(&mut db)
+                            .await
+                            .map_err(to_store_error)?
+                            .into_iter()
+                            .filter(|row| session_row_matches_prefilter(row, filter)),
+                    );
+                }
+                Ok(rows)
+            }
+            None => {
+                let mut db = self.db.clone();
+                Ok(Query::<List<StoredAgentSession>>::all()
+                    .exec(&mut db)
+                    .await
+                    .map_err(to_store_error)?
+                    .into_iter()
+                    .filter(|row| session_row_matches_prefilter(row, filter))
+                    .collect())
+            }
+        }
     }
 }
 
@@ -263,28 +308,11 @@ impl AgentSessionRegistryStore for SqlAgentSessionRegistryStore {
         filter: &'a AgentSessionListFilter,
     ) -> InteractionFuture<'a, Vec<AgentSessionRecord>> {
         Box::pin(async move {
-            let rows = if let Some(candidate_ids) = self.metadata_session_candidates(filter).await?
-            {
-                let mut rows = Vec::new();
-                for session_id in candidate_ids {
-                    let mut db = self.db.clone();
-                    rows.extend(
-                        session_query(&session_id)
-                            .exec(&mut db)
-                            .await
-                            .map_err(to_store_error)?,
-                    );
-                }
-                rows
-            } else {
-                let mut db = self.db.clone();
-                Query::<List<StoredAgentSession>>::all()
-                    .exec(&mut db)
-                    .await
-                    .map_err(to_store_error)?
-            };
+            let candidate_ids = self.metadata_session_candidates(filter).await?;
+            let rows = self
+                .load_session_rows_for_filter(filter, candidate_ids)
+                .await?;
             rows.into_iter()
-                .filter(|row| session_row_matches_filter(row, filter))
                 .map(decode_row)
                 .filter_map(|record| match record {
                     Ok(record) if record_matches_session_list_filter(&record, filter) => {
@@ -560,24 +588,20 @@ impl SqlStoreLocation {
     fn parse(database_url: &str) -> Result<Self, InteractionError> {
         match database_url {
             "" => Err(InteractionError::internal("sql database url is empty")),
-            #[cfg(feature = "registry-store-sqlite")]
-            "sqlite::memory:" | "sqlite://memory" | ":memory:" => Ok(Self::SqliteInMemory),
-            #[cfg(feature = "registry-store-sqlite")]
-            url if url.starts_with("sqlite://") => sqlite_path(url, "sqlite://"),
-            #[cfg(feature = "registry-store-sqlite")]
-            url if url.starts_with("sqlite:") => sqlite_path(url, "sqlite:"),
             #[cfg(feature = "registry-store-postgres")]
             url if url.starts_with("postgres://") || url.starts_with("postgresql://") => {
                 Ok(Self::Postgres(url.to_owned()))
             }
-            url if url.contains("://") => Err(InteractionError::internal(format!(
-                "unsupported sql database url scheme: {url}"
-            ))),
             #[cfg(feature = "registry-store-sqlite")]
-            path => Ok(Self::SqliteFile(PathBuf::from(path))),
+            url => match SqliteDatabaseLocation::parse(url).map_err(|error| {
+                InteractionError::internal(format!("unsupported sql database url: {error}"))
+            })? {
+                SqliteDatabaseLocation::Memory => Ok(Self::SqliteInMemory),
+                SqliteDatabaseLocation::File(path) => Ok(Self::SqliteFile(path)),
+            },
             #[cfg(not(feature = "registry-store-sqlite"))]
-            path => Err(InteractionError::internal(format!(
-                "unsupported sql database url without sqlite feature: {path}"
+            url => Err(InteractionError::internal(format!(
+                "unsupported sql database url without sqlite feature: {url}"
             ))),
         }
     }
@@ -616,23 +640,13 @@ impl SqlStoreLocation {
     }
 }
 
-#[cfg(feature = "registry-store-sqlite")]
-fn sqlite_path(url: &str, prefix: &str) -> Result<SqlStoreLocation, InteractionError> {
-    let path = url.strip_prefix(prefix).unwrap_or_default();
-    if path.is_empty() {
-        Err(InteractionError::internal("sqlite database path is empty"))
-    } else if path == ":memory:" || path == "memory" {
-        Ok(SqlStoreLocation::SqliteInMemory)
-    } else {
-        Ok(SqlStoreLocation::SqliteFile(PathBuf::from(path)))
-    }
-}
-
 fn validate_schema_state(
     location: &SqlStoreLocation,
     migrate_on_connect: bool,
     table_name_prefix: Option<&str>,
 ) -> Result<(), InteractionError> {
+    #[cfg(not(feature = "registry-store-sqlite"))]
+    let _ = table_name_prefix;
     if migrate_on_connect {
         return Ok(());
     }
@@ -663,6 +677,8 @@ fn should_push_schema(
     migrate_on_connect: bool,
     table_name_prefix: Option<&str>,
 ) -> Result<bool, InteractionError> {
+    #[cfg(not(feature = "registry-store-sqlite"))]
+    let _ = table_name_prefix;
     if !migrate_on_connect {
         return Ok(false);
     }
@@ -730,7 +746,10 @@ fn row_from_record(record: AgentSessionRecord) -> Result<StoredAgentSession, Int
     })
 }
 
-fn session_row_matches_filter(row: &StoredAgentSession, filter: &AgentSessionListFilter) -> bool {
+fn session_row_matches_prefilter(
+    row: &StoredAgentSession,
+    filter: &AgentSessionListFilter,
+) -> bool {
     if filter
         .parent_session_id
         .as_ref()

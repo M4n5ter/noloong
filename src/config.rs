@@ -1,5 +1,5 @@
 use jsonc_parser::{ParseOptions, parse_to_serde_value};
-use noloong_agent::{AgentPluginDeclaration, ManifestPatch};
+use noloong_agent::{AgentPluginDeclaration, ManifestPatch, SqliteDatabaseLocation};
 use noloong_agent_core::{
     AnthropicEffort, ContextCompactionMode, ResponsesReasoningEffort, ResponsesReasoningSummary,
     ResponsesStateMode,
@@ -564,7 +564,9 @@ pub fn resolve_state_database_url_with_env(
 }
 
 pub fn ensure_sqlite_database_parent(database_url: &str) -> Result<(), CliConfigError> {
-    let Some(path) = sqlite_database_path(database_url)? else {
+    let location = SqliteDatabaseLocation::parse(database_url)
+        .map_err(|error| CliConfigError::ParseConfig(error.to_string()))?;
+    let Some(path) = location.path() else {
         return Ok(());
     };
     if let Some(parent) = path
@@ -576,37 +578,6 @@ pub fn ensure_sqlite_database_parent(database_url: &str) -> Result<(), CliConfig
         })?;
     }
     Ok(())
-}
-
-pub fn sqlite_database_path(database_url: &str) -> Result<Option<PathBuf>, CliConfigError> {
-    match database_url {
-        "" => Err(CliConfigError::ParseConfig(
-            "sqlite database url is empty".into(),
-        )),
-        "sqlite::memory:" | "sqlite://memory" | ":memory:" => Ok(None),
-        url if url.starts_with("sqlite://") => {
-            sqlite_path_from_suffix(url.strip_prefix("sqlite://").unwrap_or_default())
-        }
-        url if url.starts_with("sqlite:") => {
-            sqlite_path_from_suffix(url.strip_prefix("sqlite:").unwrap_or_default())
-        }
-        url if url.contains("://") => Err(CliConfigError::ParseConfig(format!(
-            "state database URL must be sqlite, got: {url}"
-        ))),
-        path => Ok(Some(PathBuf::from(path))),
-    }
-}
-
-fn sqlite_path_from_suffix(path: &str) -> Result<Option<PathBuf>, CliConfigError> {
-    if path.is_empty() {
-        return Err(CliConfigError::ParseConfig(
-            "sqlite database path is empty".into(),
-        ));
-    }
-    if path == ":memory:" || path == "memory" {
-        return Ok(None);
-    }
-    Ok(Some(PathBuf::from(path)))
 }
 
 pub fn resolve_chatgpt_token_file_with_env(
@@ -712,7 +683,7 @@ mod tests {
         ProfileCompactionConfig, ProfileEventStoreConfig, ResponsesProviderReasoningEffort,
         ResponsesProviderReasoningSummary, ResponsesStateMode, RuntimeProfileConfig,
         ensure_sqlite_database_parent, resolve_chatgpt_token_file_with_env,
-        resolve_state_database_url_with_env, sqlite_database_path,
+        resolve_state_database_url_with_env,
     };
     use crate::test_support::{remove_temp_file, write_temp_file};
     use noloong_agent_core::ContextCompactionMode;
@@ -1128,13 +1099,9 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_database_path_parses_supported_urls() {
-        assert_eq!(
-            sqlite_database_path("sqlite:/tmp/noloong.sqlite").unwrap(),
-            Some(PathBuf::from("/tmp/noloong.sqlite"))
-        );
-        assert_eq!(sqlite_database_path("sqlite::memory:").unwrap(), None);
-        assert!(sqlite_database_path("postgres://localhost/db").is_err());
+    fn state_database_parent_accepts_supported_sqlite_urls() {
+        ensure_sqlite_database_parent("sqlite::memory:").unwrap();
+        assert!(ensure_sqlite_database_parent("postgres://localhost/db").is_err());
     }
 
     #[test]

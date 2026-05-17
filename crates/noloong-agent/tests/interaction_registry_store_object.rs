@@ -1,5 +1,6 @@
 #![cfg(feature = "registry-store-object")]
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use noloong_agent::{
     AgentManifest, AgentSession, AutomationRecord, AutomationStatus, AutomationTarget,
     AutomationTimeSchedule, AutomationTrigger, GoalRecord,
@@ -15,7 +16,7 @@ use noloong_agent_core::{
     ModelRequest, ModelStreamEvent, ModelStreamSink, RunStatus, StopReason,
 };
 use opendal::{Operator, services::Memory};
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -88,6 +89,69 @@ async fn object_store_filters_session_list_by_metadata() {
 
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].session_id, "telegram");
+}
+
+#[tokio::test]
+async fn object_store_metadata_candidates_do_not_read_index_body() {
+    let operator = memory_operator();
+    let store = OpenDalAgentSessionRegistryStore::new(
+        operator.clone(),
+        OpenDalAgentSessionRegistryStoreConfig::new("metadata-body"),
+    );
+    let mut telegram = record("telegram");
+    telegram
+        .metadata
+        .insert("channel".into(), json!("telegram"));
+    store.insert(telegram).await.unwrap();
+    operator
+        .write(
+            &metadata_index_path("metadata-body", "channel", &json!("telegram"), "telegram"),
+            b"not-json".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let listed = store
+        .list(&AgentSessionListFilter {
+            metadata_equals: Map::from_iter([("channel".into(), json!("telegram"))]),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_id, "telegram");
+}
+
+#[tokio::test]
+async fn object_store_removes_stale_metadata_candidate_path() {
+    let operator = memory_operator();
+    let store = OpenDalAgentSessionRegistryStore::new(
+        operator.clone(),
+        OpenDalAgentSessionRegistryStoreConfig::new("stale-metadata"),
+    );
+    let mut weixin = record("weixin");
+    weixin.metadata.insert("channel".into(), json!("weixin"));
+    store.insert(weixin).await.unwrap();
+    let stale_path = metadata_index_path("stale-metadata", "channel", &json!("telegram"), "weixin");
+    operator
+        .write(
+            &stale_path,
+            br#"{"sessionId":"weixin","updatedAtMs":2}"#.to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let listed = store
+        .list(&AgentSessionListFilter {
+            metadata_equals: Map::from_iter([("channel".into(), json!("telegram"))]),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(listed.is_empty());
+    assert!(!operator.exists(&stale_path).await.unwrap());
 }
 
 #[tokio::test]
@@ -272,6 +336,14 @@ fn object_store(prefix: &str) -> OpenDalAgentSessionRegistryStore {
 
 fn memory_operator() -> Operator {
     Operator::new(Memory::default()).unwrap().finish()
+}
+
+fn metadata_index_path(prefix: &str, key: &str, value: &Value, session_id: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    let encoded_key = URL_SAFE_NO_PAD.encode(key.as_bytes());
+    let encoded_value = URL_SAFE_NO_PAD.encode(value.to_string().as_bytes());
+    let encoded_session_id = URL_SAFE_NO_PAD.encode(session_id.as_bytes());
+    format!("{prefix}/session-metadata/{encoded_key}/{encoded_value}/{encoded_session_id}.json")
 }
 
 fn record(session_id: &str) -> AgentSessionRecord {
