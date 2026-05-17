@@ -8,6 +8,7 @@ mod goal;
 mod http;
 mod jsonrpc;
 mod profile;
+pub mod protocol;
 mod registry;
 mod store;
 mod wire;
@@ -25,10 +26,7 @@ pub use client::{
     InteractionClientError, InteractionClientResult, InteractionWsClient,
     InteractionWsClientConfig, InteractionWsNotification,
 };
-pub use control::{
-    DISPLAY_EVENT_NOTIFICATION, DISPLAY_SUBSCRIBE_METHOD, EVENT_SUBSCRIBE_METHOD,
-    InteractionControlHandler, RAW_EVENT_NOTIFICATION,
-};
+pub use control::InteractionControlHandler;
 pub use error::{
     INTERACTION_ERROR_BUSY, INTERACTION_ERROR_INTERNAL, INTERACTION_ERROR_INVALID_PARAMS,
     INTERACTION_ERROR_METHOD_NOT_FOUND, INTERACTION_ERROR_NOT_FOUND,
@@ -48,6 +46,7 @@ pub use jsonrpc::{
     InteractionFuture, InteractionNotifier, JsonRpcHandler, JsonRpcHandlerOutput, serve_jsonrpc,
 };
 pub use profile::AgentRuntimeProfile;
+pub use protocol::{AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent};
 pub use registry::{
     AgentSessionCreateRequest, AgentSessionDeleteOptions, AgentSessionListFilter,
     AgentSessionRegistry, AgentSessionRegistryOptions, AutomationCreateRequest,
@@ -57,8 +56,7 @@ pub use registry::{
 pub(crate) use store::current_unix_ms;
 pub use store::{
     AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentSessionQueueSnapshot, AgentSessionQueueState,
-    AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent, AgentSessionRecord,
-    AgentSessionRegistryStore, InMemoryAgentSessionRegistryStore,
+    AgentSessionRecord, AgentSessionRegistryStore, InMemoryAgentSessionRegistryStore,
 };
 #[cfg(feature = "registry-store-object")]
 pub use store::{OpenDalAgentSessionRegistryStore, OpenDalAgentSessionRegistryStoreConfig};

@@ -1,27 +1,13 @@
 use crate::text::truncate_string_to_chars;
-use noloong_agent::interaction::{AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent};
+use noloong_agent::interaction::{
+    AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent, protocol::InteractionQueueKind,
+};
 use noloong_agent_core::{ContentBlock, MediaKind};
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 const QUEUE_MESSAGE_RENDER_LIMIT: usize = 120;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum TelegramQueueKind {
-    Steering,
-    FollowUp,
-}
-
-impl TelegramQueueKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Steering => "steering",
-            Self::FollowUp => "follow_up",
-        }
-    }
-}
-
+pub type TelegramQueueKind = InteractionQueueKind;
 pub type TelegramQueuedMessage = AgentSessionQueuedMessage;
 pub type TelegramQueuedMessageIntent = AgentSessionQueuedMessageIntent;
 

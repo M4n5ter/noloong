@@ -1,8 +1,8 @@
-use super::control::{DISPLAY_SUBSCRIBE_METHOD, EVENT_SUBSCRIBE_METHOD};
 use super::jsonrpc::{
     JsonRpcOutbound, dispatch_jsonrpc_request, jsonrpc_outbound_channel, parse_jsonrpc_request,
     request_response_notifier, send_close, send_response,
 };
+use super::protocol::method;
 use super::{InteractionError, JsonRpcHandler, JsonRpcResponse};
 use axum::{
     Router,
@@ -291,5 +291,5 @@ fn unauthorized_response() -> Response {
 }
 
 fn requires_bidirectional_transport(method: &str) -> bool {
-    matches!(method, EVENT_SUBSCRIBE_METHOD | DISPLAY_SUBSCRIBE_METHOD)
+    matches!(method, method::EVENT_SUBSCRIBE | method::DISPLAY_SUBSCRIBE)
 }

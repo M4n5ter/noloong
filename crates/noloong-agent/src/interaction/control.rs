@@ -3,18 +3,27 @@ use super::{
     AutomationCreateRequest, AutomationListRequest, AutomationRequest, AutomationUpdateRequest,
     DisplayEvent, GoalSetRequest, GoalStatusUpdateRequest, InteractionAuthorityCapability,
     InteractionCapabilityGrant, InteractionCapabilityPolicy, InteractionClientInfo,
-    InteractionError, InteractionFuture, InteractionNotifier, InteractionProfileDescriptor,
-    InteractionSessionDescriptor, InteractionUxCapabilities, JsonRpcHandler, JsonRpcHandlerOutput,
-    SubagentSpawnRequest, store::missing_session_error,
+    InteractionError, InteractionFuture, InteractionNotifier, InteractionSessionDescriptor,
+    InteractionUxCapabilities, JsonRpcHandler, JsonRpcHandlerOutput, SubagentSpawnRequest,
+    protocol::{
+        AgentFollowUpRequest, AgentPromptRequest, AgentSessionQueuedMessage,
+        AgentSessionQueuedMessageIntent, AgentSteerRequest, ApprovalResolveRequest,
+        DisplaySubscribeRequest, EventSubscribeRequest, EventUnsubscribeRequest,
+        InteractionDisplayNotification, InteractionInitializeResult, InteractionQueueKind,
+        InteractionServerInfo, ManifestApplyResult, ManifestProposalRequest, ProcessJobRequest,
+        ProcessReadRequest, ProcessWaitRequest, ProcessWriteRequest, QueueEditRequest,
+        QueueRequest, QueueSetModeRequest, RawEventNotification, SessionDeleteRequest,
+        SessionRequest, SubscriptionResult, UnsubscribeResult, method, notification,
+    },
+    store::missing_session_error,
 };
+use crate::text;
 use crate::tools::final_assistant_output;
-use crate::{ReadOutputRequest, text};
 use noloong_agent_core::{
-    AgentEvent, AgentEventKind, AgentInput, AgentMessage, ContentBlock, ModelStreamEvent,
-    QueueMode, QueuedAgentMessage, QueuedMessageIntent, ToolApprovalId, ToolApprovalResolution,
-    ToolPermissionDecision,
+    AgentEvent, AgentEventKind, AgentMessage, ContentBlock, ModelStreamEvent, QueueMode,
+    QueuedAgentMessage, ToolApprovalResolution,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -23,11 +32,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-
-pub const RAW_EVENT_NOTIFICATION: &str = "agent/event";
-pub const DISPLAY_EVENT_NOTIFICATION: &str = "display/event";
-pub const EVENT_SUBSCRIBE_METHOD: &str = "event/subscribe";
-pub const DISPLAY_SUBSCRIBE_METHOD: &str = "display/subscribe";
 
 #[derive(Clone)]
 pub struct InteractionControlHandler {
@@ -88,11 +92,8 @@ impl InteractionControlHandler {
             .grant
             .lock()
             .expect("interaction capability grant lock poisoned") = Some(grant.clone());
-        value(InitializeResult {
-            server: InteractionServerInfo {
-                name: "noloong-agent".into(),
-                protocol_version: "2026-05-05".into(),
-            },
+        value(InteractionInitializeResult {
+            server: InteractionServerInfo::current(),
             grant,
             profiles: self.inner.registry.profile_descriptors(),
         })
@@ -163,23 +164,23 @@ impl JsonRpcHandler for InteractionControlHandler {
     ) -> InteractionFuture<'a, JsonRpcHandlerOutput> {
         Box::pin(async move {
             let result = match method {
-                "initialize" => self.initialize(params)?,
-                "shutdown" => return Ok(JsonRpcHandlerOutput::shutdown(json!({"ok": true}))),
-                "profile/list" => value(self.inner.registry.profile_descriptors())?,
-                "session/create" => {
+                method::INITIALIZE => self.initialize(params)?,
+                method::SHUTDOWN => return Ok(JsonRpcHandlerOutput::shutdown(json!({"ok": true}))),
+                method::PROFILE_LIST => value(self.inner.registry.profile_descriptors())?,
+                method::SESSION_CREATE => {
                     let request = parse_params(params)?;
                     value(self.inner.registry.create_session(request).await?)?
                 }
-                "session/list" => {
+                method::SESSION_LIST => {
                     let request = parse_params::<AgentSessionListFilter>(params)?;
                     value(self.inner.registry.list(request).await?)?
                 }
-                "session/get" => {
+                method::SESSION_GET => {
                     let request = parse_params::<SessionRequest>(params)?;
                     let descriptor = self.session_descriptor(&request.session_id).await?;
                     value(descriptor)?
                 }
-                "session/delete" => {
+                method::SESSION_DELETE => {
                     self.require(method, InteractionAuthorityCapability::SessionDelete)?;
                     let request = parse_params::<SessionDeleteRequest>(params)?;
                     value(
@@ -194,7 +195,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "subagent/spawn" => {
+                method::SUBAGENT_SPAWN => {
                     self.require(method, InteractionAuthorityCapability::SubagentSpawn)?;
                     let request = parse_params::<SubagentSpawnRequest>(params)?;
                     let parent_session_id = request.parent_session_id.clone();
@@ -208,31 +209,31 @@ impl JsonRpcHandler for InteractionControlHandler {
                     }
                     value(descriptor)?
                 }
-                "goal/set" => {
+                method::GOAL_SET => {
                     self.require(method, InteractionAuthorityCapability::GoalManage)?;
                     let request = parse_params::<GoalSetRequest>(params)?;
                     value(self.inner.registry.set_goal(request).await?)?
                 }
-                "goal/get" => {
+                method::GOAL_GET => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(self.inner.registry.get_goal(&request.session_id).await?)?
                 }
-                "goal/pause" => {
+                method::GOAL_PAUSE => {
                     self.require(method, InteractionAuthorityCapability::GoalManage)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     value(self.inner.registry.pause_goal(&request.session_id).await?)?
                 }
-                "goal/resume" => {
+                method::GOAL_RESUME => {
                     self.require(method, InteractionAuthorityCapability::GoalManage)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     value(self.inner.registry.resume_goal(&request.session_id).await?)?
                 }
-                "goal/clear" => {
+                method::GOAL_CLEAR => {
                     self.require(method, InteractionAuthorityCapability::GoalManage)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     value(self.inner.registry.clear_goal(&request.session_id).await?)?
                 }
-                "goal/update" => {
+                method::GOAL_UPDATE => {
                     self.require(method, InteractionAuthorityCapability::GoalManage)?;
                     let request = parse_params::<GoalStatusUpdateRequest>(params)?;
                     value(
@@ -242,12 +243,12 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "automation/create" => {
+                method::AUTOMATION_CREATE => {
                     self.require(method, InteractionAuthorityCapability::AutomationManage)?;
                     let request = parse_params::<AutomationCreateRequest>(params)?;
                     value(self.inner.registry.create_automation(request).await?)?
                 }
-                "automation/get" => {
+                method::AUTOMATION_GET => {
                     let request = parse_params::<AutomationRequest>(params)?;
                     value(
                         self.inner
@@ -256,16 +257,16 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "automation/list" => {
+                method::AUTOMATION_LIST => {
                     let request = parse_params::<AutomationListRequest>(params)?;
                     value(self.inner.registry.list_automations(request).await?)?
                 }
-                "automation/update" => {
+                method::AUTOMATION_UPDATE => {
                     self.require(method, InteractionAuthorityCapability::AutomationManage)?;
                     let request = parse_params::<AutomationUpdateRequest>(params)?;
                     value(self.inner.registry.update_automation(request).await?)?
                 }
-                "automation/delete" => {
+                method::AUTOMATION_DELETE => {
                     self.require(method, InteractionAuthorityCapability::AutomationManage)?;
                     let request = parse_params::<AutomationRequest>(params)?;
                     value(
@@ -275,7 +276,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "automation/fire" => {
+                method::AUTOMATION_FIRE => {
                     self.require(method, InteractionAuthorityCapability::AutomationManage)?;
                     let request = parse_params::<AutomationRequest>(params)?;
                     value(
@@ -285,7 +286,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "agent/prompt" => {
+                method::AGENT_PROMPT => {
                     self.require(method, InteractionAuthorityCapability::AgentRun)?;
                     let request = parse_params::<AgentPromptRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
@@ -302,28 +303,28 @@ impl JsonRpcHandler for InteractionControlHandler {
                     }
                     value(descriptor)?
                 }
-                "agent/continue" => {
+                method::AGENT_CONTINUE => {
                     self.require(method, InteractionAuthorityCapability::AgentRun)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     registered.agent().continue_run().await?;
                     value(registered.descriptor().await)?
                 }
-                "agent/abort" => {
+                method::AGENT_ABORT => {
                     self.require(method, InteractionAuthorityCapability::AgentRun)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     registered.agent().abort().await;
                     value(registered.descriptor().await)?
                 }
-                "agent/wait_idle" => {
+                method::AGENT_WAIT_IDLE => {
                     self.require(method, InteractionAuthorityCapability::AgentRun)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     registered.agent().wait_for_idle().await;
                     value(registered.descriptor().await)?
                 }
-                "agent/state" => {
+                method::AGENT_STATE => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(
                         self.session(&request.session_id)
@@ -333,36 +334,36 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await,
                     )?
                 }
-                "agent/steer" => {
+                method::AGENT_STEER => {
                     self.require(method, InteractionAuthorityCapability::AgentQueue)?;
                     let request = parse_params::<AgentSteerRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     let message = request.message;
                     match request.intent.unwrap_or_default() {
-                        InteractionQueuedMessageIntent::Observation => {
+                        AgentSessionQueuedMessageIntent::Observation => {
                             registered.agent().steer(message)
                         }
-                        InteractionQueuedMessageIntent::UserInput => {
+                        AgentSessionQueuedMessageIntent::UserInput => {
                             registered.agent().steer_user_input(message)
                         }
                     }
                     value(registered.save_snapshot().await?)?
                 }
-                "agent/follow_up" => {
+                method::AGENT_FOLLOW_UP => {
                     self.require(method, InteractionAuthorityCapability::AgentQueue)?;
                     let request = parse_params::<AgentFollowUpRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
                     registered.agent().follow_up(request.message);
                     value(registered.save_snapshot().await?)?
                 }
-                "queue/list" => {
+                method::QUEUE_LIST => {
                     let request = parse_params::<QueueRequest>(params)?;
                     value(queue_messages(
                         self.session(&request.session_id).await?.agent(),
                         request.queue,
                     ))?
                 }
-                "queue/edit" => {
+                method::QUEUE_EDIT => {
                     self.require(method, InteractionAuthorityCapability::AgentQueue)?;
                     let request = parse_params::<QueueEditRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
@@ -372,13 +373,13 @@ impl JsonRpcHandler for InteractionControlHandler {
                         request
                             .messages
                             .into_iter()
-                            .map(InteractionQueuedMessage::into_core)
+                            .map(AgentSessionQueuedMessage::into_core)
                             .collect(),
                     );
                     registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
-                "queue/clear" => {
+                method::QUEUE_CLEAR => {
                     self.require(method, InteractionAuthorityCapability::AgentQueue)?;
                     let request = parse_params::<QueueRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
@@ -386,7 +387,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                     registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
-                "queue/set_mode" => {
+                method::QUEUE_SET_MODE => {
                     self.require(method, InteractionAuthorityCapability::AgentQueue)?;
                     let request = parse_params::<QueueSetModeRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
@@ -394,16 +395,16 @@ impl JsonRpcHandler for InteractionControlHandler {
                     registered.save_snapshot().await?;
                     value(queue_messages(registered.agent(), request.queue))?
                 }
-                EVENT_SUBSCRIBE_METHOD => {
+                method::EVENT_SUBSCRIBE => {
                     self.require_ux(method, "rawEvents", |ux| ux.raw_events)?;
                     let request = parse_params::<EventSubscribeRequest>(params)?;
                     value(self.subscribe_raw(request, notifier).await?)?
                 }
-                "event/unsubscribe" => {
+                method::EVENT_UNSUBSCRIBE => {
                     let request = parse_params::<EventUnsubscribeRequest>(params)?;
                     value(self.unsubscribe(request.subscription_id).await?)?
                 }
-                DISPLAY_SUBSCRIBE_METHOD => {
+                method::DISPLAY_SUBSCRIBE => {
                     self.require_ux(method, "displayEvents", |ux| ux.display_events)?;
                     let request = parse_params::<DisplaySubscribeRequest>(params)?;
                     let granted_ux = self.granted_ux();
@@ -416,7 +417,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "approval/list" => {
+                method::APPROVAL_LIST => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(
                         self.session(&request.session_id)
@@ -426,12 +427,12 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await,
                     )?
                 }
-                "approval/resolve" => {
+                method::APPROVAL_RESOLVE => {
                     self.require(method, InteractionAuthorityCapability::ApprovalResolve)?;
                     let request = parse_params::<ApprovalResolveRequest>(params)?;
                     value(self.resolve_approval(request).await?)?
                 }
-                "approval/resume_timeouts" => {
+                method::APPROVAL_RESUME_TIMEOUTS => {
                     self.require(method, InteractionAuthorityCapability::ApprovalResolve)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
@@ -441,7 +442,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                         .await?;
                     value(registered.descriptor().await)?
                 }
-                "manifest/get" => {
+                method::MANIFEST_GET => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(
                         self.session(&request.session_id)
@@ -450,7 +451,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .manifest(),
                     )?
                 }
-                "manifest/system_prompt/get" => {
+                method::MANIFEST_SYSTEM_PROMPT_GET => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(
                         self.session(&request.session_id)
@@ -459,7 +460,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .resolved_system_prompt(),
                     )?
                 }
-                "manifest/proposals/list" => {
+                method::MANIFEST_PROPOSALS_LIST => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(
                         self.session(&request.session_id)
@@ -469,7 +470,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .pending_proposals(),
                     )?
                 }
-                "manifest/proposals/approve" => {
+                method::MANIFEST_PROPOSALS_APPROVE => {
                     self.require(method, InteractionAuthorityCapability::ManifestApply)?;
                     let request = parse_params::<ManifestProposalRequest>(params)?;
                     let proposal = self
@@ -481,7 +482,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                         .map_err(|error| InteractionError::not_found(error.to_string()))?;
                     value(proposal)?
                 }
-                "manifest/apply_approved" => {
+                method::MANIFEST_APPLY_APPROVED => {
                     self.require(method, InteractionAuthorityCapability::ManifestApply)?;
                     let request = parse_params::<SessionRequest>(params)?;
                     let registered = self.session(&request.session_id).await?;
@@ -491,7 +492,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                         applied_proposal_ids: applied,
                     })?
                 }
-                "process/list" => {
+                method::PROCESS_LIST => {
                     let request = parse_params::<SessionRequest>(params)?;
                     value(
                         self.session(&request.session_id)
@@ -502,25 +503,18 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "process/read" => {
-                    let request = parse_params::<ProcessReadRpcRequest>(params)?;
+                method::PROCESS_READ => {
+                    let request = parse_params::<ProcessReadRequest>(params)?;
                     let output = self
                         .session(&request.session_id)
                         .await?
                         .session()
                         .process_manager()
-                        .read(
-                            &request.job_id,
-                            ReadOutputRequest {
-                                after_seq: request.after_seq,
-                                max_bytes: request.max_bytes,
-                                wait_ms: request.wait_ms,
-                            },
-                        )
+                        .read(&request.job_id, request.output)
                         .await?;
                     value(output)?
                 }
-                "process/wait" => {
+                method::PROCESS_WAIT => {
                     self.require(method, InteractionAuthorityCapability::ProcessControl)?;
                     let request = parse_params::<ProcessWaitRequest>(params)?;
                     value(
@@ -532,7 +526,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "process/write" => {
+                method::PROCESS_WRITE => {
                     self.require(method, InteractionAuthorityCapability::ProcessControl)?;
                     let request = parse_params::<ProcessWriteRequest>(params)?;
                     value(
@@ -544,7 +538,7 @@ impl JsonRpcHandler for InteractionControlHandler {
                             .await?,
                     )?
                 }
-                "process/terminate" => {
+                method::PROCESS_TERMINATE => {
                     self.require(method, InteractionAuthorityCapability::ProcessControl)?;
                     let request = parse_params::<ProcessJobRequest>(params)?;
                     value(
@@ -601,7 +595,7 @@ impl InteractionControlHandler {
             let subscription_id = notification_subscription_id.clone();
             async move {
                 let _ = notifier.notify(
-                    RAW_EVENT_NOTIFICATION,
+                    notification::RAW_EVENT,
                     &RawEventNotification {
                         session_id,
                         subscription_id,
@@ -788,258 +782,6 @@ fn subagent_result_observation_message(
     message
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct InitializeResult {
-    server: InteractionServerInfo,
-    grant: InteractionCapabilityGrant,
-    profiles: Vec<InteractionProfileDescriptor>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct InteractionServerInfo {
-    name: String,
-    protocol_version: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct SessionRequest {
-    session_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct SessionDeleteRequest {
-    session_id: String,
-    #[serde(default)]
-    force_abort: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct AgentPromptRequest {
-    session_id: String,
-    input: AgentPromptInput,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-enum AgentPromptInput {
-    Text { text: String },
-    Message { message: AgentMessage },
-}
-
-impl AgentPromptInput {
-    fn into_agent_input(self) -> AgentInput {
-        match self {
-            Self::Text { text } => AgentInput::Text(text),
-            Self::Message { message } => AgentInput::Message(message),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct AgentSteerRequest {
-    session_id: String,
-    message: AgentMessage,
-    #[serde(default)]
-    intent: Option<InteractionQueuedMessageIntent>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct AgentFollowUpRequest {
-    session_id: String,
-    message: AgentMessage,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum QueueKind {
-    Steering,
-    FollowUp,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct InteractionQueuedMessage {
-    message: AgentMessage,
-    intent: InteractionQueuedMessageIntent,
-}
-
-impl InteractionQueuedMessage {
-    fn from_core(message: QueuedAgentMessage) -> Self {
-        Self {
-            message: message.message,
-            intent: InteractionQueuedMessageIntent::from(message.intent),
-        }
-    }
-
-    fn into_core(self) -> QueuedAgentMessage {
-        match self.intent {
-            InteractionQueuedMessageIntent::Observation => {
-                QueuedAgentMessage::observation(self.message)
-            }
-            InteractionQueuedMessageIntent::UserInput => {
-                QueuedAgentMessage::user_input(self.message)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum InteractionQueuedMessageIntent {
-    #[default]
-    Observation,
-    UserInput,
-}
-
-impl From<QueuedMessageIntent> for InteractionQueuedMessageIntent {
-    fn from(value: QueuedMessageIntent) -> Self {
-        match value {
-            QueuedMessageIntent::Observation => Self::Observation,
-            QueuedMessageIntent::UserInput => Self::UserInput,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct QueueRequest {
-    session_id: String,
-    queue: QueueKind,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct QueueEditRequest {
-    session_id: String,
-    queue: QueueKind,
-    messages: Vec<InteractionQueuedMessage>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct QueueSetModeRequest {
-    session_id: String,
-    queue: QueueKind,
-    mode: QueueMode,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct EventSubscribeRequest {
-    session_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct DisplaySubscribeRequest {
-    session_id: String,
-    #[serde(default)]
-    ux: Option<InteractionUxCapabilities>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct EventUnsubscribeRequest {
-    subscription_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct SubscriptionResult {
-    subscription_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct UnsubscribeResult {
-    unsubscribed: bool,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct RawEventNotification {
-    session_id: String,
-    subscription_id: String,
-    event: AgentEvent,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct DisplayEventNotification {
-    session_id: String,
-    subscription_id: String,
-    event: DisplayEvent,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ApprovalResolveRequest {
-    session_id: String,
-    approval_id: ToolApprovalId,
-    decision: ToolPermissionDecision,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ManifestProposalRequest {
-    session_id: String,
-    proposal_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ManifestApplyResult {
-    applied_proposal_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ProcessJobRequest {
-    session_id: String,
-    job_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ProcessReadRpcRequest {
-    session_id: String,
-    job_id: String,
-    #[serde(default)]
-    after_seq: Option<u64>,
-    #[serde(default)]
-    max_bytes: Option<usize>,
-    #[serde(default)]
-    wait_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ProcessWaitRequest {
-    session_id: String,
-    job_id: String,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct ProcessWriteRequest {
-    session_id: String,
-    job_id: String,
-    text: String,
-}
-
 struct DisplayProjector {
     session_id: String,
     subscription_id: String,
@@ -1051,8 +793,8 @@ impl DisplayProjector {
     fn handle(&mut self, event: AgentEvent) {
         for display_event in self.project(event) {
             let _ = self.notifier.notify(
-                DISPLAY_EVENT_NOTIFICATION,
-                &DisplayEventNotification {
+                notification::DISPLAY_EVENT,
+                &InteractionDisplayNotification {
                     session_id: self.session_id.clone(),
                     subscription_id: self.subscription_id.clone(),
                     event: display_event,
@@ -1137,43 +879,43 @@ impl DisplayProjector {
 
 fn queue_messages(
     agent: &noloong_agent_core::Agent,
-    queue: QueueKind,
-) -> Vec<InteractionQueuedMessage> {
+    queue: InteractionQueueKind,
+) -> Vec<AgentSessionQueuedMessage> {
     match queue {
-        QueueKind::Steering => agent.queued_steering_messages(),
-        QueueKind::FollowUp => agent.queued_follow_up_messages(),
+        InteractionQueueKind::Steering => agent.queued_steering_messages(),
+        InteractionQueueKind::FollowUp => agent.queued_follow_up_messages(),
     }
     .into_iter()
-    .map(InteractionQueuedMessage::from_core)
+    .map(AgentSessionQueuedMessage::from_core)
     .collect()
 }
 
 fn replace_queue(
     agent: &noloong_agent_core::Agent,
-    queue: QueueKind,
+    queue: InteractionQueueKind,
     messages: Vec<QueuedAgentMessage>,
 ) {
     match queue {
-        QueueKind::Steering => agent.edit_steering_queue(|queue| {
+        InteractionQueueKind::Steering => agent.edit_steering_queue(|queue| {
             *queue = messages;
         }),
-        QueueKind::FollowUp => agent.edit_follow_up_queue(|queue| {
+        InteractionQueueKind::FollowUp => agent.edit_follow_up_queue(|queue| {
             *queue = messages;
         }),
     }
 }
 
-fn clear_queue(agent: &noloong_agent_core::Agent, queue: QueueKind) {
+fn clear_queue(agent: &noloong_agent_core::Agent, queue: InteractionQueueKind) {
     match queue {
-        QueueKind::Steering => agent.clear_steering_queue(),
-        QueueKind::FollowUp => agent.clear_follow_up_queue(),
+        InteractionQueueKind::Steering => agent.clear_steering_queue(),
+        InteractionQueueKind::FollowUp => agent.clear_follow_up_queue(),
     }
 }
 
-fn set_queue_mode(agent: &noloong_agent_core::Agent, queue: QueueKind, mode: QueueMode) {
+fn set_queue_mode(agent: &noloong_agent_core::Agent, queue: InteractionQueueKind, mode: QueueMode) {
     match queue {
-        QueueKind::Steering => agent.set_steering_mode(mode),
-        QueueKind::FollowUp => agent.set_follow_up_mode(mode),
+        InteractionQueueKind::Steering => agent.set_steering_mode(mode),
+        InteractionQueueKind::FollowUp => agent.set_follow_up_mode(mode),
     }
 }
 

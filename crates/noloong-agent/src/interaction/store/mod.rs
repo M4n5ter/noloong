@@ -19,8 +19,7 @@ pub use memory::InMemoryAgentSessionRegistryStore;
 pub use object::{OpenDalAgentSessionRegistryStore, OpenDalAgentSessionRegistryStoreConfig};
 pub use snapshot::{
     AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentSessionQueueSnapshot, AgentSessionQueueState,
-    AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent, AgentSessionRecord,
-    current_unix_ms,
+    AgentSessionRecord, current_unix_ms,
 };
 #[cfg(any(feature = "registry-store-sqlite", feature = "registry-store-postgres"))]
 pub use sql::{SqlAgentSessionRegistryStore, SqlAgentSessionRegistryStoreConfig};

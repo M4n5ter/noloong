@@ -2,9 +2,8 @@
 
 use futures_util::{SinkExt, StreamExt};
 use noloong_agent::interaction::{
-    DISPLAY_SUBSCRIBE_METHOD, EVENT_SUBSCRIBE_METHOD, InteractionError, InteractionFuture,
-    InteractionHttpTransportConfig, InteractionNotifier, JsonRpcHandler, JsonRpcHandlerOutput,
-    JsonRpcRequest, serve_interaction_http,
+    InteractionError, InteractionFuture, InteractionHttpTransportConfig, InteractionNotifier,
+    JsonRpcHandler, JsonRpcHandlerOutput, JsonRpcRequest, protocol::method, serve_interaction_http,
 };
 use serde_json::{Value, json};
 use std::{
@@ -129,7 +128,7 @@ async fn http_rejects_subscription_methods() {
     let server = spawn_server(TestHandler::default()).await;
     let client = reqwest::Client::new();
 
-    for method in [EVENT_SUBSCRIBE_METHOD, DISPLAY_SUBSCRIBE_METHOD] {
+    for method in [method::EVENT_SUBSCRIBE, method::DISPLAY_SUBSCRIBE] {
         let response = client
             .post(format!("{}/jsonrpc", server.base_url))
             .bearer_auth(TOKEN)

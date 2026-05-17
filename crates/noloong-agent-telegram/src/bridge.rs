@@ -9,14 +9,23 @@ use crate::{
     },
 };
 use noloong_agent::interaction::{
-    DISPLAY_EVENT_NOTIFICATION, DisplayEvent, InteractionAuthorityCapability,
-    InteractionClientError, InteractionClientInfo, InteractionProfileDescriptor,
-    InteractionSessionDescriptor, InteractionSessionStatus, InteractionUxCapabilities,
-    InteractionWsClient, InteractionWsNotification,
+    AgentSessionCreateRequest, AgentSessionListFilter, DisplayEvent,
+    InteractionAuthorityCapability, InteractionClientError, InteractionClientInfo,
+    InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
+    InteractionUxCapabilities, InteractionWsClient, InteractionWsNotification,
+    SubagentSpawnRequest,
+    protocol::{
+        AgentFollowUpRequest, AgentPromptInput, AgentPromptRequest, ApprovalResolveRequest,
+        DisplaySubscribeRequest, InteractionDisplayNotification, InteractionInitializeResult,
+        ManifestApplyResult, ManifestProposalRequest, ProcessJobRequest, ProcessReadRequest,
+        ProcessWaitRequest, ProcessWriteRequest, QueueRequest, QueueSetModeRequest,
+        SessionDeleteRequest, SessionRequest, SubscriptionResult, method, notification,
+        request_params as interaction_params,
+    },
 };
 use noloong_agent::{
     AgentManifest, JobSnapshot, ManifestPatch, ManifestPatchProposal, ProcessOutput,
-    ResolvedSystemPrompt, SystemPromptAddition, WaitOutcome,
+    ReadOutputRequest, ResolvedSystemPrompt, SystemPromptAddition, WaitOutcome,
 };
 use noloong_agent_core::{
     AgentMessage, ContentBlock, MediaBlock, MessageRole, QueueMode, ToolApprovalRequest,
@@ -33,33 +42,6 @@ use std::{
 use thiserror::Error;
 use tokio::sync::broadcast;
 
-const METHOD_INITIALIZE: &str = "initialize";
-const METHOD_AGENT_PROMPT: &str = "agent/prompt";
-const METHOD_AGENT_CONTINUE: &str = "agent/continue";
-const METHOD_AGENT_ABORT: &str = "agent/abort";
-const METHOD_AGENT_FOLLOW_UP: &str = "agent/follow_up";
-const METHOD_APPROVAL_LIST: &str = "approval/list";
-const METHOD_APPROVAL_RESOLVE: &str = "approval/resolve";
-const METHOD_PROFILE_LIST: &str = "profile/list";
-const METHOD_SESSION_CREATE: &str = "session/create";
-const METHOD_SESSION_DELETE: &str = "session/delete";
-const METHOD_SESSION_GET: &str = "session/get";
-const METHOD_SESSION_LIST: &str = "session/list";
-const METHOD_QUEUE_LIST: &str = "queue/list";
-const METHOD_QUEUE_CLEAR: &str = "queue/clear";
-const METHOD_QUEUE_SET_MODE: &str = "queue/set_mode";
-const METHOD_PROCESS_LIST: &str = "process/list";
-const METHOD_PROCESS_READ: &str = "process/read";
-const METHOD_PROCESS_WAIT: &str = "process/wait";
-const METHOD_PROCESS_WRITE: &str = "process/write";
-const METHOD_PROCESS_TERMINATE: &str = "process/terminate";
-const METHOD_MANIFEST_GET: &str = "manifest/get";
-const METHOD_MANIFEST_SYSTEM_PROMPT_GET: &str = "manifest/system_prompt/get";
-const METHOD_MANIFEST_PROPOSALS_LIST: &str = "manifest/proposals/list";
-const METHOD_MANIFEST_PROPOSALS_APPROVE: &str = "manifest/proposals/approve";
-const METHOD_MANIFEST_APPLY_APPROVED: &str = "manifest/apply_approved";
-const METHOD_SUBAGENT_SPAWN: &str = "subagent/spawn";
-const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
 const TELEGRAM_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.telegram";
 
 pub type TelegramBridgeResult<T> = Result<T, TelegramBridgeError>;
@@ -219,7 +201,10 @@ impl TelegramBridge {
             metadata: Default::default(),
         };
         let result = self
-            .request_as::<InteractionInitializeResult>(METHOD_INITIALIZE, json!(client_info))
+            .request_as::<InteractionInitializeResult>(
+                method::INITIALIZE,
+                interaction_params(client_info),
+            )
             .await?;
         let profile_id = self
             .config
@@ -314,26 +299,26 @@ impl TelegramBridge {
         let status = self.session_status(&key)?;
         let method = match status {
             InteractionSessionStatus::Running | InteractionSessionStatus::Paused => {
-                METHOD_AGENT_FOLLOW_UP
+                method::AGENT_FOLLOW_UP
             }
             InteractionSessionStatus::Idle
             | InteractionSessionStatus::Completed
             | InteractionSessionStatus::Aborted
-            | InteractionSessionStatus::Failed => METHOD_AGENT_PROMPT,
+            | InteractionSessionStatus::Failed => method::AGENT_PROMPT,
         };
-        let should_bind_reply_target = method == METHOD_AGENT_PROMPT;
+        let should_bind_reply_target = method == method::AGENT_PROMPT;
         if should_bind_reply_target {
             self.push_pending_run_reply_target(key, context.message_id);
         }
-        let descriptor_result = if method == METHOD_AGENT_PROMPT {
+        let descriptor_result = if method == method::AGENT_PROMPT {
             self.request_agent_prompt(&session.session_id, message)
                 .await
         } else {
             self.request_as::<InteractionSessionDescriptor>(
                 method,
-                json!({
-                    "sessionId": session.session_id,
-                    "message": message,
+                interaction_params(AgentFollowUpRequest {
+                    session_id: session.session_id,
+                    message,
                 }),
             )
             .await
@@ -352,10 +337,10 @@ impl TelegramBridge {
         message: AgentMessage,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         self.request_as::<InteractionSessionDescriptor>(
-            METHOD_AGENT_PROMPT,
-            json!({
-                "sessionId": session_id,
-                "input": {"type": "message", "message": message},
+            method::AGENT_PROMPT,
+            interaction_params(AgentPromptRequest {
+                session_id: session_id.into(),
+                input: AgentPromptInput::Message { message },
             }),
         )
         .await
@@ -370,11 +355,11 @@ impl TelegramBridge {
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
             .request_as(
-                METHOD_APPROVAL_RESOLVE,
-                json!({
-                    "sessionId": session_id,
-                    "approvalId": approval_id,
-                    "decision": decision,
+                method::APPROVAL_RESOLVE,
+                interaction_params(ApprovalResolveRequest {
+                    session_id: session_id.into(),
+                    approval_id: approval_id.into(),
+                    decision,
                 }),
             )
             .await?;
@@ -386,8 +371,13 @@ impl TelegramBridge {
         &self,
         session_id: &str,
     ) -> TelegramBridgeResult<BTreeMap<String, ToolApprovalRequest>> {
-        self.request_as(METHOD_APPROVAL_LIST, json!({ "sessionId": session_id }))
-            .await
+        self.request_as(
+            method::APPROVAL_LIST,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
     }
 
     pub async fn continue_session(
@@ -395,7 +385,12 @@ impl TelegramBridge {
         session_id: &str,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
-            .request_as(METHOD_AGENT_CONTINUE, json!({"sessionId": session_id}))
+            .request_as(
+                method::AGENT_CONTINUE,
+                interaction_params(SessionRequest {
+                    session_id: session_id.into(),
+                }),
+            )
             .await?;
         self.record_descriptor_status(&descriptor);
         Ok(descriptor)
@@ -406,7 +401,12 @@ impl TelegramBridge {
         session_id: &str,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
-            .request_as(METHOD_AGENT_ABORT, json!({"sessionId": session_id}))
+            .request_as(
+                method::AGENT_ABORT,
+                interaction_params(SessionRequest {
+                    session_id: session_id.into(),
+                }),
+            )
             .await?;
         self.record_descriptor_status(&descriptor);
         Ok(descriptor)
@@ -421,8 +421,11 @@ impl TelegramBridge {
         let message = telegram_user_message(context, vec![ContentBlock::Text { text }]);
         let descriptor = self
             .request_as(
-                METHOD_AGENT_FOLLOW_UP,
-                json!({"sessionId": session_id, "message": message}),
+                method::AGENT_FOLLOW_UP,
+                interaction_params(AgentFollowUpRequest {
+                    session_id: session_id.into(),
+                    message,
+                }),
             )
             .await?;
         self.record_descriptor_status(&descriptor);
@@ -449,8 +452,11 @@ impl TelegramBridge {
         queue: TelegramQueueKind,
     ) -> TelegramBridgeResult<Vec<TelegramQueuedMessage>> {
         self.request_as(
-            METHOD_QUEUE_CLEAR,
-            json!({"sessionId": session_id, "queue": queue.as_str()}),
+            method::QUEUE_CLEAR,
+            interaction_params(QueueRequest {
+                session_id: session_id.into(),
+                queue,
+            }),
         )
         .await
     }
@@ -462,15 +468,24 @@ impl TelegramBridge {
         mode: QueueMode,
     ) -> TelegramBridgeResult<Vec<TelegramQueuedMessage>> {
         self.request_as(
-            METHOD_QUEUE_SET_MODE,
-            json!({"sessionId": session_id, "queue": queue.as_str(), "mode": mode}),
+            method::QUEUE_SET_MODE,
+            interaction_params(QueueSetModeRequest {
+                session_id: session_id.into(),
+                queue,
+                mode,
+            }),
         )
         .await
     }
 
     pub async fn list_processes(&self, session_id: &str) -> TelegramBridgeResult<Vec<JobSnapshot>> {
-        self.request_as(METHOD_PROCESS_LIST, json!({"sessionId": session_id}))
-            .await
+        self.request_as(
+            method::PROCESS_LIST,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
     }
 
     pub async fn read_process(
@@ -482,13 +497,15 @@ impl TelegramBridge {
         wait_ms: Option<u64>,
     ) -> TelegramBridgeResult<ProcessOutput> {
         self.request_as(
-            METHOD_PROCESS_READ,
-            json!({
-                "sessionId": session_id,
-                "jobId": job_id,
-                "afterSeq": after_seq,
-                "maxBytes": max_bytes,
-                "waitMs": wait_ms,
+            method::PROCESS_READ,
+            interaction_params(ProcessReadRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+                output: ReadOutputRequest {
+                    after_seq,
+                    max_bytes,
+                    wait_ms,
+                },
             }),
         )
         .await
@@ -501,8 +518,12 @@ impl TelegramBridge {
         timeout_ms: Option<u64>,
     ) -> TelegramBridgeResult<WaitOutcome> {
         self.request_as(
-            METHOD_PROCESS_WAIT,
-            json!({"sessionId": session_id, "jobId": job_id, "timeoutMs": timeout_ms}),
+            method::PROCESS_WAIT,
+            interaction_params(ProcessWaitRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+                timeout_ms,
+            }),
         )
         .await
     }
@@ -514,8 +535,12 @@ impl TelegramBridge {
         text: &str,
     ) -> TelegramBridgeResult<JobSnapshot> {
         self.request_as(
-            METHOD_PROCESS_WRITE,
-            json!({"sessionId": session_id, "jobId": job_id, "text": text}),
+            method::PROCESS_WRITE,
+            interaction_params(ProcessWriteRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+                text: text.into(),
+            }),
         )
         .await
     }
@@ -526,15 +551,23 @@ impl TelegramBridge {
         job_id: &str,
     ) -> TelegramBridgeResult<JobSnapshot> {
         self.request_as(
-            METHOD_PROCESS_TERMINATE,
-            json!({"sessionId": session_id, "jobId": job_id}),
+            method::PROCESS_TERMINATE,
+            interaction_params(ProcessJobRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+            }),
         )
         .await
     }
 
     pub async fn get_manifest(&self, session_id: &str) -> TelegramBridgeResult<AgentManifest> {
-        self.request_as(METHOD_MANIFEST_GET, json!({"sessionId": session_id}))
-            .await
+        self.request_as(
+            method::MANIFEST_GET,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
     }
 
     pub async fn get_system_prompt(
@@ -542,8 +575,10 @@ impl TelegramBridge {
         session_id: &str,
     ) -> TelegramBridgeResult<ResolvedSystemPrompt> {
         self.request_as(
-            METHOD_MANIFEST_SYSTEM_PROMPT_GET,
-            json!({"sessionId": session_id}),
+            method::MANIFEST_SYSTEM_PROMPT_GET,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
         )
         .await
     }
@@ -553,8 +588,10 @@ impl TelegramBridge {
         session_id: &str,
     ) -> TelegramBridgeResult<Vec<ManifestPatchProposal>> {
         self.request_as(
-            METHOD_MANIFEST_PROPOSALS_LIST,
-            json!({"sessionId": session_id}),
+            method::MANIFEST_PROPOSALS_LIST,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
         )
         .await
     }
@@ -565,8 +602,11 @@ impl TelegramBridge {
         proposal_id: &str,
     ) -> TelegramBridgeResult<ManifestPatchProposal> {
         self.request_as(
-            METHOD_MANIFEST_PROPOSALS_APPROVE,
-            json!({"sessionId": session_id, "proposalId": proposal_id}),
+            method::MANIFEST_PROPOSALS_APPROVE,
+            interaction_params(ManifestProposalRequest {
+                session_id: session_id.into(),
+                proposal_id: proposal_id.into(),
+            }),
         )
         .await
     }
@@ -576,8 +616,10 @@ impl TelegramBridge {
         session_id: &str,
     ) -> TelegramBridgeResult<ManifestApplyResult> {
         self.request_as(
-            METHOD_MANIFEST_APPLY_APPROVED,
-            json!({"sessionId": session_id}),
+            method::MANIFEST_APPLY_APPROVED,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
         )
         .await
     }
@@ -592,15 +634,16 @@ impl TelegramBridge {
         let key = TelegramSessionKey::new(context.chat_id, context.thread_id);
         let descriptor = self
             .request_as::<InteractionSessionDescriptor>(
-                METHOD_SUBAGENT_SPAWN,
-                json!({
-                    "parentSessionId": parent_session_id,
-                    "role": role,
-                    "metadata": telegram_session_metadata(
+                method::SUBAGENT_SPAWN,
+                interaction_params(SubagentSpawnRequest {
+                    parent_session_id: parent_session_id.into(),
+                    role,
+                    metadata: telegram_session_metadata(
                         context.chat_id,
                         context.thread_id,
-                        context.chat_kind.as_str()
+                        context.chat_kind.as_str(),
                     ),
+                    ..SubagentSpawnRequest::default()
                 }),
             )
             .await?;
@@ -631,7 +674,7 @@ impl TelegramBridge {
     }
 
     pub async fn list_profiles(&self) -> TelegramBridgeResult<Vec<InteractionProfileDescriptor>> {
-        self.request_as(METHOD_PROFILE_LIST, json!({})).await
+        self.request_as(method::PROFILE_LIST, json!({})).await
     }
 
     pub async fn create_chat_session(
@@ -650,7 +693,12 @@ impl TelegramBridge {
         session_id: &str,
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
-            .request_as(METHOD_SESSION_GET, json!({"sessionId": session_id}))
+            .request_as(
+                method::SESSION_GET,
+                interaction_params(SessionRequest {
+                    session_id: session_id.into(),
+                }),
+            )
             .await?;
         self.record_descriptor_status(&descriptor);
         Ok(descriptor)
@@ -662,8 +710,11 @@ impl TelegramBridge {
     ) -> TelegramBridgeResult<Vec<InteractionSessionDescriptor>> {
         let sessions = self
             .request_as::<Vec<InteractionSessionDescriptor>>(
-                METHOD_SESSION_LIST,
-                json!({"metadataEquals": telegram_session_metadata_filter(key)}),
+                method::SESSION_LIST,
+                interaction_params(AgentSessionListFilter {
+                    metadata_equals: telegram_session_metadata_filter(key),
+                    ..AgentSessionListFilter::default()
+                }),
             )
             .await?;
         Ok(sessions
@@ -699,8 +750,11 @@ impl TelegramBridge {
     ) -> TelegramBridgeResult<Option<InteractionSessionDescriptor>> {
         let deleted = self
             .request_as(
-                METHOD_SESSION_DELETE,
-                json!({"sessionId": session_id, "forceAbort": force_abort}),
+                method::SESSION_DELETE,
+                interaction_params(SessionDeleteRequest {
+                    session_id: session_id.into(),
+                    force_abort,
+                }),
             )
             .await?;
         self.remove_session_if_active(key, session_id);
@@ -724,7 +778,7 @@ impl TelegramBridge {
     pub fn parse_display_notification(
         notification: InteractionWsNotification,
     ) -> TelegramBridgeResult<Option<InteractionDisplayNotification>> {
-        if notification.method != DISPLAY_EVENT_NOTIFICATION {
+        if notification.method != notification::DISPLAY_EVENT {
             return Ok(None);
         }
         serde_json::from_value::<InteractionDisplayNotification>(notification.params)
@@ -740,8 +794,8 @@ impl TelegramBridge {
         if let Some(session_id) = self.session_id(&key) {
             let descriptor = self
                 .request_as::<InteractionSessionDescriptor>(
-                    METHOD_SESSION_GET,
-                    json!({"sessionId": session_id}),
+                    method::SESSION_GET,
+                    interaction_params(SessionRequest { session_id }),
                 )
                 .await?;
             self.record_session_status(key, descriptor.status.clone());
@@ -763,16 +817,17 @@ impl TelegramBridge {
     ) -> TelegramBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
             .request_as::<InteractionSessionDescriptor>(
-                METHOD_SESSION_CREATE,
-                json!({
-                    "sessionId": session_id,
-                    "profileId": profile_id,
-                    "manifestPatches": [telegram_system_prompt_patch()],
-                    "metadata": telegram_session_metadata(
+                method::SESSION_CREATE,
+                interaction_params(AgentSessionCreateRequest {
+                    session_id: Some(session_id),
+                    profile_id: Some(profile_id),
+                    manifest_patches: vec![telegram_system_prompt_patch()],
+                    metadata: telegram_session_metadata(
                         context.chat_id,
                         context.thread_id,
-                        context.chat_kind.as_str()
+                        context.chat_kind.as_str(),
                     ),
+                    ..AgentSessionCreateRequest::default()
                 }),
             )
             .await?;
@@ -804,16 +859,17 @@ impl TelegramBridge {
     ) -> TelegramBridgeResult<String> {
         let subscription = self
             .request_as::<SubscriptionResult>(
-                METHOD_DISPLAY_SUBSCRIBE,
-                json!({
-                    "sessionId": session_id,
-                    "ux": {
-                        "displayEvents": true,
-                        "streamText": true,
-                        "editMessage": true,
-                        "markdown": true,
-                        "maxMessageBytes": self.config.max_outbound_chars,
-                    }
+                method::DISPLAY_SUBSCRIBE,
+                interaction_params(DisplaySubscribeRequest {
+                    session_id: session_id.into(),
+                    ux: Some(InteractionUxCapabilities {
+                        raw_events: false,
+                        display_events: true,
+                        stream_text: true,
+                        edit_message: true,
+                        markdown: true,
+                        max_message_bytes: Some(self.config.max_outbound_chars),
+                    }),
                 }),
             )
             .await?;
@@ -1031,8 +1087,11 @@ impl TelegramBridge {
         queue: TelegramQueueKind,
     ) -> TelegramBridgeResult<Vec<TelegramQueuedMessage>> {
         self.request_as(
-            METHOD_QUEUE_LIST,
-            json!({"sessionId": session_id, "queue": queue.as_str()}),
+            method::QUEUE_LIST,
+            interaction_params(QueueRequest {
+                session_id: session_id.into(),
+                queue,
+            }),
         )
         .await
     }
@@ -1146,33 +1205,6 @@ fn telegram_system_prompt_patch() -> ManifestPatch {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct InteractionInitializeResult {
-    pub grant: noloong_agent::interaction::InteractionCapabilityGrant,
-    pub profiles: Vec<InteractionProfileDescriptor>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct InteractionDisplayNotification {
-    pub session_id: String,
-    pub subscription_id: String,
-    pub event: DisplayEvent,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ManifestApplyResult {
-    pub applied_proposal_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct SubscriptionResult {
-    subscription_id: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1195,6 +1227,7 @@ mod tests {
         interaction::{
             DisplayEvent, InteractionClientError, InteractionSessionStatus,
             InteractionWsNotification,
+            protocol::{InteractionServerInfo, method},
         },
     };
     use noloong_agent_core::{AgentMessage, AgentState, ContentBlock, MediaBlock, MediaKind};
@@ -1211,6 +1244,7 @@ mod tests {
     async fn bridge_initializes_interaction() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "approval.resolve"],
                 "ux": {
@@ -1261,7 +1295,7 @@ mod tests {
 
         assert_eq!(descriptor.session_id, "telegram:42");
         let calls = fake.calls();
-        assert_eq!(calls[1].0, "session/create");
+        assert_eq!(calls[1].0, method::SESSION_CREATE);
         assert_eq!(calls[1].1["metadata"]["channel"], "telegram");
         assert_eq!(
             calls[1].1["manifestPatches"][0]["op"],
@@ -1271,8 +1305,8 @@ mod tests {
             calls[1].1["manifestPatches"][0]["addition"]["id"],
             TELEGRAM_SYSTEM_PROMPT_ADDITION_ID
         );
-        assert_eq!(calls[2].0, "display/subscribe");
-        assert_eq!(calls[3].0, "agent/prompt");
+        assert_eq!(calls[2].0, method::DISPLAY_SUBSCRIBE);
+        assert_eq!(calls[3].0, method::AGENT_PROMPT);
     }
 
     #[tokio::test]
@@ -1297,8 +1331,8 @@ mod tests {
             .unwrap();
 
         let calls = fake.calls();
-        assert_eq!(calls[3].0, "agent/follow_up");
-        assert_eq!(calls[5].0, "agent/follow_up");
+        assert_eq!(calls[3].0, method::AGENT_FOLLOW_UP);
+        assert_eq!(calls[5].0, method::AGENT_FOLLOW_UP);
         let key = crate::session::TelegramSessionKey::new(42, None);
         bridge.observe_display_reply_target(
             key,
@@ -1341,7 +1375,7 @@ mod tests {
             .unwrap();
 
         let calls = fake.calls();
-        assert_eq!(calls[3].0, "agent/prompt");
+        assert_eq!(calls[3].0, method::AGENT_PROMPT);
         assert_eq!(calls[3].1["input"]["message"]["id"], "telegram:42:9");
         assert_eq!(
             calls[3].1["input"]["message"]["content"][0],
@@ -1550,7 +1584,7 @@ mod tests {
             .unwrap();
 
         let calls = fake.calls();
-        assert_eq!(calls[3].0, "agent/follow_up");
+        assert_eq!(calls[3].0, method::AGENT_FOLLOW_UP);
         assert_eq!(calls[3].1["message"]["id"], "telegram:42:9");
     }
 
@@ -1646,6 +1680,7 @@ mod tests {
 
     fn initialize_response() -> Value {
         json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "approval.resolve"],
                 "ux": {

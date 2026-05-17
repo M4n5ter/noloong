@@ -1,6 +1,5 @@
 use crate::{
     approval::{TelegramApprovalSelection, TelegramApprovalStore, render_approval_request},
-    bridge::InteractionDisplayNotification,
     delivery::{
         TelegramAgentMessageOptions, TelegramDelivery, TelegramDeliveryResult,
         TelegramMessageTarget, TelegramPreviewMessage, TelegramReplyTarget,
@@ -8,7 +7,7 @@ use crate::{
     i18n::TelegramUiCatalog,
     telegram_api::{TelegramChatAction, TelegramMessageHandle},
 };
-use noloong_agent::interaction::DisplayEvent;
+use noloong_agent::interaction::{DisplayEvent, protocol::InteractionDisplayNotification};
 use noloong_agent_core::ToolPermissionOutcome;
 use std::{
     collections::BTreeMap,
@@ -424,7 +423,6 @@ mod tests {
         deliver_display_event, deliver_display_event_with_reply,
     };
     use crate::{
-        bridge::InteractionDisplayNotification,
         delivery::{TelegramDelivery, TelegramMessageTarget, TelegramReplyTarget},
         i18n::TelegramUiCatalog,
         telegram_api::{
@@ -433,8 +431,10 @@ mod tests {
             TelegramSendMessageRequest, TelegramSendPhotoRequest, TelegramUpdate,
         },
     };
-    use noloong_agent::Locale;
-    use noloong_agent::interaction::DisplayEvent;
+    use noloong_agent::{
+        Locale,
+        interaction::{DisplayEvent, protocol::InteractionDisplayNotification},
+    };
     use noloong_agent_core::{
         AgentMessage, ContentBlock, MediaBlock, MediaKind, ToolApprovalRequest,
         ToolApprovalRequestSpec, ToolCall, ToolOutput,

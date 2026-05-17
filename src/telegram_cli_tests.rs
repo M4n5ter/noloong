@@ -7,8 +7,16 @@ use noloong_agent::{
     AgentManifest, JobSnapshot, JobStatus, Locale, ManifestPatch, ManifestPatchProposal,
     OutputChunk, ProcessOutput, ProcessOutputStream, SystemPromptAddition, WaitOutcome,
     interaction::{
-        InteractionClientError, InteractionProfileDescriptor, InteractionSessionDescriptor,
-        InteractionSessionStatus, InteractionWsNotification,
+        AgentSessionCreateRequest, AgentSessionListFilter, InteractionClientError,
+        InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
+        InteractionWsNotification, SubagentSpawnRequest,
+        protocol::{
+            AgentFollowUpRequest, AgentPromptRequest, ApprovalResolveRequest,
+            DisplaySubscribeRequest, InteractionDisplayNotification, ManifestApplyResult,
+            ManifestProposalRequest, ProcessJobRequest, ProcessReadRequest, ProcessWaitRequest,
+            ProcessWriteRequest, QueueRequest, QueueSetModeRequest, SessionDeleteRequest,
+            SessionRequest, SubscriptionResult, method as rpc_method,
+        },
     },
 };
 use noloong_agent_core::{
@@ -277,7 +285,10 @@ async fn telegram_callback_resolves_approval_and_deletes_card() {
     fixture.handle_callback("cb-1", 621).await.unwrap();
     fixture.handle_callback("cb-2", 621).await.unwrap();
 
-    assert_eq!(fixture.interaction.methods(), vec!["approval/resolve"]);
+    assert_eq!(
+        fixture.interaction.methods(),
+        vec![rpc_method::APPROVAL_RESOLVE]
+    );
     assert_eq!(
         fixture.api.answered_texts(),
         vec![Some("Recorded".into()), Some("Approval expired".into())]
@@ -293,7 +304,10 @@ async fn telegram_callback_rejects_unauthorized_without_consuming_approval() {
     fixture.handle_callback("cb-1", 999).await.unwrap();
     fixture.handle_callback("cb-2", 621).await.unwrap();
 
-    assert_eq!(fixture.interaction.methods(), vec!["approval/resolve"]);
+    assert_eq!(
+        fixture.interaction.methods(),
+        vec![rpc_method::APPROVAL_RESOLVE]
+    );
     assert_eq!(
         fixture.api.answered_texts(),
         vec![Some("Not allowed".into()), Some("Recorded".into())]
@@ -324,7 +338,7 @@ async fn telegram_approvals_command_lists_runtime_approvals() {
             .interaction
             .methods()
             .into_iter()
-            .any(|method| method == "approval/list")
+            .any(|method| method == rpc_method::APPROVAL_LIST)
     );
 }
 
@@ -346,7 +360,7 @@ async fn telegram_approve_command_resolves_only_pending_approval() {
     let calls = fixture.interaction.calls();
     let (_, params) = calls
         .iter()
-        .find(|(method, _)| method == "approval/resolve")
+        .find(|(method, _)| method == rpc_method::APPROVAL_RESOLVE)
         .unwrap();
     assert_eq!(params["approvalId"], "approval-1");
     assert_eq!(params["decision"]["outcome"], "allow");
@@ -372,7 +386,7 @@ async fn telegram_deny_command_resolves_selected_pending_approval() {
     let calls = fixture.interaction.calls();
     let (_, params) = calls
         .iter()
-        .find(|(method, _)| method == "approval/resolve")
+        .find(|(method, _)| method == rpc_method::APPROVAL_RESOLVE)
         .unwrap();
     assert_eq!(params["approvalId"], "approval-2");
     assert_eq!(params["decision"]["outcome"], "deny");
@@ -458,9 +472,13 @@ async fn telegram_profiles_command_lists_profiles_and_selects_default() {
         .unwrap();
 
     let calls = fixture.interaction.calls();
-    assert!(calls.iter().any(|(method, _)| method == "profile/list"));
+    assert!(
+        calls
+            .iter()
+            .any(|(method, _)| method == rpc_method::PROFILE_LIST)
+    );
     assert!(calls.iter().any(|(method, params)| {
-        method == "session/create" && params["profileId"] == "profile-2"
+        method == rpc_method::SESSION_CREATE && params["profileId"] == "profile-2"
     }));
     assert!(
         fixture
@@ -515,22 +533,22 @@ async fn telegram_sessions_command_switches_and_confirms_delete() {
 
     let calls = fixture.interaction.calls();
     assert!(calls.iter().any(|(method, params)| {
-        method == "session/list"
+        method == rpc_method::SESSION_LIST
             && params["metadataEquals"]["channel"] == "telegram"
             && params["metadataEquals"]["chatId"] == 42
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "session/get" && params["sessionId"] == "telegram:42:session:9"
+        method == rpc_method::SESSION_GET && params["sessionId"] == "telegram:42:session:9"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "session/delete"
+        method == rpc_method::SESSION_DELETE
             && params["sessionId"] == "telegram:42:session:9"
             && params["forceAbort"] == true
     }));
     assert_eq!(
         calls
             .iter()
-            .filter(|(method, _)| method == "session/delete")
+            .filter(|(method, _)| method == rpc_method::SESSION_DELETE)
             .count(),
         1
     );
@@ -559,7 +577,7 @@ async fn telegram_status_command_reads_active_session() {
             .interaction
             .calls()
             .iter()
-            .any(|(method, _)| method == "session/get")
+            .any(|(method, _)| method == rpc_method::SESSION_GET)
     );
     assert!(
         fixture
@@ -583,7 +601,7 @@ async fn telegram_continue_command_calls_agent_continue() {
         .unwrap();
 
     assert!(fixture.interaction.calls().iter().any(|(method, params)| {
-        method == "agent/continue" && params["sessionId"] == "telegram:42"
+        method == rpc_method::AGENT_CONTINUE && params["sessionId"] == "telegram:42"
     }));
     assert_eq!(
         fixture.api.sent_texts().last().unwrap(),
@@ -610,7 +628,7 @@ async fn telegram_abort_command_confirms_running_session() {
             .interaction
             .methods()
             .iter()
-            .any(|method| method == "agent/abort")
+            .any(|method| method == rpc_method::AGENT_ABORT)
     );
 
     fixture
@@ -619,7 +637,7 @@ async fn telegram_abort_command_confirms_running_session() {
         .unwrap();
 
     assert!(fixture.interaction.calls().iter().any(|(method, params)| {
-        method == "agent/abort" && params["sessionId"] == "telegram:42"
+        method == rpc_method::AGENT_ABORT && params["sessionId"] == "telegram:42"
     }));
     assert_eq!(
         fixture.api.edited_texts().last().unwrap(),
@@ -660,18 +678,16 @@ async fn telegram_queue_command_lists_and_controls_queues() {
         .unwrap();
 
     let calls = fixture.interaction.calls();
-    assert!(
-        calls
-            .iter()
-            .any(|(method, params)| { method == "queue/list" && params["queue"] == "steering" })
-    );
-    assert!(
-        calls
-            .iter()
-            .any(|(method, params)| { method == "queue/clear" && params["queue"] == "steering" })
-    );
     assert!(calls.iter().any(|(method, params)| {
-        method == "queue/set_mode" && params["queue"] == "steering" && params["mode"] == "all"
+        method == rpc_method::QUEUE_LIST && params["queue"] == TelegramQueueKind::Steering.as_str()
+    }));
+    assert!(calls.iter().any(|(method, params)| {
+        method == rpc_method::QUEUE_CLEAR && params["queue"] == TelegramQueueKind::Steering.as_str()
+    }));
+    assert!(calls.iter().any(|(method, params)| {
+        method == rpc_method::QUEUE_SET_MODE
+            && params["queue"] == TelegramQueueKind::Steering.as_str()
+            && params["mode"] == "all"
     }));
 }
 
@@ -687,7 +703,7 @@ async fn telegram_queue_command_with_args_adds_follow_up() {
         .unwrap();
 
     assert!(fixture.interaction.calls().iter().any(|(method, params)| {
-        method == "agent/follow_up"
+        method == rpc_method::AGENT_FOLLOW_UP
             && params["sessionId"] == "telegram:42"
             && params["message"]["content"][0]["text"] == "use this next"
     }));
@@ -721,10 +737,10 @@ async fn telegram_processes_command_lists_and_opens_job() {
 
     let calls = fixture.interaction.calls();
     assert!(calls.iter().any(|(method, params)| {
-        method == "process/list" && params["sessionId"] == "telegram:42"
+        method == rpc_method::PROCESS_LIST && params["sessionId"] == "telegram:42"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "process/read"
+        method == rpc_method::PROCESS_READ
             && params["sessionId"] == "telegram:42"
             && params["jobId"] == "job-1"
             && params["maxBytes"] == process_output_read_max_bytes()
@@ -775,13 +791,13 @@ async fn telegram_process_command_confirms_write_and_terminate() {
 
     let calls = fixture.interaction.calls();
     assert!(calls.iter().any(|(method, params)| {
-        method == "process/write"
+        method == rpc_method::PROCESS_WRITE
             && params["sessionId"] == "telegram:42"
             && params["jobId"] == "job-1"
             && params["text"] == "input"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "process/terminate"
+        method == rpc_method::PROCESS_TERMINATE
             && params["sessionId"] == "telegram:42"
             && params["jobId"] == "job-1"
     }));
@@ -804,7 +820,7 @@ async fn telegram_process_command_sends_long_output_as_document() {
 
     assert_eq!(fixture.api.document_requests().len(), 1);
     assert!(fixture.interaction.calls().iter().any(|(method, params)| {
-        method == "process/read"
+        method == rpc_method::PROCESS_READ
             && params["sessionId"] == "telegram:42"
             && params["jobId"] == "job-long"
     }));
@@ -841,21 +857,21 @@ async fn telegram_manifest_command_approves_and_applies_proposal() {
 
     let calls = fixture.interaction.calls();
     assert!(calls.iter().any(|(method, params)| {
-        method == "manifest/get" && params["sessionId"] == "telegram:42"
+        method == rpc_method::MANIFEST_GET && params["sessionId"] == "telegram:42"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "manifest/system_prompt/get" && params["sessionId"] == "telegram:42"
+        method == rpc_method::MANIFEST_SYSTEM_PROMPT_GET && params["sessionId"] == "telegram:42"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "manifest/proposals/list" && params["sessionId"] == "telegram:42"
+        method == rpc_method::MANIFEST_PROPOSALS_LIST && params["sessionId"] == "telegram:42"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "manifest/proposals/approve"
+        method == rpc_method::MANIFEST_PROPOSALS_APPROVE
             && params["sessionId"] == "telegram:42"
             && params["proposalId"] == "manifest-proposal-1"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "manifest/apply_approved" && params["sessionId"] == "telegram:42"
+        method == rpc_method::MANIFEST_APPLY_APPROVED && params["sessionId"] == "telegram:42"
     }));
 }
 
@@ -881,13 +897,13 @@ async fn telegram_subagent_command_spawns_child_and_prompts() {
 
     let calls = fixture.interaction.calls();
     assert!(calls.iter().any(|(method, params)| {
-        method == "subagent/spawn"
+        method == rpc_method::SUBAGENT_SPAWN
             && params["parentSessionId"] == "telegram:42"
             && params["role"] == "researcher"
             && params["metadata"]["channel"] == "telegram"
     }));
     assert!(calls.iter().any(|(method, params)| {
-        method == "agent/prompt"
+        method == rpc_method::AGENT_PROMPT
             && params["sessionId"] == "session-subagent-1"
             && params["input"]["message"]["content"][0]["text"] == "inspect storage"
     }));
@@ -905,7 +921,7 @@ async fn telegram_submission_setup_failure_is_reported_without_polling_failure()
     let fixture = TelegramCallbackFixture::new().await;
     fixture
         .interaction
-        .fail_method("session/create", "session store rejected create");
+        .fail_method(rpc_method::SESSION_CREATE, "session store rejected create");
 
     fixture
         .handler
@@ -924,7 +940,7 @@ async fn telegram_prompt_jsonrpc_failure_is_left_to_display_delivery() {
     let fixture = TelegramCallbackFixture::new().await;
     fixture
         .interaction
-        .fail_method("agent/prompt", "provider rejected media");
+        .fail_method(rpc_method::AGENT_PROMPT, "provider rejected media");
 
     fixture
         .handler
@@ -1044,8 +1060,8 @@ fn telegram_test_config() -> noloong_agent_telegram::config::TelegramBridgeConfi
     .unwrap()
 }
 
-fn approval_notification() -> noloong_agent_telegram::bridge::InteractionDisplayNotification {
-    noloong_agent_telegram::bridge::InteractionDisplayNotification {
+fn approval_notification() -> InteractionDisplayNotification {
+    InteractionDisplayNotification {
         session_id: "session-1".into(),
         subscription_id: "subscription-1".into(),
         event: noloong_agent::interaction::DisplayEvent::ApprovalRequested {
@@ -1311,11 +1327,23 @@ impl TelegramInteractionClient for FakeInteraction {
                 ));
             }
             match method {
-                "approval/list" => {
+                rpc_method::APPROVAL_LIST => {
                     let approvals = self.approval_list.lock().unwrap().clone();
                     Ok(serde_json::to_value(approvals).unwrap())
                 }
-                "profile/list" => {
+                rpc_method::APPROVAL_RESOLVE => {
+                    let request = parse_fake_request::<ApprovalResolveRequest>(params);
+                    let descriptor = self
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|session| session.session_id == request.session_id)
+                        .cloned()
+                        .unwrap_or_else(|| telegram_session_descriptor(&request.session_id));
+                    Ok(serde_json::to_value(descriptor).unwrap())
+                }
+                rpc_method::PROFILE_LIST => {
                     let profiles = self.profiles.lock().unwrap().clone();
                     let profiles = if profiles.is_empty() {
                         vec![profile_descriptor("profile-1")]
@@ -1324,40 +1352,36 @@ impl TelegramInteractionClient for FakeInteraction {
                     };
                     Ok(serde_json::to_value(profiles).unwrap())
                 }
-                "session/create" => {
-                    let session_id = params["sessionId"]
-                        .as_str()
-                        .unwrap_or("session-1")
-                        .to_owned();
-                    let profile_id = params["profileId"]
-                        .as_str()
-                        .unwrap_or("profile-1")
-                        .to_owned();
+                rpc_method::SESSION_CREATE => {
+                    let request = parse_fake_request::<AgentSessionCreateRequest>(params);
+                    let session_id = request.session_id.unwrap_or_else(|| "session-1".into());
+                    let profile_id = request.profile_id.unwrap_or_else(|| "profile-1".into());
                     let descriptor = session_descriptor_with(
                         &session_id,
                         &profile_id,
                         InteractionSessionStatus::Idle,
-                        params["metadata"].as_object().cloned().unwrap_or_default(),
+                        request.metadata,
                     );
                     self.sessions.lock().unwrap().push(descriptor.clone());
                     Ok(serde_json::to_value(descriptor).unwrap())
                 }
-                "session/list" => {
+                rpc_method::SESSION_LIST => {
+                    let _request = parse_fake_request::<AgentSessionListFilter>(params);
                     let sessions = self.sessions.lock().unwrap().clone();
                     Ok(serde_json::to_value(sessions).unwrap())
                 }
-                "session/get" => {
-                    let session_id = params["sessionId"].as_str().unwrap_or("session-1");
+                rpc_method::SESSION_GET => {
+                    let request = parse_fake_request::<SessionRequest>(params);
                     let descriptor = self
                         .sessions
                         .lock()
                         .unwrap()
                         .iter()
-                        .find(|session| session.session_id == session_id)
+                        .find(|session| session.session_id == request.session_id)
                         .cloned()
                         .unwrap_or_else(|| {
                             session_descriptor_with(
-                                session_id,
+                                &request.session_id,
                                 "profile-1",
                                 InteractionSessionStatus::Idle,
                                 Default::default(),
@@ -1365,29 +1389,29 @@ impl TelegramInteractionClient for FakeInteraction {
                         });
                     Ok(serde_json::to_value(descriptor).unwrap())
                 }
-                "session/delete" => {
-                    let session_id = params["sessionId"].as_str().unwrap_or("session-1");
+                rpc_method::SESSION_DELETE => {
+                    let request = parse_fake_request::<SessionDeleteRequest>(params);
                     let deleted = {
                         let mut sessions = self.sessions.lock().unwrap();
                         let index = sessions
                             .iter()
-                            .position(|session| session.session_id == session_id);
+                            .position(|session| session.session_id == request.session_id);
                         index.map(|index| sessions.remove(index))
                     };
                     Ok(serde_json::to_value(deleted).unwrap())
                 }
-                "agent/continue" => {
-                    let request = parse_fake_request::<FakeSessionRequest>(params);
+                rpc_method::AGENT_CONTINUE => {
+                    let request = parse_fake_request::<SessionRequest>(params);
                     Ok(serde_json::to_value(self.session_by_id(&request.session_id)).unwrap())
                 }
-                "agent/abort" => {
-                    let request = parse_fake_request::<FakeSessionRequest>(params);
+                rpc_method::AGENT_ABORT => {
+                    let request = parse_fake_request::<SessionRequest>(params);
                     let mut descriptor = self.session_by_id(&request.session_id);
                     descriptor.status = InteractionSessionStatus::Aborted;
                     Ok(serde_json::to_value(descriptor).unwrap())
                 }
-                "agent/follow_up" => {
-                    let request = parse_fake_request::<FakeFollowUpRequest>(params);
+                rpc_method::AGENT_FOLLOW_UP => {
+                    let request = parse_fake_request::<AgentFollowUpRequest>(params);
                     self.queues
                         .lock()
                         .unwrap()
@@ -1399,30 +1423,30 @@ impl TelegramInteractionClient for FakeInteraction {
                         });
                     Ok(serde_json::to_value(self.session_by_id(&request.session_id)).unwrap())
                 }
-                "agent/prompt" => {
-                    let request = parse_fake_request::<FakePromptRequest>(params);
+                rpc_method::AGENT_PROMPT => {
+                    let request = parse_fake_request::<AgentPromptRequest>(params);
                     let mut descriptor = self.session_by_id(&request.session_id);
                     let _input = request.input;
                     descriptor.status = InteractionSessionStatus::Running;
                     self.upsert_session(descriptor.clone());
                     Ok(serde_json::to_value(descriptor).unwrap())
                 }
-                "queue/list" => {
-                    let request = parse_fake_request::<FakeQueueRequest>(params);
+                rpc_method::QUEUE_LIST => {
+                    let request = parse_fake_request::<QueueRequest>(params);
                     let messages = self.queue_messages(&request.session_id, request.queue);
                     Ok(serde_json::to_value(messages).unwrap())
                 }
-                "queue/clear" => {
-                    let request = parse_fake_request::<FakeQueueRequest>(params);
+                rpc_method::QUEUE_CLEAR => {
+                    let request = parse_fake_request::<QueueRequest>(params);
                     self.queues
                         .lock()
                         .unwrap()
                         .insert((request.session_id, request.queue), Vec::new());
                     Ok(serde_json::to_value(Vec::<TelegramQueuedMessage>::new()).unwrap())
                 }
-                "queue/set_mode" => {
-                    let request = parse_fake_request::<FakeQueueSetModeRequest>(params);
-                    let FakeQueueSetModeRequest {
+                rpc_method::QUEUE_SET_MODE => {
+                    let request = parse_fake_request::<QueueSetModeRequest>(params);
+                    let QueueSetModeRequest {
                         session_id,
                         queue,
                         mode,
@@ -1434,24 +1458,22 @@ impl TelegramInteractionClient for FakeInteraction {
                     let messages = self.queue_messages(&session_id, queue);
                     Ok(serde_json::to_value(messages).unwrap())
                 }
-                "process/list" => {
-                    let _request = parse_fake_request::<FakeSessionRequest>(params);
+                rpc_method::PROCESS_LIST => {
+                    let _request = parse_fake_request::<SessionRequest>(params);
                     Ok(serde_json::to_value(self.processes.lock().unwrap().clone()).unwrap())
                 }
-                "process/read" => {
-                    let request = parse_fake_request::<FakeProcessReadRequest>(params);
-                    let FakeProcessReadRequest {
+                rpc_method::PROCESS_READ => {
+                    let request = parse_fake_request::<ProcessReadRequest>(params);
+                    let ProcessReadRequest {
                         session_id: _session_id,
                         job_id,
-                        after_seq: _after_seq,
-                        max_bytes: _max_bytes,
-                        wait_ms: _wait_ms,
+                        output: _output,
                     } = request;
                     Ok(serde_json::to_value(self.process_output(&job_id)).unwrap())
                 }
-                "process/wait" => {
-                    let request = parse_fake_request::<FakeProcessWaitRequest>(params);
-                    let FakeProcessWaitRequest {
+                rpc_method::PROCESS_WAIT => {
+                    let request = parse_fake_request::<ProcessWaitRequest>(params);
+                    let ProcessWaitRequest {
                         session_id: _session_id,
                         job_id,
                         timeout_ms: _timeout_ms,
@@ -1464,9 +1486,9 @@ impl TelegramInteractionClient for FakeInteraction {
                     })
                     .unwrap())
                 }
-                "process/write" => {
-                    let request = parse_fake_request::<FakeProcessWriteRequest>(params);
-                    let FakeProcessWriteRequest {
+                rpc_method::PROCESS_WRITE => {
+                    let request = parse_fake_request::<ProcessWriteRequest>(params);
+                    let ProcessWriteRequest {
                         session_id: _session_id,
                         job_id,
                         text: _text,
@@ -1476,9 +1498,9 @@ impl TelegramInteractionClient for FakeInteraction {
                             .unwrap(),
                     )
                 }
-                "process/terminate" => {
-                    let request = parse_fake_request::<FakeProcessJobRequest>(params);
-                    let FakeProcessJobRequest {
+                rpc_method::PROCESS_TERMINATE => {
+                    let request = parse_fake_request::<ProcessJobRequest>(params);
+                    let ProcessJobRequest {
                         session_id: _session_id,
                         job_id,
                     } = request;
@@ -1487,15 +1509,15 @@ impl TelegramInteractionClient for FakeInteraction {
                             .unwrap(),
                     )
                 }
-                "manifest/get" => {
-                    let request = parse_fake_request::<FakeSessionRequest>(params);
+                rpc_method::MANIFEST_GET => {
+                    let request = parse_fake_request::<SessionRequest>(params);
                     Ok(
                         serde_json::to_value(self.session_by_id(&request.session_id).manifest)
                             .unwrap(),
                     )
                 }
-                "manifest/system_prompt/get" => {
-                    let request = parse_fake_request::<FakeSessionRequest>(params);
+                rpc_method::MANIFEST_SYSTEM_PROMPT_GET => {
+                    let request = parse_fake_request::<SessionRequest>(params);
                     let manifest = self.session_by_id(&request.session_id).manifest;
                     let prompt = noloong_agent::system_prompt::resolve_system_prompt(
                         manifest.locale,
@@ -1504,13 +1526,13 @@ impl TelegramInteractionClient for FakeInteraction {
                     );
                     Ok(serde_json::to_value(prompt).unwrap())
                 }
-                "manifest/proposals/list" => Ok(serde_json::to_value(
+                rpc_method::MANIFEST_PROPOSALS_LIST => Ok(serde_json::to_value(
                     self.manifest_proposals.lock().unwrap().clone(),
                 )
                 .unwrap()),
-                "manifest/proposals/approve" => {
-                    let request = parse_fake_request::<FakeManifestProposalRequest>(params);
-                    let FakeManifestProposalRequest {
+                rpc_method::MANIFEST_PROPOSALS_APPROVE => {
+                    let request = parse_fake_request::<ManifestProposalRequest>(params);
+                    let ManifestProposalRequest {
                         session_id: _session_id,
                         proposal_id,
                     } = request;
@@ -1528,8 +1550,8 @@ impl TelegramInteractionClient for FakeInteraction {
                         .push(proposal.clone());
                     Ok(serde_json::to_value(proposal).unwrap())
                 }
-                "manifest/apply_approved" => {
-                    let _request = parse_fake_request::<FakeSessionRequest>(params);
+                rpc_method::MANIFEST_APPLY_APPROVED => {
+                    let _request = parse_fake_request::<SessionRequest>(params);
                     let applied_proposal_ids = self
                         .approved_manifest_proposals
                         .lock()
@@ -1537,12 +1559,13 @@ impl TelegramInteractionClient for FakeInteraction {
                         .drain(..)
                         .map(|proposal| proposal.proposal_id)
                         .collect::<Vec<_>>();
-                    Ok(serde_json::json!({
-                        "appliedProposalIds": applied_proposal_ids
-                    }))
+                    Ok(serde_json::to_value(ManifestApplyResult {
+                        applied_proposal_ids,
+                    })
+                    .unwrap())
                 }
-                "subagent/spawn" => {
-                    let request = parse_fake_request::<FakeSubagentSpawnRequest>(params);
+                rpc_method::SUBAGENT_SPAWN => {
+                    let request = parse_fake_request::<SubagentSpawnRequest>(params);
                     let descriptor = session_descriptor_with_parent(
                         "session-subagent-1",
                         "profile-1",
@@ -1554,8 +1577,20 @@ impl TelegramInteractionClient for FakeInteraction {
                     self.upsert_session(descriptor.clone());
                     Ok(serde_json::to_value(descriptor).unwrap())
                 }
-                "display/subscribe" => Ok(json!({"subscriptionId": "subscription-1"})),
-                _ => Ok(serde_json::to_value(session_descriptor()).unwrap()),
+                rpc_method::DISPLAY_SUBSCRIBE => {
+                    let _request = parse_fake_request::<DisplaySubscribeRequest>(params);
+                    Ok(serde_json::to_value(SubscriptionResult {
+                        subscription_id: "subscription-1".into(),
+                    })
+                    .unwrap())
+                }
+                other => Err(TelegramBridgeError::Interaction(
+                    InteractionClientError::JsonRpc {
+                        code: -32601,
+                        message: format!("method not found: {other}"),
+                        data: None,
+                    },
+                )),
             }
         })
     }
@@ -1632,89 +1667,6 @@ impl FakeInteraction {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeSessionRequest {
-    session_id: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeFollowUpRequest {
-    session_id: String,
-    message: AgentMessage,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakePromptRequest {
-    session_id: String,
-    input: Value,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeQueueRequest {
-    session_id: String,
-    queue: TelegramQueueKind,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeQueueSetModeRequest {
-    session_id: String,
-    queue: TelegramQueueKind,
-    mode: QueueMode,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeProcessJobRequest {
-    session_id: String,
-    job_id: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeProcessReadRequest {
-    session_id: String,
-    job_id: String,
-    after_seq: Option<u64>,
-    max_bytes: Option<usize>,
-    wait_ms: Option<u64>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeProcessWaitRequest {
-    session_id: String,
-    job_id: String,
-    timeout_ms: Option<u64>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeProcessWriteRequest {
-    session_id: String,
-    job_id: String,
-    text: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeManifestProposalRequest {
-    session_id: String,
-    proposal_id: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FakeSubagentSpawnRequest {
-    parent_session_id: String,
-    role: Option<String>,
-    metadata: serde_json::Map<String, Value>,
-}
-
 fn parse_fake_request<T>(params: Value) -> T
 where
     T: serde::de::DeserializeOwned,
@@ -1730,15 +1682,6 @@ fn profile_descriptor(profile_id: &str) -> InteractionProfileDescriptor {
         default_manifest_patches: Vec::new(),
         metadata: Default::default(),
     }
-}
-
-fn session_descriptor() -> InteractionSessionDescriptor {
-    session_descriptor_with(
-        "session-1",
-        "profile-1",
-        InteractionSessionStatus::Idle,
-        Default::default(),
-    )
 }
 
 fn telegram_session_descriptor(session_id: &str) -> InteractionSessionDescriptor {

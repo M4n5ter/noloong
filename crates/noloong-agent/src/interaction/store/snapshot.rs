@@ -1,7 +1,5 @@
-use crate::AgentManifest;
-use noloong_agent_core::{
-    AgentMessage, AgentState, QueueMode, QueuedAgentMessage, QueuedMessageIntent,
-};
+use crate::{AgentManifest, interaction::protocol::AgentSessionQueuedMessage};
+use noloong_agent_core::{AgentState, QueueMode, QueuedAgentMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,51 +86,6 @@ impl AgentSessionQueueState {
             .into_iter()
             .map(AgentSessionQueuedMessage::into_core)
             .collect()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentSessionQueuedMessage {
-    pub message: AgentMessage,
-    #[serde(default)]
-    pub intent: AgentSessionQueuedMessageIntent,
-}
-
-impl AgentSessionQueuedMessage {
-    pub fn from_core(message: QueuedAgentMessage) -> Self {
-        Self {
-            message: message.message,
-            intent: AgentSessionQueuedMessageIntent::from(message.intent),
-        }
-    }
-
-    pub fn into_core(self) -> QueuedAgentMessage {
-        match self.intent {
-            AgentSessionQueuedMessageIntent::Observation => {
-                QueuedAgentMessage::observation(self.message)
-            }
-            AgentSessionQueuedMessageIntent::UserInput => {
-                QueuedAgentMessage::user_input(self.message)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentSessionQueuedMessageIntent {
-    #[default]
-    Observation,
-    UserInput,
-}
-
-impl From<QueuedMessageIntent> for AgentSessionQueuedMessageIntent {
-    fn from(value: QueuedMessageIntent) -> Self {
-        match value {
-            QueuedMessageIntent::Observation => Self::Observation,
-            QueuedMessageIntent::UserInput => Self::UserInput,
-        }
     }
 }
 

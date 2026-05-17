@@ -9,13 +9,23 @@ use crate::{
     state::{WeixinStateError, WeixinStateStore},
 };
 use noloong_agent::{
-    JobSnapshot, ManifestPatch, ProcessOutput, SystemPromptAddition, WaitOutcome,
+    JobSnapshot, ManifestPatch, ProcessOutput, ReadOutputRequest, SystemPromptAddition,
+    WaitOutcome,
     interaction::{
-        AgentSessionQueuedMessage, AgentSessionQueuedMessageIntent, DISPLAY_EVENT_NOTIFICATION,
-        DisplayEvent, INTERACTION_ERROR_NOT_FOUND, InteractionAuthorityCapability,
-        InteractionClientError, InteractionClientInfo, InteractionProfileDescriptor,
-        InteractionSessionDescriptor, InteractionSessionStatus, InteractionUxCapabilities,
-        InteractionWsClient, InteractionWsNotification,
+        AgentSessionCreateRequest, AgentSessionListFilter, AgentSessionQueuedMessage,
+        AgentSessionQueuedMessageIntent, INTERACTION_ERROR_NOT_FOUND,
+        InteractionAuthorityCapability, InteractionClientError, InteractionClientInfo,
+        InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
+        InteractionUxCapabilities, InteractionWsClient, InteractionWsNotification,
+        SubagentSpawnRequest,
+        protocol::{
+            AgentFollowUpRequest, AgentPromptInput, AgentPromptRequest, ApprovalResolveRequest,
+            DisplaySubscribeRequest, EventUnsubscribeRequest, InteractionDisplayNotification,
+            InteractionInitializeResult, InteractionQueueKind, ProcessJobRequest,
+            ProcessReadRequest, ProcessWaitRequest, QueueRequest, SessionDeleteRequest,
+            SessionRequest, SubscriptionResult, method, notification,
+            request_params as interaction_params,
+        },
     },
 };
 use noloong_agent_core::{
@@ -33,25 +43,6 @@ use std::{
 use thiserror::Error;
 use tokio::sync::broadcast;
 
-const METHOD_INITIALIZE: &str = "initialize";
-const METHOD_AGENT_PROMPT: &str = "agent/prompt";
-const METHOD_AGENT_FOLLOW_UP: &str = "agent/follow_up";
-const METHOD_APPROVAL_LIST: &str = "approval/list";
-const METHOD_APPROVAL_RESOLVE: &str = "approval/resolve";
-const METHOD_QUEUE_CLEAR: &str = "queue/clear";
-const METHOD_QUEUE_LIST: &str = "queue/list";
-const METHOD_PROCESS_LIST: &str = "process/list";
-const METHOD_PROCESS_READ: &str = "process/read";
-const METHOD_PROCESS_WAIT: &str = "process/wait";
-const METHOD_PROCESS_TERMINATE: &str = "process/terminate";
-const METHOD_SUBAGENT_SPAWN: &str = "subagent/spawn";
-const METHOD_PROFILE_LIST: &str = "profile/list";
-const METHOD_SESSION_CREATE: &str = "session/create";
-const METHOD_SESSION_DELETE: &str = "session/delete";
-const METHOD_SESSION_GET: &str = "session/get";
-const METHOD_SESSION_LIST: &str = "session/list";
-const METHOD_DISPLAY_SUBSCRIBE: &str = "display/subscribe";
-const METHOD_EVENT_UNSUBSCRIBE: &str = "event/unsubscribe";
 const WEIXIN_SYSTEM_PROMPT_ADDITION_ID: &str = "noloong.interaction.weixin";
 
 pub type WeixinBridgeResult<T> = Result<T, WeixinBridgeError>;
@@ -198,7 +189,10 @@ impl WeixinBridge {
             metadata: Default::default(),
         };
         let result = self
-            .request_as::<InteractionInitializeResult>(METHOD_INITIALIZE, json!(client_info))
+            .request_as::<InteractionInitializeResult>(
+                method::INITIALIZE,
+                interaction_params(client_info),
+            )
             .await?;
         let profile_ids = result
             .profiles
@@ -255,8 +249,11 @@ impl WeixinBridge {
         let message = weixin_user_message(context, vec![ContentBlock::Text { text }]);
         let descriptor = self
             .request_as(
-                METHOD_AGENT_FOLLOW_UP,
-                json!({"sessionId": session_id, "message": message}),
+                method::AGENT_FOLLOW_UP,
+                interaction_params(AgentFollowUpRequest {
+                    session_id: session_id.into(),
+                    message,
+                }),
             )
             .await?;
         self.record_descriptor_status(&descriptor);
@@ -264,7 +261,7 @@ impl WeixinBridge {
     }
 
     pub async fn list_profiles(&self) -> WeixinBridgeResult<Vec<InteractionProfileDescriptor>> {
-        self.request_as(METHOD_PROFILE_LIST, json!({})).await
+        self.request_as(method::PROFILE_LIST, json!({})).await
     }
 
     pub async fn create_chat_session(
@@ -287,7 +284,12 @@ impl WeixinBridge {
         session_id: &str,
     ) -> WeixinBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
-            .request_as(METHOD_SESSION_GET, json!({"sessionId": session_id}))
+            .request_as(
+                method::SESSION_GET,
+                interaction_params(SessionRequest {
+                    session_id: session_id.into(),
+                }),
+            )
             .await?;
         self.record_descriptor_status(&descriptor);
         Ok(descriptor)
@@ -348,8 +350,11 @@ impl WeixinBridge {
     ) -> WeixinBridgeResult<Option<InteractionSessionDescriptor>> {
         let deleted = self
             .request_as(
-                METHOD_SESSION_DELETE,
-                json!({"sessionId": session_id, "forceAbort": force_abort}),
+                method::SESSION_DELETE,
+                interaction_params(SessionDeleteRequest {
+                    session_id: session_id.into(),
+                    force_abort,
+                }),
             )
             .await?;
         if let Some(subscription_id) = self.remove_session_if_active(&key, session_id) {
@@ -364,8 +369,13 @@ impl WeixinBridge {
         &self,
         session_id: &str,
     ) -> WeixinBridgeResult<BTreeMap<String, ToolApprovalRequest>> {
-        self.request_as(METHOD_APPROVAL_LIST, json!({"sessionId": session_id}))
-            .await
+        self.request_as(
+            method::APPROVAL_LIST,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
     }
 
     pub async fn resolve_approval(
@@ -376,11 +386,11 @@ impl WeixinBridge {
     ) -> WeixinBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
             .request_as(
-                METHOD_APPROVAL_RESOLVE,
-                json!({
-                    "sessionId": session_id,
-                    "approvalId": approval_id,
-                    "decision": decision,
+                method::APPROVAL_RESOLVE,
+                interaction_params(ApprovalResolveRequest {
+                    session_id: session_id.into(),
+                    approval_id: approval_id.into(),
+                    decision,
                 }),
             )
             .await?;
@@ -391,14 +401,20 @@ impl WeixinBridge {
     pub async fn list_queues(&self, session_id: &str) -> WeixinBridgeResult<WeixinQueueSnapshot> {
         let steering = self
             .request_as(
-                METHOD_QUEUE_LIST,
-                json!({"sessionId": session_id, "queue": "steering"}),
+                method::QUEUE_LIST,
+                interaction_params(QueueRequest {
+                    session_id: session_id.into(),
+                    queue: WeixinQueueKind::Steering,
+                }),
             )
             .await?;
         let follow_up = self
             .request_as(
-                METHOD_QUEUE_LIST,
-                json!({"sessionId": session_id, "queue": "follow_up"}),
+                method::QUEUE_LIST,
+                interaction_params(QueueRequest {
+                    session_id: session_id.into(),
+                    queue: WeixinQueueKind::FollowUp,
+                }),
             )
             .await?;
         Ok(WeixinQueueSnapshot {
@@ -413,15 +429,23 @@ impl WeixinBridge {
         queue: WeixinQueueKind,
     ) -> WeixinBridgeResult<Vec<WeixinQueuedMessage>> {
         self.request_as(
-            METHOD_QUEUE_CLEAR,
-            json!({"sessionId": session_id, "queue": queue.as_str()}),
+            method::QUEUE_CLEAR,
+            interaction_params(QueueRequest {
+                session_id: session_id.into(),
+                queue,
+            }),
         )
         .await
     }
 
     pub async fn list_processes(&self, session_id: &str) -> WeixinBridgeResult<Vec<JobSnapshot>> {
-        self.request_as(METHOD_PROCESS_LIST, json!({"sessionId": session_id}))
-            .await
+        self.request_as(
+            method::PROCESS_LIST,
+            interaction_params(SessionRequest {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
     }
 
     pub async fn read_process(
@@ -433,13 +457,15 @@ impl WeixinBridge {
         wait_ms: Option<u64>,
     ) -> WeixinBridgeResult<ProcessOutput> {
         self.request_as(
-            METHOD_PROCESS_READ,
-            json!({
-                "sessionId": session_id,
-                "jobId": job_id,
-                "afterSeq": after_seq,
-                "maxBytes": max_bytes,
-                "waitMs": wait_ms,
+            method::PROCESS_READ,
+            interaction_params(ProcessReadRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+                output: ReadOutputRequest {
+                    after_seq,
+                    max_bytes,
+                    wait_ms,
+                },
             }),
         )
         .await
@@ -452,8 +478,12 @@ impl WeixinBridge {
         timeout_ms: Option<u64>,
     ) -> WeixinBridgeResult<WaitOutcome> {
         self.request_as(
-            METHOD_PROCESS_WAIT,
-            json!({"sessionId": session_id, "jobId": job_id, "timeoutMs": timeout_ms}),
+            method::PROCESS_WAIT,
+            interaction_params(ProcessWaitRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+                timeout_ms,
+            }),
         )
         .await
     }
@@ -464,8 +494,11 @@ impl WeixinBridge {
         job_id: &str,
     ) -> WeixinBridgeResult<JobSnapshot> {
         self.request_as(
-            METHOD_PROCESS_TERMINATE,
-            json!({"sessionId": session_id, "jobId": job_id}),
+            method::PROCESS_TERMINATE,
+            interaction_params(ProcessJobRequest {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+            }),
         )
         .await
     }
@@ -483,14 +516,15 @@ impl WeixinBridge {
         );
         let descriptor: InteractionSessionDescriptor = self
             .request_as(
-                METHOD_SUBAGENT_SPAWN,
-                json!({
-                    "parentSessionId": parent_session_id,
-                    "metadata": {
-                        "source": "weixin",
-                        "peerId": context.peer_id,
-                        "messageId": context.message_id,
-                    },
+                method::SUBAGENT_SPAWN,
+                interaction_params(SubagentSpawnRequest {
+                    parent_session_id: parent_session_id.into(),
+                    metadata: serde_json::Map::from_iter([
+                        ("source".into(), Value::String("weixin".into())),
+                        ("peerId".into(), Value::String(context.peer_id.clone())),
+                        ("messageId".into(), json!(context.message_id)),
+                    ]),
+                    ..SubagentSpawnRequest::default()
                 }),
             )
             .await?;
@@ -524,10 +558,10 @@ impl WeixinBridge {
         message: AgentMessage,
     ) -> WeixinBridgeResult<InteractionSessionDescriptor> {
         self.request_as(
-            METHOD_AGENT_PROMPT,
-            json!({
-                "sessionId": session_id,
-                "input": {"type": "message", "message": message},
+            method::AGENT_PROMPT,
+            interaction_params(AgentPromptRequest {
+                session_id: session_id.into(),
+                input: AgentPromptInput::Message { message },
             }),
         )
         .await
@@ -582,7 +616,7 @@ impl WeixinBridge {
     pub fn parse_display_notification(
         notification: InteractionWsNotification,
     ) -> WeixinBridgeResult<Option<InteractionDisplayNotification>> {
-        if notification.method != DISPLAY_EVENT_NOTIFICATION {
+        if notification.method != notification::DISPLAY_EVENT {
             return Ok(None);
         }
         serde_json::from_value::<InteractionDisplayNotification>(notification.params)
@@ -607,16 +641,19 @@ impl WeixinBridge {
             InteractionSessionStatus::Running | InteractionSessionStatus::Paused
         ) {
             self.request_as(
-                METHOD_AGENT_FOLLOW_UP,
-                json!({"sessionId": session.session_id, "message": message}),
+                method::AGENT_FOLLOW_UP,
+                interaction_params(AgentFollowUpRequest {
+                    session_id: session.session_id,
+                    message,
+                }),
             )
             .await?
         } else {
             self.request_as(
-                METHOD_AGENT_PROMPT,
-                json!({
-                    "sessionId": session.session_id,
-                    "input": {"type": "message", "message": message},
+                method::AGENT_PROMPT,
+                interaction_params(AgentPromptRequest {
+                    session_id: session.session_id,
+                    input: AgentPromptInput::Message { message },
                 }),
             )
             .await?
@@ -633,8 +670,8 @@ impl WeixinBridge {
         if let Some(session_id) = self.session_id(&key) {
             let descriptor = self
                 .request_as::<InteractionSessionDescriptor>(
-                    METHOD_SESSION_GET,
-                    json!({"sessionId": session_id}),
+                    method::SESSION_GET,
+                    interaction_params(SessionRequest { session_id }),
                 )
                 .await?;
             self.record_session_status(key.clone(), descriptor.status.clone());
@@ -660,16 +697,17 @@ impl WeixinBridge {
     ) -> WeixinBridgeResult<InteractionSessionDescriptor> {
         let descriptor = self
             .request_as::<InteractionSessionDescriptor>(
-                METHOD_SESSION_CREATE,
-                json!({
-                    "sessionId": session_id,
-                    "profileId": profile_id,
-                    "manifestPatches": [weixin_system_prompt_patch()],
-                    "metadata": weixin_session_metadata(
+                method::SESSION_CREATE,
+                interaction_params(AgentSessionCreateRequest {
+                    session_id: Some(session_id),
+                    profile_id: Some(profile_id),
+                    manifest_patches: vec![weixin_system_prompt_patch()],
+                    metadata: weixin_session_metadata(
                         &context.account_id,
                         &context.peer_id,
                         context.chat_kind,
                     ),
+                    ..AgentSessionCreateRequest::default()
                 }),
             )
             .await?;
@@ -795,16 +833,17 @@ impl WeixinBridge {
     ) -> WeixinBridgeResult<String> {
         let subscription = self
             .request_as::<SubscriptionResult>(
-                METHOD_DISPLAY_SUBSCRIBE,
-                json!({
-                    "sessionId": session_id,
-                    "ux": {
-                        "displayEvents": true,
-                        "streamText": false,
-                        "editMessage": false,
-                        "markdown": true,
-                        "maxMessageBytes": self.config.max_outbound_chars,
-                    }
+                method::DISPLAY_SUBSCRIBE,
+                interaction_params(DisplaySubscribeRequest {
+                    session_id: session_id.into(),
+                    ux: Some(InteractionUxCapabilities {
+                        raw_events: false,
+                        display_events: true,
+                        stream_text: false,
+                        edit_message: false,
+                        markdown: true,
+                        max_message_bytes: Some(self.config.max_outbound_chars),
+                    }),
                 }),
             )
             .await?;
@@ -824,8 +863,10 @@ impl WeixinBridge {
         }
         if let Err(error) = self
             .request_as::<Value>(
-                METHOD_EVENT_UNSUBSCRIBE,
-                json!({"subscriptionId": subscription_id}),
+                method::EVENT_UNSUBSCRIBE,
+                interaction_params(EventUnsubscribeRequest {
+                    subscription_id: subscription_id.into(),
+                }),
             )
             .await
         {
@@ -843,8 +884,11 @@ impl WeixinBridge {
     ) -> WeixinBridgeResult<Vec<InteractionSessionDescriptor>> {
         let sessions = self
             .request_as::<Vec<InteractionSessionDescriptor>>(
-                METHOD_SESSION_LIST,
-                json!({"metadataEquals": weixin_session_metadata_filter(key)}),
+                method::SESSION_LIST,
+                interaction_params(AgentSessionListFilter {
+                    metadata_equals: weixin_session_metadata_filter(key),
+                    ..AgentSessionListFilter::default()
+                }),
             )
             .await?;
         Ok(sessions
@@ -1159,27 +1203,6 @@ fn weixin_system_prompt_patch() -> ManifestPatch {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct InteractionInitializeResult {
-    pub grant: noloong_agent::interaction::InteractionCapabilityGrant,
-    pub profiles: Vec<InteractionProfileDescriptor>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct InteractionDisplayNotification {
-    pub session_id: String,
-    pub subscription_id: String,
-    pub event: DisplayEvent,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct SubscriptionResult {
-    subscription_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct WeixinQueueSnapshot {
     pub steering: Vec<WeixinQueuedMessage>,
     pub follow_up: Vec<WeixinQueuedMessage>,
@@ -1187,28 +1210,7 @@ pub struct WeixinQueueSnapshot {
 
 pub type WeixinQueuedMessage = AgentSessionQueuedMessage;
 pub type WeixinQueuedMessageIntent = AgentSessionQueuedMessageIntent;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WeixinQueueKind {
-    Steering,
-    FollowUp,
-}
-
-impl WeixinQueueKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Steering => "steering",
-            Self::FollowUp => "follow_up",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Steering => "Steering",
-            Self::FollowUp => "Follow-up",
-        }
-    }
-}
+pub type WeixinQueueKind = InteractionQueueKind;
 
 #[cfg(test)]
 mod tests {
@@ -1226,6 +1228,7 @@ mod tests {
         interaction::{
             InteractionProfileDescriptor, InteractionSessionDescriptor, InteractionSessionStatus,
             InteractionWsNotification,
+            protocol::{InteractionServerInfo, method as rpc_method},
         },
     };
     use noloong_agent_core::AgentState;
@@ -1252,6 +1255,7 @@ mod tests {
     async fn bridge_creates_final_only_weixin_session() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "approval.resolve", "session.delete"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1295,24 +1299,25 @@ mod tests {
             .unwrap();
 
         let calls = fake.calls();
-        assert_eq!(calls[0].0, "initialize");
+        assert_eq!(calls[0].0, rpc_method::INITIALIZE);
         assert_eq!(calls[0].1["requestedUx"]["streamText"], false);
-        assert_eq!(calls[1].0, "session/list");
+        assert_eq!(calls[1].0, rpc_method::SESSION_LIST);
         assert_eq!(calls[1].1["metadataEquals"]["channel"], "weixin");
         assert_eq!(calls[1].1["metadataEquals"]["accountId"], "bot");
         assert_eq!(calls[1].1["metadataEquals"]["peerId"], "u1");
         assert_eq!(calls[1].1["metadataEquals"]["chatKind"], "dm");
-        assert_eq!(calls[2].0, "session/create");
+        assert_eq!(calls[2].0, rpc_method::SESSION_CREATE);
         assert_eq!(calls[2].1["metadata"]["channel"], "weixin");
-        assert_eq!(calls[3].0, "display/subscribe");
+        assert_eq!(calls[3].0, rpc_method::DISPLAY_SUBSCRIBE);
         assert_eq!(calls[3].1["ux"]["editMessage"], false);
-        assert_eq!(calls[4].0, "agent/prompt");
+        assert_eq!(calls[4].0, rpc_method::AGENT_PROMPT);
     }
 
     #[tokio::test]
     async fn bridge_restores_existing_default_weixin_session() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "approval.resolve", "session.delete"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1362,14 +1367,18 @@ mod tests {
             .unwrap();
 
         let calls = fake.calls();
-        assert_eq!(calls[1].0, "session/list");
+        assert_eq!(calls[1].0, rpc_method::SESSION_LIST);
         assert_eq!(calls[1].1["metadataEquals"]["channel"], "weixin");
         assert_eq!(calls[1].1["metadataEquals"]["accountId"], "bot");
         assert_eq!(calls[1].1["metadataEquals"]["peerId"], "u1");
         assert_eq!(calls[1].1["metadataEquals"]["chatKind"], "dm");
-        assert_eq!(calls[2].0, "display/subscribe");
-        assert_eq!(calls[3].0, "agent/prompt");
-        assert!(!calls.iter().any(|(method, _)| method == "session/create"));
+        assert_eq!(calls[2].0, rpc_method::DISPLAY_SUBSCRIBE);
+        assert_eq!(calls[3].0, rpc_method::AGENT_PROMPT);
+        assert!(
+            !calls
+                .iter()
+                .any(|(method, _)| method == rpc_method::SESSION_CREATE)
+        );
     }
 
     #[tokio::test]
@@ -1388,6 +1397,7 @@ mod tests {
         let state_store: Arc<dyn crate::state::WeixinStateStore> = state.clone();
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "session.delete"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1410,6 +1420,7 @@ mod tests {
 
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "session.delete"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1434,10 +1445,14 @@ mod tests {
 
         assert_eq!(restored.session_id, "session-2");
         let calls = fake.calls();
-        assert_eq!(calls[1].0, "session/get");
+        assert_eq!(calls[1].0, rpc_method::SESSION_GET);
         assert_eq!(calls[1].1["sessionId"], "session-2");
-        assert_eq!(calls[2].0, "display/subscribe");
-        assert!(!calls.iter().any(|(method, _)| method == "session/list"));
+        assert_eq!(calls[2].0, rpc_method::DISPLAY_SUBSCRIBE);
+        assert!(
+            !calls
+                .iter()
+                .any(|(method, _)| method == rpc_method::SESSION_LIST)
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1445,6 +1460,7 @@ mod tests {
     async fn bridge_deletes_unavailable_profile_session_before_create() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "approval.resolve", "session.delete"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1498,24 +1514,25 @@ mod tests {
             .unwrap();
 
         let calls = fake.calls();
-        assert_eq!(calls[1].0, "session/list");
+        assert_eq!(calls[1].0, rpc_method::SESSION_LIST);
         assert_eq!(calls[1].1["metadataEquals"]["channel"], "weixin");
         assert_eq!(calls[1].1["metadataEquals"]["accountId"], "bot");
         assert_eq!(calls[1].1["metadataEquals"]["peerId"], "u1");
         assert_eq!(calls[1].1["metadataEquals"]["chatKind"], "dm");
-        assert_eq!(calls[2].0, "session/delete");
+        assert_eq!(calls[2].0, rpc_method::SESSION_DELETE);
         assert_eq!(calls[2].1["sessionId"], "weixin:bot:u1");
         assert_eq!(calls[2].1["forceAbort"], true);
-        assert_eq!(calls[3].0, "session/create");
+        assert_eq!(calls[3].0, rpc_method::SESSION_CREATE);
         assert_eq!(calls[3].1["profileId"], "weixin-chatgpt");
-        assert_eq!(calls[4].0, "display/subscribe");
-        assert_eq!(calls[5].0, "agent/prompt");
+        assert_eq!(calls[4].0, rpc_method::DISPLAY_SUBSCRIBE);
+        assert_eq!(calls[5].0, rpc_method::AGENT_PROMPT);
     }
 
     #[tokio::test]
     async fn bridge_spawns_subagent_then_subscribes_before_prompting_child() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue", "subagent.spawn"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1538,12 +1555,12 @@ mod tests {
         assert_eq!(child.session_id, "session-1");
         assert_eq!(child.status, InteractionSessionStatus::Completed);
         let calls = fake.calls();
-        assert_eq!(calls[1].0, "subagent/spawn");
+        assert_eq!(calls[1].0, rpc_method::SUBAGENT_SPAWN);
         assert_eq!(calls[1].1["parentSessionId"], "weixin:bot:u1");
         assert!(calls[1].1.get("initialPrompt").is_none());
-        assert_eq!(calls[2].0, "display/subscribe");
+        assert_eq!(calls[2].0, rpc_method::DISPLAY_SUBSCRIBE);
         assert_eq!(calls[2].1["sessionId"], "session-1");
-        assert_eq!(calls[3].0, "agent/prompt");
+        assert_eq!(calls[3].0, rpc_method::AGENT_PROMPT);
         assert_eq!(calls[3].1["sessionId"], "session-1");
     }
 
@@ -1551,6 +1568,7 @@ mod tests {
     async fn bridge_covers_control_actions_with_fake_interaction() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": [
                     "agent.run",
@@ -1622,14 +1640,14 @@ mod tests {
 
         assert_eq!(output.job_id, "job-1");
         let calls = fake.calls();
-        assert_eq!(calls[1].0, "session/get");
-        assert_eq!(calls[2].0, "display/subscribe");
-        assert_eq!(calls[3].0, "session/delete");
-        assert_eq!(calls[4].0, "event/unsubscribe");
-        assert_eq!(calls[5].0, "approval/resolve");
-        assert_eq!(calls[6].0, "queue/clear");
+        assert_eq!(calls[1].0, rpc_method::SESSION_GET);
+        assert_eq!(calls[2].0, rpc_method::DISPLAY_SUBSCRIBE);
+        assert_eq!(calls[3].0, rpc_method::SESSION_DELETE);
+        assert_eq!(calls[4].0, rpc_method::EVENT_UNSUBSCRIBE);
+        assert_eq!(calls[5].0, rpc_method::APPROVAL_RESOLVE);
+        assert_eq!(calls[6].0, rpc_method::QUEUE_CLEAR);
         assert_eq!(calls[6].1["queue"], "follow_up");
-        assert_eq!(calls[7].0, "process/read");
+        assert_eq!(calls[7].0, rpc_method::PROCESS_READ);
         assert_eq!(calls[7].1["afterSeq"], 1);
         assert_eq!(calls[7].1["maxBytes"], 64);
         assert_eq!(calls[7].1["waitMs"], 10);
@@ -1639,6 +1657,7 @@ mod tests {
     async fn bridge_rejects_switch_to_foreign_weixin_session() {
         let fake = Arc::new(FakeInteraction::default());
         fake.push_response(json!({
+            "server": InteractionServerInfo::current(),
             "grant": {
                 "authority": ["agent.run", "agent.queue"],
                 "ux": {"displayEvents": true, "markdown": true}
@@ -1671,7 +1690,7 @@ mod tests {
             !fake
                 .calls()
                 .iter()
-                .any(|(method, _)| method == "display/subscribe")
+                .any(|(method, _)| method == rpc_method::DISPLAY_SUBSCRIBE)
         );
     }
 
@@ -1777,7 +1796,7 @@ mod tests {
         ) -> WeixinInteractionFuture<'a, Value> {
             Box::pin(async move {
                 self.calls.lock().unwrap().push((method.into(), params));
-                if method == "event/unsubscribe" {
+                if method == rpc_method::EVENT_UNSUBSCRIBE {
                     return Ok(json!({"unsubscribed": true}));
                 }
                 let response = self.responses.lock().unwrap().remove(0);

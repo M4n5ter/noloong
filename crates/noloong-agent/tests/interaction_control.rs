@@ -3,9 +3,9 @@ use noloong_agent::{
     interaction::{
         AGENT_SESSION_RECORD_SCHEMA_VERSION, AgentRuntimeProfile, AgentSessionCreateRequest,
         AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore,
-        DISPLAY_EVENT_NOTIFICATION, InMemoryAgentSessionRegistryStore, InteractionCapabilityPolicy,
-        InteractionControlHandler, InteractionError, InteractionFuture,
-        InteractionProfileDescriptor, JsonRpcHandler, RAW_EVENT_NOTIFICATION, serve_jsonrpc,
+        InMemoryAgentSessionRegistryStore, InteractionCapabilityPolicy, InteractionControlHandler,
+        InteractionError, InteractionFuture, InteractionProfileDescriptor, JsonRpcHandler,
+        protocol::notification, serve_jsonrpc,
     },
     process::StartCommandRequest,
 };
@@ -102,15 +102,15 @@ async fn interaction_control_prompts_and_emits_raw_and_display_events() {
 
     assert_eq!(response(&messages, 5)["result"]["status"], "completed");
     assert!(messages.iter().any(|message| {
-        message["method"] == RAW_EVENT_NOTIFICATION
+        message["method"] == notification::RAW_EVENT
             && message["params"]["event"]["kind"]["type"] == "run_started"
     }));
     assert!(messages.iter().any(|message| {
-        message["method"] == DISPLAY_EVENT_NOTIFICATION
+        message["method"] == notification::DISPLAY_EVENT
             && message["params"]["event"]["type"] == "assistant_message_delta"
     }));
     assert!(messages.iter().any(|message| {
-        message["method"] == DISPLAY_EVENT_NOTIFICATION
+        message["method"] == notification::DISPLAY_EVENT
             && message["params"]["event"]["type"] == "assistant_message_final"
     }));
 }
@@ -250,13 +250,13 @@ async fn interaction_control_display_can_be_final_only_and_bounded() {
     .await;
 
     assert!(!messages.iter().any(|message| {
-        message["method"] == DISPLAY_EVENT_NOTIFICATION
+        message["method"] == notification::DISPLAY_EVENT
             && message["params"]["event"]["type"] == "assistant_message_delta"
     }));
     let final_event = messages
         .iter()
         .find(|message| {
-            message["method"] == DISPLAY_EVENT_NOTIFICATION
+            message["method"] == notification::DISPLAY_EVENT
                 && message["params"]["event"]["type"] == "assistant_message_final"
         })
         .expect("final display event should exist");
@@ -310,7 +310,7 @@ async fn interaction_control_raw_event_unsubscribe_stops_notifications() {
     assert!(
         !messages
             .iter()
-            .any(|message| message["method"] == RAW_EVENT_NOTIFICATION)
+            .any(|message| message["method"] == notification::RAW_EVENT)
     );
 }
 
