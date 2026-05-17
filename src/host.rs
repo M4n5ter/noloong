@@ -96,9 +96,10 @@ async fn build_registry_with_optional_state_database_url(
         ) as Arc<dyn AgentRuntimeProfile>);
     }
     let default_profile_id = config
-        .default_profile_id
-        .clone()
-        .unwrap_or_else(|| config.profiles[0].profile_id.clone());
+        .selected_profile(None)
+        .expect("validated profile config has a selected profile")
+        .profile_id
+        .clone();
     let store = build_registry_store(config.registry_store.as_ref(), state_database_url).await?;
     AgentSessionRegistry::with_store(default_profile_id, profiles, store)
         .map_err(HostBuildError::Interaction)

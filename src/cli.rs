@@ -22,9 +22,10 @@ use noloong_agent::{
     },
 };
 use noloong_agent_telegram::{polling::TelegramPollingError, telegram_api::TelegramApiError};
-use std::{env, net::SocketAddr};
+use std::{env, future::Future, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
 pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
     let cli = Cli::try_parse_from(std::iter::once("noloong".to_owned()).chain(args))
@@ -167,17 +168,83 @@ pub(crate) fn load_profile_config(path: Option<String>) -> Result<HostProfileCon
     Ok(config)
 }
 
+pub(crate) struct EmbeddedInteraction {
+    profile_config: HostProfileConfig,
+    interaction_ws_url: String,
+    interaction_token: String,
+    listener: TcpListener,
+}
+
+pub(crate) async fn start_embedded_interaction(
+    profile_config_path: Option<String>,
+) -> Result<EmbeddedInteraction, CliError> {
+    let profile_config = load_profile_config(profile_config_path)?;
+    let token = generate_token()?;
+    let listener = TcpListener::bind(default_embedded_interaction_bind()).await?;
+    let address = listener.local_addr()?;
+    Ok(EmbeddedInteraction {
+        profile_config,
+        interaction_ws_url: format!("ws://{address}/jsonrpc/ws"),
+        interaction_token: token,
+        listener,
+    })
+}
+
+impl EmbeddedInteraction {
+    pub(crate) fn profile_config(&self) -> &HostProfileConfig {
+        &self.profile_config
+    }
+
+    pub(crate) fn interaction_ws_url(&self) -> &str {
+        &self.interaction_ws_url
+    }
+
+    pub(crate) fn interaction_token(&self) -> &str {
+        &self.interaction_token
+    }
+
+    pub(crate) async fn run(
+        self,
+        bridge: impl Future<Output = Result<(), CliError>>,
+    ) -> Result<(), CliError> {
+        let registry = build_registry(&self.profile_config).await?;
+        let server_token = self.interaction_token.clone();
+        let listener = self.listener;
+        let server_task = tokio::spawn(async move {
+            serve_interaction_http(
+                listener,
+                InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all()),
+                InteractionHttpTransportConfig::bearer_token(server_token),
+            )
+            .await
+        });
+        run_with_embedded_interaction(server_task, bridge).await
+    }
+}
+
+async fn run_with_embedded_interaction(
+    server_task: JoinHandle<Result<(), noloong_agent::interaction::InteractionError>>,
+    bridge: impl Future<Output = Result<(), CliError>>,
+) -> Result<(), CliError> {
+    let mut server_task = server_task;
+    tokio::select! {
+        result = bridge => {
+            server_task.abort();
+            let _ = server_task.await;
+            result
+        },
+        result = &mut server_task => {
+            result.map_err(|error| CliError::Task(error.to_string()))?
+                .map_err(CliError::Interaction)
+        }
+    }
+}
+
 pub(crate) fn profile_locale(
     profile_config: &HostProfileConfig,
     selected_profile_id: Option<&str>,
 ) -> Option<Locale> {
-    let profile_id = selected_profile_id
-        .or(profile_config.default_profile_id.as_deref())
-        .unwrap_or_else(|| profile_config.profiles[0].profile_id.as_str());
-    let profile = profile_config
-        .profiles
-        .iter()
-        .find(|profile| profile.profile_id == profile_id)?;
+    let profile = profile_config.selected_profile(selected_profile_id)?;
     profile
         .manifest_patches
         .iter()
@@ -210,7 +277,7 @@ fn default_interaction_bind() -> SocketAddr {
         .expect("default interaction bind address is valid")
 }
 
-pub(crate) fn default_embedded_interaction_bind() -> SocketAddr {
+fn default_embedded_interaction_bind() -> SocketAddr {
     "127.0.0.1:0"
         .parse()
         .expect("default embedded interaction bind address is valid")

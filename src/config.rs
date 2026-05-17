@@ -69,6 +69,18 @@ impl HostProfileConfig {
         parse_profile_config_text(&text)
     }
 
+    pub fn selected_profile(
+        &self,
+        selected_profile_id: Option<&str>,
+    ) -> Option<&RuntimeProfileConfig> {
+        let Some(profile_id) = selected_profile_id.or(self.default_profile_id.as_deref()) else {
+            return self.profiles.first();
+        };
+        self.profiles
+            .iter()
+            .find(|profile| profile.profile_id == profile_id)
+    }
+
     pub fn validate(&self) -> Result<(), CliConfigError> {
         if self.profiles.is_empty() {
             return Err(CliConfigError::MissingProfile);

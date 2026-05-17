@@ -1,8 +1,8 @@
 use crate::{
     cli::{
-        CliError, default_embedded_interaction_bind, generate_token, interaction_token,
-        load_profile_config, non_empty_option, parse_config_optional_u64, parse_config_usize,
-        parse_csv_strings, parse_locale_arg, process_env, resolve_locale, stable_fingerprint,
+        CliError, interaction_token, non_empty_option, parse_config_optional_u64,
+        parse_config_usize, parse_csv_strings, parse_locale_arg, process_env, resolve_locale,
+        stable_fingerprint, start_embedded_interaction,
     },
     config::{
         self, BuiltInProviderConfig, DEFAULT_INTERACTION_TOKEN_ENV, DEFAULT_INTERACTION_URL_ENV,
@@ -18,7 +18,6 @@ use crate::{
         ensure_sqlite_database_parent, parse_bool_env, parse_csv_i64, parse_csv_u64,
         resolve_state_database_url,
     },
-    host::build_registry,
 };
 use clap::Args;
 use noloong_agent::{
@@ -75,9 +74,9 @@ use noloong_agent_telegram::{
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
-pub(crate) type SharedDisplayState = Arc<Mutex<TelegramDisplayState>>;
-pub(crate) type SharedDisplayStates = Arc<Mutex<BTreeMap<TelegramSessionKey, SharedDisplayState>>>;
-pub(crate) type SharedSessionActions = Arc<Mutex<TelegramSessionActionStore>>;
+type SharedDisplayState = Arc<Mutex<TelegramDisplayState>>;
+type SharedDisplayStates = Arc<Mutex<BTreeMap<TelegramSessionKey, SharedDisplayState>>>;
+type SharedSessionActions = Arc<Mutex<TelegramSessionActionStore>>;
 
 const RESPONSES_FILE_DATA_MIME_TYPES: &[&str] = &[
     "application/msword",
@@ -112,42 +111,22 @@ pub(crate) async fn run_telegram_bridge(options: TelegramBridgeOptions) -> Resul
 }
 
 pub(crate) async fn run_telegram(options: TelegramOptions) -> Result<(), CliError> {
-    let profile_config = load_profile_config(options.profile_config)?;
-    let registry = build_registry(&profile_config).await?;
-    let token = generate_token()?;
-    let listener = tokio::net::TcpListener::bind(default_embedded_interaction_bind()).await?;
-    let address = listener.local_addr()?;
-    let server_token = token.clone();
-    let server = tokio::spawn(async move {
-        noloong_agent::interaction::serve_interaction_http(
-            listener,
-            noloong_agent::interaction::InteractionControlHandler::new(
-                registry,
-                noloong_agent::interaction::InteractionCapabilityPolicy::allow_all(),
-            ),
-            noloong_agent::interaction::InteractionHttpTransportConfig::bearer_token(server_token),
-        )
-        .await
-    });
+    let embedded = start_embedded_interaction(options.profile_config).await?;
     let mut bridge_options = options.bridge;
-    bridge_options.interaction_url = Some(format!("ws://{address}/jsonrpc/ws"));
-    bridge_options.interaction_token = Some(token);
+    bridge_options.interaction_url = Some(embedded.interaction_ws_url().to_owned());
+    bridge_options.interaction_token = Some(embedded.interaction_token().to_owned());
     let has_explicit_media_fallback = has_explicit_telegram_media_fallback(&bridge_options);
     let mut bridge_config = telegram_config_from_values(&bridge_options, process_env)?;
     if !has_explicit_media_fallback {
         apply_profile_media_fallback_policy(
             &mut bridge_config.file_policy,
-            &profile_config,
+            embedded.profile_config(),
             bridge_config.profile_id.as_deref(),
         );
     }
-    tokio::select! {
-        result = run_telegram_bridge_with_config(bridge_config) => result,
-        result = server => {
-            result.map_err(|error| CliError::Task(error.to_string()))?
-                .map_err(CliError::Interaction)
-        }
-    }
+    embedded
+        .run(run_telegram_bridge_with_config(bridge_config))
+        .await
 }
 
 async fn run_telegram_bridge_with_config(
@@ -215,7 +194,7 @@ async fn run_telegram_bridge_with_config(
     }
 }
 
-pub(crate) async fn register_telegram_commands(
+async fn register_telegram_commands(
     api: &dyn TelegramApi,
     catalog: TelegramUiCatalog,
 ) -> Result<(), CliError> {
@@ -349,15 +328,15 @@ async fn display_state_for(
         .clone()
 }
 
-pub(crate) struct BridgeUpdateHandler {
-    pub(crate) bridge: Arc<TelegramBridge>,
-    pub(crate) api: Arc<dyn TelegramApi>,
-    pub(crate) delivery: TelegramDelivery,
-    pub(crate) media_resolver: TelegramAttachmentResolver,
-    pub(crate) display_states: SharedDisplayStates,
-    pub(crate) session_actions: SharedSessionActions,
-    pub(crate) catalog: TelegramUiCatalog,
-    pub(crate) bot_username: Option<String>,
+struct BridgeUpdateHandler {
+    bridge: Arc<TelegramBridge>,
+    api: Arc<dyn TelegramApi>,
+    delivery: TelegramDelivery,
+    media_resolver: TelegramAttachmentResolver,
+    display_states: SharedDisplayStates,
+    session_actions: SharedSessionActions,
+    catalog: TelegramUiCatalog,
+    bot_username: Option<String>,
 }
 
 impl TelegramUpdateHandler for BridgeUpdateHandler {
@@ -392,7 +371,7 @@ impl TelegramUpdateHandler for BridgeUpdateHandler {
 }
 
 impl BridgeUpdateHandler {
-    pub(crate) async fn handle_text_input_message(
+    async fn handle_text_input_message(
         &self,
         input: TelegramTextInput,
     ) -> Result<(), TelegramPollingError> {
@@ -440,10 +419,7 @@ impl BridgeUpdateHandler {
         }
     }
 
-    pub(crate) async fn handle_command(
-        &self,
-        command: TelegramCommand,
-    ) -> Result<(), TelegramPollingError> {
+    async fn handle_command(&self, command: TelegramCommand) -> Result<(), TelegramPollingError> {
         if !self
             .bridge
             .access()
@@ -1275,7 +1251,7 @@ impl BridgeUpdateHandler {
         }
     }
 
-    pub(crate) async fn handle_callback(
+    async fn handle_callback(
         &self,
         callback: TelegramCallbackQuery,
     ) -> Result<(), TelegramPollingError> {
@@ -1752,7 +1728,7 @@ fn has_explicit_telegram_media_fallback(options: &TelegramBridgeOptions) -> bool
             .is_some_and(|value| !value.trim().is_empty())
 }
 
-pub(crate) fn apply_profile_media_fallback_policy(
+fn apply_profile_media_fallback_policy(
     file_policy: &mut TelegramFilePolicy,
     profile_config: &HostProfileConfig,
     selected_profile_id: Option<&str>,
@@ -1764,21 +1740,14 @@ pub(crate) fn apply_profile_media_fallback_policy(
         profile_media_fallback_policy(profile_config, selected_profile_id);
 }
 
-pub(crate) fn profile_media_fallback_policy(
+fn profile_media_fallback_policy(
     profile_config: &HostProfileConfig,
     selected_profile_id: Option<&str>,
 ) -> TelegramUnsupportedMediaFallbackPolicy {
-    let profile_id = selected_profile_id
-        .or(profile_config.default_profile_id.as_deref())
-        .unwrap_or_else(|| profile_config.profiles[0].profile_id.as_str());
-    let Some(profile) = profile_config
-        .profiles
-        .iter()
-        .find(|profile| profile.profile_id == profile_id)
-    else {
-        return TelegramUnsupportedMediaFallbackPolicy::default();
-    };
-    provider_media_fallback_policy(&profile.provider)
+    profile_config
+        .selected_profile(selected_profile_id)
+        .map(|profile| provider_media_fallback_policy(&profile.provider))
+        .unwrap_or_default()
 }
 
 fn provider_media_fallback_policy(
@@ -1885,7 +1854,7 @@ fn telegram_unsupported_media_fallback_policy(
     })
 }
 
-pub(crate) fn telegram_config_from_values(
+fn telegram_config_from_values(
     options: &TelegramBridgeOptions,
     env_source: impl Fn(&str) -> Option<String>,
 ) -> Result<noloong_agent_telegram::config::TelegramBridgeConfig, CliError> {
@@ -2073,3 +2042,7 @@ pub(crate) struct TelegramOptions {
     #[command(flatten)]
     pub(crate) bridge: TelegramBridgeOptions,
 }
+
+#[cfg(test)]
+#[path = "telegram_cli_tests.rs"]
+mod tests;

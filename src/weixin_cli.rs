@@ -1,8 +1,7 @@
 use crate::{
     cli::{
-        CliError, default_embedded_interaction_bind, generate_token, interaction_token,
-        load_profile_config, non_empty_option, parse_config_usize, parse_csv_strings,
-        parse_locale_arg, process_env, profile_locale, resolve_locale,
+        CliError, interaction_token, non_empty_option, parse_config_usize, parse_csv_strings,
+        parse_locale_arg, process_env, profile_locale, resolve_locale, start_embedded_interaction,
     },
     config,
     config::{
@@ -14,16 +13,9 @@ use crate::{
         DEFAULT_WEIXIN_LOCALE_ENV, DEFAULT_WEIXIN_TOKEN_ENV, ensure_sqlite_database_parent,
         parse_bool_env, resolve_state_database_url,
     },
-    host::build_registry,
 };
 use clap::{Args, Subcommand};
-use noloong_agent::{
-    Locale,
-    interaction::{
-        InteractionCapabilityPolicy, InteractionControlHandler, InteractionHttpTransportConfig,
-        serve_interaction_http,
-    },
-};
+use noloong_agent::Locale;
 use noloong_agent_weixin::{
     config::{
         ILINK_BASE_URL, WEIXIN_CDN_BASE_URL, WeixinAccessPolicy, WeixinBridgeConfig,
@@ -34,7 +26,6 @@ use noloong_agent_weixin::{
     state::WeixinAccountStore,
 };
 use std::{io, path::PathBuf};
-use tokio::net::TcpListener;
 
 pub(crate) async fn run_weixin(command: WeixinCommand) -> Result<(), CliError> {
     match command.command {
@@ -74,35 +65,18 @@ async fn run_weixin_bridge(options: WeixinBridgeOptions) -> Result<(), CliError>
 }
 
 async fn run_weixin_embedded(options: WeixinRunOptions) -> Result<(), CliError> {
-    let profile_config = load_profile_config(options.profile_config)?;
-    let registry = build_registry(&profile_config).await?;
-    let token = generate_token()?;
-    let listener = TcpListener::bind(default_embedded_interaction_bind()).await?;
-    let address = listener.local_addr()?;
-    let server_token = token.clone();
-    let server = tokio::spawn(async move {
-        serve_interaction_http(
-            listener,
-            InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all()),
-            InteractionHttpTransportConfig::bearer_token(server_token),
-        )
-        .await
-    });
+    let embedded = start_embedded_interaction(options.profile_config).await?;
     let mut bridge_options = options.bridge;
     if bridge_options.locale.is_none() && process_env(DEFAULT_WEIXIN_LOCALE_ENV).is_none() {
-        bridge_options.locale =
-            profile_locale(&profile_config, bridge_options.profile_id.as_deref());
+        bridge_options.locale = profile_locale(
+            embedded.profile_config(),
+            bridge_options.profile_id.as_deref(),
+        );
     }
-    bridge_options.interaction_url = Some(format!("ws://{address}/jsonrpc/ws"));
-    bridge_options.interaction_token = Some(token);
+    bridge_options.interaction_url = Some(embedded.interaction_ws_url().to_owned());
+    bridge_options.interaction_token = Some(embedded.interaction_token().to_owned());
     let bridge_config = weixin_config_from_values(&bridge_options, process_env)?;
-    tokio::select! {
-        result = run_weixin_bridge_config(bridge_config) => result,
-        result = server => {
-            result.map_err(|error| CliError::Task(error.to_string()))?
-                .map_err(CliError::Interaction)
-        }
-    }
+    embedded.run(run_weixin_bridge_config(bridge_config)).await
 }
 
 async fn run_weixin_bridge_config(config: WeixinBridgeConfig) -> Result<(), CliError> {
