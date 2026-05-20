@@ -137,7 +137,7 @@ where
     }
     let request = match parse_jsonrpc_request(&body) {
         Ok(request) => request,
-        Err(response) => return axum::Json(response).into_response(),
+        Err(response) => return axum::Json(*response).into_response(),
     };
     if requires_bidirectional_transport(&request.method) {
         let response = JsonRpcResponse::error(
@@ -192,7 +192,7 @@ where
                 let request = match parse_jsonrpc_request(text.as_bytes()) {
                     Ok(request) => request,
                     Err(response) => {
-                        if send_response(&outbound_sender, response).is_err() {
+                        if send_response(&outbound_sender, *response).is_err() {
                             break;
                         }
                         continue;

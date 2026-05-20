@@ -1,6 +1,8 @@
 [workspace]
 members = [
     ".",
+    "crates/noloong-app",
+    "crates/noloong-config",
     "crates/noloong-agent-core",
     "crates/noloong-agent",
     "crates/noloong-agent-telegram",
@@ -19,6 +21,9 @@ noloong-agent = { path = "crates/noloong-agent" }
 noloong-agent-telegram = { path = "crates/noloong-agent-telegram" }
 noloong-agent-weixin = { path = "crates/noloong-agent-weixin" }
 noloong-openai = { path = "crates/noloong-openai" }
+noloong-config = { path = "crates/noloong-config" }
+noloong-app = { path = "crates/noloong-app" }
+anyhow = "1.0"
 aes = "0.9"
 base64 = "0.22"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
@@ -31,6 +36,7 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 jsonc-parser = { version = "0.32", features = ["serde", "serde_json"] }
 jsonschema = { version = "0.46", default-features = false }
+lsp-types = "0.97"
 env_logger = "0.11"
 human-panic = "2.0"
 log = "0.4"
@@ -56,6 +62,9 @@ toasty-driver-sqlite = "0.6"
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -74,6 +83,8 @@ noloong-agent-core = { workspace = true, features = ["json-schema", "sqlite-stor
 noloong-agent-telegram.workspace = true
 noloong-agent-weixin.workspace = true
 noloong-openai.workspace = true
+noloong-config.workspace = true
+noloong-app.workspace = true
 env_logger.workspace = true
 getrandom.workspace = true
 human-panic.workspace = true
@@ -97,6 +108,3 @@ serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 zstd.workspace = true
-
-[dev-dependencies]
-jsonschema.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "noloong-config"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+noloong-agent = { workspace = true, features = ["json-schema"] }
+noloong-agent-core = { workspace = true, features = ["json-schema"] }
+jsonc-parser.workspace = true
+jsonschema.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

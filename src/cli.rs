@@ -3,8 +3,8 @@ use crate::{
     build_info_cli::{BuildInfoCommand, run_build_info},
     chatgpt,
     config::{
-        self, DEFAULT_INTERACTION_TOKEN_ENV, DEFAULT_PROFILE_CONFIG_ENV, HostProfileConfig,
-        env_or_value,
+        self, DEFAULT_INTERACTION_TOKEN_ENV, HostProfileConfig, env_or_value,
+        resolve_profile_config_path,
     },
     host::{self, build_registry},
     profile_config_cli::{
@@ -15,13 +15,14 @@ use crate::{
 };
 use clap::{Args, Parser, Subcommand};
 use noloong_agent::{
-    Locale, ManifestPatch,
+    Locale,
     interaction::{
         InteractionCapabilityPolicy, InteractionControlHandler, InteractionHttpTransportConfig,
         InteractionTransportAuth, serve_interaction_http,
     },
 };
 use noloong_agent_telegram::{polling::TelegramPollingError, telegram_api::TelegramApiError};
+use noloong_app::AppLaunchOptions;
 use std::{env, future::Future, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -42,6 +43,11 @@ pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
         CliCommand::TelegramBridge(options) => run_telegram_bridge(options).await,
         CliCommand::Telegram(options) => run_telegram(options).await,
         CliCommand::Weixin(command) => run_weixin(command).await,
+        CliCommand::App(options) => noloong_app::run_app(AppLaunchOptions {
+            profile_config_path: options.profile_config,
+            locale: options.locale,
+        })
+        .map_err(Into::into),
     }
 }
 
@@ -97,6 +103,15 @@ pub(crate) enum CliCommand {
     TelegramBridge(TelegramBridgeOptions),
     Telegram(TelegramOptions),
     Weixin(WeixinCommand),
+    App(AppOptions),
+}
+
+#[derive(Clone, Debug, Default, Args, PartialEq, Eq)]
+pub(crate) struct AppOptions {
+    #[arg(long = "profile-config")]
+    profile_config: Option<String>,
+    #[arg(long = "locale", value_parser = parse_locale_arg)]
+    locale: Option<Locale>,
 }
 
 #[derive(Clone, Debug, Args, PartialEq, Eq)]
@@ -146,6 +161,8 @@ pub(crate) enum CliError {
     WeixinLogin(#[from] noloong_agent_weixin::login::WeixinLoginError),
     #[error("Weixin state failed: {0}")]
     WeixinState(#[from] noloong_agent_weixin::state::WeixinStateError),
+    #[error("App failed: {0}")]
+    App(#[from] noloong_app::AppError),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("background task failed: {0}")]
@@ -161,8 +178,7 @@ pub(crate) enum CliError {
 }
 
 pub(crate) fn load_profile_config(path: Option<String>) -> Result<HostProfileConfig, CliError> {
-    let path = env_or_value(path, DEFAULT_PROFILE_CONFIG_ENV)
-        .ok_or(config::CliConfigError::MissingProfileConfig)?;
+    let path = resolve_profile_config_path(path.as_deref())?;
     let config = HostProfileConfig::load(path)?;
     config.validate()?;
     Ok(config)
@@ -244,15 +260,9 @@ pub(crate) fn profile_locale(
     profile_config: &HostProfileConfig,
     selected_profile_id: Option<&str>,
 ) -> Option<Locale> {
-    let profile = profile_config.selected_profile(selected_profile_id)?;
-    profile
-        .manifest_patches
-        .iter()
-        .rev()
-        .find_map(|patch| match patch {
-            ManifestPatch::SetLocale { locale } => Some(*locale),
-            _ => None,
-        })
+    profile_config
+        .selected_profile(selected_profile_id)
+        .and_then(|profile| profile.locale_override())
 }
 
 pub(crate) fn interaction_token(token_env: Option<&str>) -> Option<String> {

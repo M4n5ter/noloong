@@ -105,7 +105,7 @@ where
         let request = match parse_jsonrpc_request(line.as_bytes()) {
             Ok(request) => request,
             Err(response) => {
-                send_response(&outbound_sender, response)?;
+                send_response(&outbound_sender, *response)?;
                 continue;
             }
         };
@@ -153,11 +153,11 @@ pub(crate) fn request_response_notifier() -> InteractionNotifier {
     }
 }
 
-pub(crate) fn parse_jsonrpc_request(bytes: &[u8]) -> Result<JsonRpcRequest, JsonRpcResponse> {
+pub(crate) fn parse_jsonrpc_request(bytes: &[u8]) -> Result<JsonRpcRequest, Box<JsonRpcResponse>> {
     serde_json::from_slice::<JsonRpcRequest>(bytes).map_err(|error| {
-        JsonRpcResponse::parse_error(InteractionError::invalid_params(format!(
-            "invalid json-rpc request: {error}"
-        )))
+        Box::new(JsonRpcResponse::parse_error(
+            InteractionError::invalid_params(format!("invalid json-rpc request: {error}")),
+        ))
     })
 }
 

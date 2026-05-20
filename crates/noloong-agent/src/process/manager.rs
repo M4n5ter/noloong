@@ -399,7 +399,6 @@ impl HostProcessManager {
             .flush()
             .await
             .map_err(|error| ProcessError::Io(error.to_string()))?;
-        handle.notify.notify_waiters();
         Ok(self.snapshot_for_handle(&handle).await)
     }
 

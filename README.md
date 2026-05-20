@@ -42,6 +42,22 @@ Diagnostics are written to stderr and do not mix into machine-readable stdout co
 
 Release builds also install `human-panic` for user-friendly crash reports. Set `RUST_BACKTRACE=1` when you need the traditional panic backtrace.
 
+## Desktop App
+
+`noloong app` opens the first GPUI-based desktop interface. The current version focuses on profile configuration ergonomics and includes a visual-only chat shell for the future interaction client.
+
+```bash
+cargo run -p noloong -- app
+cargo run -p noloong -- app --locale zh
+cargo run -p noloong -- app --profile-config ~/.agents/noloong/profile-config.jsonc
+```
+
+Profile config path resolution is `--profile-config` first, then `NOLOONG_PROFILE_CONFIG`, then `~/.agents/noloong/profile-config.jsonc`. When the app opens a missing config path it starts from a local draft using a `chatgpt_responses` profile, `gpt-5.4-mini`, and automatic compaction; it does not write secrets. Other CLI commands use the same default path but still require the file to exist.
+
+The app UI locale is selected by `--locale zh|en` or system locale detection. It is independent from the agent profile locale. Saving writes canonical pretty JSON to the `.jsonc` path; existing comments and formatting are intentionally not preserved.
+
+On macOS, `noloong app` launches through `~/Library/Application Support/Noloong/Noloong.app` instead of keeping the raw CLI process as the GUI host. This gives the window a stable bundle identifier (`dev.noloong.Noloong`) so Accessibility and Computer Use can discover and operate it like a normal desktop app.
+
 ## Examples
 
 ```bash

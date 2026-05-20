@@ -79,6 +79,25 @@ fn cli_weixin_run_embeds_loopback_interaction_options() {
 }
 
 #[test]
+fn cli_app_command_parses_profile_config_and_locale() {
+    let cli = Cli::try_parse_from([
+        "noloong",
+        "app",
+        "--profile-config",
+        "profiles.jsonc",
+        "--locale",
+        "zh",
+    ])
+    .unwrap();
+
+    let CliCommand::App(options) = cli.command else {
+        panic!("expected app command");
+    };
+    assert_eq!(options.profile_config.as_deref(), Some("profiles.jsonc"));
+    assert_eq!(options.locale, Some(Locale::Zh));
+}
+
+#[test]
 fn cli_profile_config_schema_command_parses() {
     let cli = Cli::try_parse_from([
         "noloong",
