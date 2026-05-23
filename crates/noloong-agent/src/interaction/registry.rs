@@ -237,32 +237,15 @@ impl RegisteredAgentSession {
     pub async fn save_snapshot(&self) -> Result<InteractionSessionDescriptor, InteractionError> {
         let record = self.snapshot_record().await;
         self.store.save(record.clone()).await?;
-        *self
-            .record
-            .lock()
-            .expect("interaction session record lock poisoned") = record.clone();
+        self.replace_record(record.clone());
         Ok(descriptor_from_record(&record))
     }
 
-    pub async fn update_metadata(
-        &self,
-        metadata: Map<String, Value>,
-    ) -> Result<InteractionSessionDescriptor, InteractionError> {
-        let mut record = self.snapshot_record().await;
-        for (key, value) in metadata {
-            if value.is_null() {
-                record.metadata.remove(&key);
-            } else {
-                record.metadata.insert(key, value);
-            }
-        }
-        record.updated_at_ms = current_unix_ms();
-        self.store.save(record.clone()).await?;
+    fn replace_record(&self, record: AgentSessionRecord) {
         *self
             .record
             .lock()
-            .expect("interaction session record lock poisoned") = record.clone();
-        Ok(descriptor_from_record(&record))
+            .expect("interaction session record lock poisoned") = record;
     }
 
     async fn snapshot_record(&self) -> AgentSessionRecord {
@@ -464,6 +447,52 @@ impl AgentSessionRegistry {
             .await
             .insert(session_id, Arc::clone(&registered));
         Ok(registered.descriptor().await)
+    }
+
+    pub async fn update_session_metadata(
+        &self,
+        session_id: &str,
+        metadata: Map<String, Value>,
+    ) -> Result<InteractionSessionDescriptor, InteractionError> {
+        let loaded = self.loaded_session(session_id).await;
+        let mut record = if let Some(session) = &loaded {
+            session.snapshot_record().await
+        } else {
+            let record = self
+                .inner
+                .store
+                .get(session_id)
+                .await?
+                .ok_or_else(|| missing_session_error(session_id))?;
+            self.normalize_record(record).await?
+        };
+        let workdir_changed = apply_session_metadata_patch(&mut record, metadata);
+        let status = InteractionSessionStatus::from(record.state.status.clone());
+        if workdir_changed
+            && matches!(
+                status,
+                InteractionSessionStatus::Running | InteractionSessionStatus::Paused
+            )
+        {
+            return Err(InteractionError::busy(format!(
+                "session workdir cannot change while session is active: {session_id}"
+            )));
+        }
+        record.updated_at_ms = current_unix_ms();
+        self.inner.store.save(record.clone()).await?;
+        if let Some(session) = &loaded {
+            session.replace_record(record.clone());
+        }
+        if workdir_changed {
+            let registered = self.registered_from_record(record.clone()).await?;
+            self.inner
+                .sessions
+                .write()
+                .await
+                .insert(session_id.to_owned(), registered);
+        }
+        self.inner.session_changes.notify_waiters();
+        Ok(descriptor_from_record(&record))
     }
 
     pub async fn spawn_subagent(
@@ -1600,6 +1629,30 @@ fn host_environment_for_record(record: &AgentSessionRecord) -> HostEnvironment {
         environment.cwd = PathBuf::from(workdir);
     }
     environment
+}
+
+fn apply_session_metadata_patch(
+    record: &mut AgentSessionRecord,
+    metadata: Map<String, Value>,
+) -> bool {
+    let previous_workdir = session_workdir_metadata(&record.metadata);
+    for (key, value) in metadata {
+        if value.is_null() {
+            record.metadata.remove(&key);
+        } else {
+            record.metadata.insert(key, value);
+        }
+    }
+    previous_workdir != session_workdir_metadata(&record.metadata)
+}
+
+fn session_workdir_metadata(metadata: &Map<String, Value>) -> Option<String> {
+    metadata
+        .get(super::protocol::SESSION_WORKDIR_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|workdir| !workdir.is_empty())
+        .map(str::to_owned)
 }
 
 fn queue_snapshot_from_agent(agent: &Agent) -> AgentSessionQueueSnapshot {

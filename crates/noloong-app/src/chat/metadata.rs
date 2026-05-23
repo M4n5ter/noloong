@@ -1,21 +1,23 @@
 use crate::interaction::{AppContentBlock, AppPromptInput};
 use serde_json::{Map, Value, json};
+use std::path::Path;
 
 pub const SESSION_TITLE_METADATA_KEY: &str = "title";
 pub const SESSION_WORKDIR_METADATA_KEY: &str = "workdir";
 const MAX_GENERATED_TITLE_CHARS: usize = 48;
 
-pub fn session_metadata_for_prompt(input: &AppPromptInput) -> Map<String, Value> {
+pub fn session_metadata_for_prompt_in_workdir(
+    input: &AppPromptInput,
+    workdir: &Path,
+) -> Map<String, Value> {
     let mut metadata = Map::new();
     if let Some(title) = generated_title_from_prompt(input) {
         metadata.insert(SESSION_TITLE_METADATA_KEY.into(), json!(title));
     }
-    if let Ok(workdir) = std::env::current_dir() {
-        metadata.insert(
-            SESSION_WORKDIR_METADATA_KEY.into(),
-            json!(workdir.display().to_string()),
-        );
-    }
+    metadata.insert(
+        SESSION_WORKDIR_METADATA_KEY.into(),
+        json!(workdir.display().to_string()),
+    );
     metadata
 }
 

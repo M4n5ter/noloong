@@ -1,22 +1,20 @@
 use super::NoloongAppView;
 use crate::chat::{
     ChatAttachmentDraft, ChatComposer, ChatComposerAction, ChatComposerSubmission, ChatRunStatus,
-    session_metadata_for_prompt,
 };
 use crate::{
     AppInteractionStatus, AppTextKey, ChatEmptyState,
     interaction::{
         AppApprovalResolveRequest, AppDisplaySubscribeRequest, AppInteractionClient as _,
-        AppInteractionDisplayNotification, AppInteractionSessionDescriptor,
-        AppInteractionSessionStatus, AppPromptInput, AppPromptRequest, AppSessionCreateRequest,
-        AppSessionRequest, AppToolPermissionDecision, AppToolPermissionOutcome,
-        InteractionUxCapabilities,
+        AppInteractionDisplayNotification, AppInteractionSessionDescriptor, AppPromptInput,
+        AppPromptRequest, AppSessionCreateRequest, AppSessionRequest, AppToolPermissionDecision,
+        AppToolPermissionOutcome, InteractionUxCapabilities,
     },
 };
 use gpui::{
     AnyElement, AsyncApp, Context, ExternalPaths, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, PathPromptOptions, SharedString, Styled, WeakEntity, div,
-    prelude::*, px, rgb,
+    KeyDownEvent, ParentElement as _, PathPromptOptions, Styled, WeakEntity, div, prelude::*, px,
+    rgb,
 };
 use gpui_component::{StyledExt as _, input::Input};
 use std::{
@@ -197,70 +195,6 @@ impl NoloongAppView {
             .into_any_element()
     }
 
-    fn render_session_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .w(px(240.0))
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(0x253545))
-            .bg(rgb(0x0f1821))
-            .p_3()
-            .children(self.model.chat_sessions().iter().map(|session| {
-                let is_current =
-                    self.model.current_chat_session_id() == Some(session.session_id.as_str());
-                let session_id = session.session_id.clone();
-                let element_id = SharedString::from(format!("chat-session-{session_id}"));
-                div()
-                    .id(element_id)
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(if is_current {
-                        rgb(0x456ca8)
-                    } else {
-                        rgb(0x182635)
-                    })
-                    .bg(if is_current {
-                        rgb(0x172741)
-                    } else {
-                        rgb(0x101923)
-                    })
-                    .px_3()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this: &mut Self, _, _window, cx| {
-                        this.model.select_chat_session(&session_id);
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xe6edf3))
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x7d8793))
-                            .child(session.profile_id.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(status_color(session.status))
-                            .child(status_label(session.status)),
-                    )
-                    .into_any_element()
-            }))
-            .into_any_element()
-    }
-
     fn render_transcript(&self, cx: &mut Context<Self>) -> AnyElement {
         let now_ms = current_time_ms();
         div()
@@ -341,6 +275,7 @@ impl NoloongAppView {
                                     .text_color(rgb(0x7d8793))
                                     .child(self.chat_connection_status_text()),
                             )
+                            .child(self.render_chat_workdir_button(cx))
                             .when(attachments_supported, |this| {
                                 this.child(
                                     div()
@@ -616,7 +551,7 @@ impl NoloongAppView {
         if matches!(&input, AppPromptInput::Text { text } if text.trim().is_empty()) {
             return;
         }
-        let create_metadata = session_metadata_for_prompt(&input);
+        let create_metadata = self.model.chat_session_metadata_for_prompt(&input);
         let current_session_id = self.model.current_chat_session_id().map(str::to_string);
         let profile_id = self.model.selected_profile_id.clone();
         self.chat_run_task = cx.spawn(async move |this, cx| {
@@ -771,26 +706,6 @@ impl NoloongAppView {
             .text_lg()
             .text_color(rgb(0xaab4c0))
             .child(self.catalog.text(key))
-    }
-}
-
-fn status_label(status: AppInteractionSessionStatus) -> &'static str {
-    match status {
-        AppInteractionSessionStatus::Idle => "idle",
-        AppInteractionSessionStatus::Running => "running",
-        AppInteractionSessionStatus::Completed => "completed",
-        AppInteractionSessionStatus::Aborted => "aborted",
-        AppInteractionSessionStatus::Failed => "failed",
-        AppInteractionSessionStatus::Paused => "paused",
-    }
-}
-
-fn status_color(status: AppInteractionSessionStatus) -> gpui::Rgba {
-    match status {
-        AppInteractionSessionStatus::Running => rgb(0x93c5fd),
-        AppInteractionSessionStatus::Paused => rgb(0xf8c76a),
-        AppInteractionSessionStatus::Failed | AppInteractionSessionStatus::Aborted => rgb(0xff8b8b),
-        AppInteractionSessionStatus::Idle | AppInteractionSessionStatus::Completed => rgb(0x7d8793),
     }
 }
 

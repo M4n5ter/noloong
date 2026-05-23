@@ -11,7 +11,8 @@ mod transcript;
 
 pub use composer::{ChatAttachmentDraft, ChatComposer, ChatComposerAction, ChatComposerSubmission};
 pub use metadata::{
-    SESSION_TITLE_METADATA_KEY, SESSION_WORKDIR_METADATA_KEY, session_metadata_for_prompt,
+    SESSION_TITLE_METADATA_KEY, SESSION_WORKDIR_METADATA_KEY,
+    session_metadata_for_prompt_in_workdir,
 };
 pub use streaming::StreamingText;
 pub use transcript::{

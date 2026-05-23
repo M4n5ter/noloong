@@ -19,6 +19,7 @@ use std::{
 
 mod chat;
 mod chat_items;
+mod chat_metadata;
 mod chrome;
 mod controller;
 mod jsonc;
@@ -78,6 +79,8 @@ pub(crate) struct NoloongAppView {
     mcp_timeout_input: Entity<InputState>,
     jsonc_input: Entity<InputState>,
     chat_input: Entity<InputState>,
+    chat_rename_input: Entity<InputState>,
+    chat_renaming_session_id: Option<String>,
     chat_attachments: Vec<ChatAttachmentDraft>,
     toasts: Vec<ToastMessage>,
     next_toast_id: u64,
@@ -87,6 +90,7 @@ pub(crate) struct NoloongAppView {
     chat_abort_task: Task<()>,
     chat_approval_task: Task<()>,
     chat_attachment_task: Task<()>,
+    chat_metadata_task: Task<()>,
     toast_task: Task<()>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -321,6 +325,7 @@ impl NoloongAppView {
                 .auto_grow(1, 6)
                 .placeholder(catalog.text(AppTextKey::ChatComposerPlaceholder))
         });
+        let chat_rename_input = cx.new(|cx| InputState::new(window, cx));
 
         let _subscriptions = vec![
             cx.subscribe_in(&chat_input, window, {
@@ -657,6 +662,8 @@ impl NoloongAppView {
             mcp_timeout_input,
             jsonc_input,
             chat_input,
+            chat_rename_input,
+            chat_renaming_session_id: None,
             chat_attachments: Vec::new(),
             toasts: Vec::new(),
             next_toast_id: 0,
@@ -666,6 +673,7 @@ impl NoloongAppView {
             chat_abort_task: Task::ready(()),
             chat_approval_task: Task::ready(()),
             chat_attachment_task: Task::ready(()),
+            chat_metadata_task: Task::ready(()),
             toast_task: Task::ready(()),
             _subscriptions,
         };

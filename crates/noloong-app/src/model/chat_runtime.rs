@@ -3,9 +3,10 @@ use super::AppError;
 use super::AppViewModel;
 use crate::chat::{
     ChatApprovalStatus, ChatRunState, ChatRunStatus, ChatSessionSummary, ChatTranscriptItem,
+    session_metadata_for_prompt_in_workdir,
 };
 #[cfg(test)]
-use crate::chat::{SESSION_TITLE_METADATA_KEY, session_metadata_for_prompt};
+use crate::chat::{SESSION_TITLE_METADATA_KEY, SESSION_WORKDIR_METADATA_KEY};
 #[cfg(test)]
 use crate::interaction::{
     AppApprovalResolveRequest, AppInteractionClient, AppPromptInput, AppPromptRequest,
@@ -16,6 +17,8 @@ use crate::interaction::{
     AppInteractionDisplayNotification, AppInteractionSessionDescriptor, AppInteractionStatus,
     AppToolPermissionOutcome,
 };
+use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEmptyState {
@@ -103,7 +106,7 @@ impl AppViewModel {
                     .create_session(AppSessionCreateRequest {
                         session_id: None,
                         profile_id: self.selected_profile_id.clone(),
-                        metadata: session_metadata_for_prompt(&input),
+                        metadata: self.chat_session_metadata_for_prompt(&input),
                     })
                     .await
                     .map_err(|error| AppError::Interaction(error.to_string()))?;
@@ -158,6 +161,33 @@ impl AppViewModel {
             })
             .await
             .map_err(|error| AppError::Interaction(error.to_string()))?;
+        self.chat.upsert_and_select(descriptor);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn update_current_chat_workdir(
+        &mut self,
+        client: &impl AppInteractionClient,
+        workdir: PathBuf,
+    ) -> Result<(), AppError> {
+        let Some(session_id) = self.current_chat_session_id().map(str::to_string) else {
+            self.set_chat_workdir(workdir);
+            return Ok(());
+        };
+        let descriptor = client
+            .update_session_metadata(AppSessionMetadataUpdateRequest {
+                session_id,
+                metadata: [(
+                    SESSION_WORKDIR_METADATA_KEY.into(),
+                    serde_json::json!(workdir.display().to_string()),
+                )]
+                .into_iter()
+                .collect(),
+            })
+            .await
+            .map_err(|error| AppError::Interaction(error.to_string()))?;
+        self.set_chat_workdir(workdir);
         self.chat.upsert_and_select(descriptor);
         Ok(())
     }
@@ -241,6 +271,24 @@ impl AppViewModel {
 
     pub fn chat_sessions(&self) -> &[ChatSessionSummary] {
         self.chat.sessions()
+    }
+
+    pub fn chat_workdir(&self) -> &Path {
+        self.chat
+            .current_session()
+            .map(|session| Path::new(session.workdir.as_str()))
+            .unwrap_or(self.chat_workdir.as_path())
+    }
+
+    pub fn set_chat_workdir(&mut self, workdir: PathBuf) {
+        self.chat_workdir = workdir;
+    }
+
+    pub fn chat_session_metadata_for_prompt(
+        &self,
+        input: &crate::interaction::AppPromptInput,
+    ) -> Map<String, Value> {
+        session_metadata_for_prompt_in_workdir(input, self.chat_workdir.as_path())
     }
 
     pub fn current_chat_context(&self) -> Option<super::ChatContextSummary> {

@@ -215,6 +215,55 @@ async fn renaming_current_chat_session_updates_session_metadata() {
 }
 
 #[tokio::test]
+async fn selecting_workdir_for_existing_chat_session_updates_session_metadata() {
+    let dir = temp_dir("app-chat-existing-workdir");
+    let path = dir.join("profile-config.jsonc");
+    let selected_workdir = dir.join("next-run-workdir");
+    fs::create_dir_all(&selected_workdir).unwrap();
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    let mut updated = session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![message("user-1", "user", "检查工作区")],
+    );
+    updated.metadata.insert(
+        "workdir".into(),
+        serde_json::json!(selected_workdir.display().to_string()),
+    );
+    let client = FakeInteractionClient::ok().with_metadata_session(updated);
+    model.apply_chat_session_descriptors(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![message("user-1", "user", "检查工作区")],
+    )]);
+
+    model
+        .update_current_chat_workdir(&client, selected_workdir.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        client.last_metadata_request().unwrap().metadata["workdir"],
+        selected_workdir.display().to_string()
+    );
+    assert_eq!(model.chat_workdir(), selected_workdir.as_path());
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
 async fn app_selects_chat_session_without_mutating_other_session_status() {
     let dir = temp_dir("app-chat-select-session");
     let path = dir.join("profile-config.jsonc");
@@ -402,6 +451,57 @@ async fn first_chat_send_creates_session_then_submits_prompt() {
     assert_eq!(
         client.last_create_request().unwrap().metadata["title"],
         "hello"
+    );
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn first_chat_send_uses_selected_workdir_metadata() {
+    let dir = temp_dir("app-chat-workdir");
+    let path = dir.join("profile-config.jsonc");
+    let selected_workdir = dir.join("selected-workdir");
+    fs::create_dir_all(&selected_workdir).unwrap();
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    let created = session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Idle,
+        vec![message("user-1", "user", "hello")],
+    );
+    let prompted = session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![
+            message("user-1", "user", "hello"),
+            message("assistant-1", "assistant", "world"),
+        ],
+    );
+    let client = FakeInteractionClient::ok()
+        .with_create_session(created)
+        .with_prompt_session(prompted);
+
+    model.set_chat_workdir(selected_workdir.clone());
+    assert_eq!(model.chat_workdir(), selected_workdir.as_path());
+    model
+        .submit_chat_message(&client, "hello".into())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        client.last_create_request().unwrap().metadata["workdir"],
+        selected_workdir.display().to_string()
     );
     remove_temp_dir(dir);
 }

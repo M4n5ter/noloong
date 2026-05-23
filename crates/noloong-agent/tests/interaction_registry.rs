@@ -11,7 +11,7 @@ use noloong_agent::{
         AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore,
         INTERACTION_ERROR_BUSY, INTERACTION_ERROR_NOT_FOUND, InMemoryAgentSessionRegistryStore,
         InteractionError, InteractionFuture, InteractionProfileDescriptor,
-        InteractionSessionStatus, SubagentSpawnRequest,
+        InteractionSessionStatus, SubagentSpawnRequest, protocol::SESSION_WORKDIR_METADATA_KEY,
     },
 };
 use noloong_agent_core::{
@@ -25,6 +25,7 @@ use serde_json::Map;
 use serde_json::json;
 use std::{
     num::NonZeroU64,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -56,6 +57,72 @@ async fn interaction_registry_creates_lists_and_gets_sessions() {
 
     let fetched = registry.get_descriptor("root").await.unwrap().unwrap();
     assert_eq!(fetched, created);
+}
+
+#[tokio::test]
+async fn interaction_registry_updates_idle_session_workdir_runtime_context() {
+    let registry = AgentSessionRegistry::new(text_profile("default")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("root".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+
+    let updated = registry
+        .update_session_metadata(
+            "root",
+            [(
+                SESSION_WORKDIR_METADATA_KEY.into(),
+                json!("/tmp/noloong-chat-workdir"),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        updated.metadata[SESSION_WORKDIR_METADATA_KEY],
+        "/tmp/noloong-chat-workdir"
+    );
+    let registered = registry.get("root").await.unwrap().unwrap();
+    assert_eq!(
+        registered.session().host_environment().cwd,
+        PathBuf::from("/tmp/noloong-chat-workdir")
+    );
+}
+
+#[tokio::test]
+async fn interaction_registry_rejects_workdir_change_while_session_is_running() {
+    let registry = AgentSessionRegistry::new(blocking_profile("blocking")).unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("busy".into()),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let registered = registry.get("busy").await.unwrap().unwrap();
+    let agent = registered.agent().clone();
+    let run = tokio::spawn(async move { agent.prompt("block").await });
+    wait_until_status(&registry, "busy", InteractionSessionStatus::Running).await;
+
+    let error = registry
+        .update_session_metadata(
+            "busy",
+            [(SESSION_WORKDIR_METADATA_KEY.into(), json!("/tmp/ignored"))]
+                .into_iter()
+                .collect(),
+        )
+        .await
+        .expect_err("running session workdir update should be rejected");
+
+    assert_eq!(error.code, INTERACTION_ERROR_BUSY);
+    registered.agent().abort().await;
+    let run_result = run.await.unwrap();
+    assert!(matches!(run_result, Err(AgentCoreError::Aborted)));
 }
 
 #[test]

@@ -180,8 +180,12 @@ impl JsonRpcHandler for InteractionControlHandler {
                 }
                 method::SESSION_UPDATE_METADATA => {
                     let request = parse_params::<SessionMetadataUpdateRequest>(params)?;
-                    let registered = self.session(&request.session_id).await?;
-                    value(registered.update_metadata(request.metadata).await?)?
+                    value(
+                        self.inner
+                            .registry
+                            .update_session_metadata(&request.session_id, request.metadata)
+                            .await?,
+                    )?
                 }
                 method::SESSION_DELETE => {
                     self.require(method, InteractionAuthorityCapability::SessionDelete)?;
