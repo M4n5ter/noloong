@@ -13,7 +13,16 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
     }
 
     let model = AppViewModel::load(options)?;
-    application().run(move |cx: &mut App| {
+    let app = application();
+    app.on_reopen({
+        let model = model.clone();
+        move |cx| {
+            if cx.windows().is_empty() {
+                open_app_window(model.clone(), cx);
+            }
+        }
+    });
+    app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         cx.bind_keys([
             KeyBinding::new(
@@ -25,29 +34,32 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
             KeyBinding::new("cmd-enter", ValidateSettings, Some(crate::APP_KEY_CONTEXT)),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
-        let bounds = Bounds::centered(None, size(px(1180.0), px(780.0)), cx);
-        let mut titlebar = TitleBar::title_bar_options();
-        titlebar.traffic_light_position = Some(point(px(14.0), px(17.0)));
-        let window_options = WindowOptions {
-            titlebar: Some(titlebar),
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            ..Default::default()
-        };
-        cx.spawn({
-            let model = model.clone();
-            async move |cx| {
-                cx.open_window(window_options, {
-                    let model = model.clone();
-                    move |window, cx| {
-                        let view = cx.new(|cx| NoloongAppView::new(model, window, cx));
-                        cx.new(|cx| gpui_component::Root::new(view, window, cx))
-                    }
-                })
-                .expect("failed to open noloong app window");
+        cx.on_window_closed(|cx, _window_id| {
+            if cx.windows().is_empty() {
+                cx.quit();
             }
         })
         .detach();
+        open_app_window(model.clone(), cx);
         cx.activate(true);
     });
     Ok(())
+}
+
+fn open_app_window(model: AppViewModel, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1180.0), px(780.0)), cx);
+    let mut titlebar = TitleBar::title_bar_options();
+    titlebar.title = Some("Noloong".into());
+    titlebar.traffic_light_position = Some(point(px(14.0), px(17.0)));
+    let window_options = WindowOptions {
+        titlebar: Some(titlebar),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        ..Default::default()
+    };
+
+    cx.open_window(window_options, move |window, cx| {
+        let view = cx.new(|cx| NoloongAppView::new(model, window, cx));
+        cx.new(|cx| gpui_component::Root::new(view, window, cx))
+    })
+    .expect("failed to open noloong app window");
 }

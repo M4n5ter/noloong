@@ -44,17 +44,22 @@ Release builds also install `human-panic` for user-friendly crash reports. Set `
 
 ## Desktop App
 
-`noloong app` opens the first GPUI-based desktop interface. The current version focuses on profile configuration ergonomics and includes a visual-only chat shell for the future interaction client.
+`noloong app` opens the GPUI desktop app and defaults to the Chat workspace. It is the primary local interaction client: users can create or continue agent sessions, send text and file attachments, observe streaming replies, stop the current run, resolve inline approvals, and switch into Settings when they need to edit profile/provider/runtime configuration.
 
 ```bash
 cargo run -p noloong -- app
 cargo run -p noloong -- app --locale zh
 cargo run -p noloong -- app --profile-config ~/.agents/noloong/profile-config.jsonc
+cargo run -p noloong -- app --interaction-ws-url ws://127.0.0.1:3000/jsonrpc/ws --interaction-token "$TOKEN"
 ```
 
 Profile config path resolution is `--profile-config` first, then `NOLOONG_PROFILE_CONFIG`, then `~/.agents/noloong/profile-config.jsonc`. When the app opens a missing config path it starts from a local draft using a `chatgpt_responses` profile, `gpt-5.4-mini`, and automatic compaction; it does not write secrets. Other CLI commands use the same default path but still require the file to exist.
 
 The app UI locale is selected by `--locale zh|en` or system locale detection. It is independent from the agent profile locale. Saving writes canonical pretty JSON to the `.jsonc` path; existing comments and formatting are intentionally not preserved.
+
+By default the app starts an embedded loopback interaction runtime for the selected profile config. Embedded mode still uses the same JSON-RPC interaction protocol as an external runtime: the GUI initializes through the typed interaction client, creates/lists sessions through protocol requests, and subscribes to display notifications for transcript updates. The app does not hold the registry directly and does not maintain a second transcript source.
+
+Use `--interaction-ws-url` for external runtime mode. In that mode the app skips embedded server startup and connects to the supplied interaction WebSocket endpoint, optionally using `--interaction-token` for bearer authentication. Chat rendering is intentionally driven by display events only: assistant deltas/finals, reasoning summaries, tool activity, approvals, run lifecycle events, and failures must be represented in display events rather than raw provider or registry internals.
 
 On macOS, `noloong app` launches through `~/Library/Application Support/Noloong/Noloong.app` instead of keeping the raw CLI process as the GUI host. This gives the window a stable bundle identifier (`dev.noloong.Noloong`) so Accessibility and Computer Use can discover and operate it like a normal desktop app.
 
