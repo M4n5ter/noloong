@@ -1,7 +1,8 @@
+use super::display_projector::DisplayProjector;
 use super::{
     AgentSessionDeleteOptions, AgentSessionListFilter, AgentSessionRegistry,
     AutomationCreateRequest, AutomationListRequest, AutomationRequest, AutomationUpdateRequest,
-    DisplayEvent, GoalSetRequest, GoalStatusUpdateRequest, InteractionAuthorityCapability,
+    GoalSetRequest, GoalStatusUpdateRequest, InteractionAuthorityCapability,
     InteractionCapabilityGrant, InteractionCapabilityPolicy, InteractionClientInfo,
     InteractionError, InteractionFuture, InteractionNotifier, InteractionSessionDescriptor,
     InteractionUxCapabilities, JsonRpcHandler, JsonRpcHandlerOutput, SubagentSpawnRequest,
@@ -9,20 +10,16 @@ use super::{
         AgentFollowUpRequest, AgentPromptRequest, AgentSessionQueuedMessage,
         AgentSessionQueuedMessageIntent, AgentSteerRequest, ApprovalResolveRequest,
         DisplaySubscribeRequest, EventSubscribeRequest, EventUnsubscribeRequest,
-        InteractionDisplayNotification, InteractionInitializeResult, InteractionQueueKind,
-        InteractionServerInfo, ManifestApplyResult, ManifestProposalRequest, ProcessJobRequest,
-        ProcessReadRequest, ProcessWaitRequest, ProcessWriteRequest, QueueEditRequest,
-        QueueRequest, QueueSetModeRequest, RawEventNotification, SessionDeleteRequest,
-        SessionRequest, SubscriptionResult, UnsubscribeResult, method, notification,
+        InteractionInitializeResult, InteractionQueueKind, InteractionServerInfo,
+        ManifestApplyResult, ManifestProposalRequest, ProcessJobRequest, ProcessReadRequest,
+        ProcessWaitRequest, ProcessWriteRequest, QueueEditRequest, QueueRequest,
+        QueueSetModeRequest, RawEventNotification, SessionDeleteRequest, SessionRequest,
+        SubscriptionResult, UnsubscribeResult, method, notification,
     },
     store::missing_session_error,
 };
-use crate::text;
 use crate::tools::final_assistant_output;
-use noloong_agent_core::{
-    AgentEvent, AgentEventKind, AgentMessage, ContentBlock, ModelStreamEvent, QueueMode,
-    QueuedAgentMessage, ToolApprovalResolution,
-};
+use noloong_agent_core::{AgentMessage, QueueMode, QueuedAgentMessage, ToolApprovalResolution};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -627,12 +624,12 @@ impl InteractionControlHandler {
     ) -> Result<SubscriptionResult, InteractionError> {
         let registered = self.session(&session_id).await?;
         let subscription_id = self.next_subscription_id();
-        let projector = Arc::new(Mutex::new(DisplayProjector {
+        let projector = Arc::new(Mutex::new(DisplayProjector::new(
             session_id,
-            subscription_id: subscription_id.clone(),
+            subscription_id.clone(),
             ux,
             notifier,
-        }));
+        )));
         let listener_projector = Arc::clone(&projector);
         let listener_id = registered.agent().subscribe(move |event| {
             let listener_projector = Arc::clone(&listener_projector);
@@ -782,101 +779,6 @@ fn subagent_result_observation_message(
     message
 }
 
-struct DisplayProjector {
-    session_id: String,
-    subscription_id: String,
-    ux: InteractionUxCapabilities,
-    notifier: InteractionNotifier,
-}
-
-impl DisplayProjector {
-    fn handle(&mut self, event: AgentEvent) {
-        for display_event in self.project(event) {
-            let _ = self.notifier.notify(
-                notification::DISPLAY_EVENT,
-                &InteractionDisplayNotification {
-                    session_id: self.session_id.clone(),
-                    subscription_id: self.subscription_id.clone(),
-                    event: display_event,
-                },
-            );
-        }
-    }
-
-    fn project(&mut self, event: AgentEvent) -> Vec<DisplayEvent> {
-        match event.kind {
-            AgentEventKind::RunStarted => vec![DisplayEvent::RunStarted {
-                run_id: event.run_id,
-            }],
-            AgentEventKind::RunCompleted => vec![DisplayEvent::RunCompleted {
-                run_id: event.run_id,
-            }],
-            AgentEventKind::RunAborted => vec![DisplayEvent::RunFailed {
-                run_id: event.run_id,
-                error: "run aborted".into(),
-            }],
-            AgentEventKind::RunFailed { error } => vec![DisplayEvent::RunFailed {
-                run_id: event.run_id,
-                error,
-            }],
-            AgentEventKind::RunPaused { reason } => vec![DisplayEvent::RunPaused {
-                run_id: event.run_id,
-                reason: serde_json::to_value(reason).unwrap_or(Value::Null),
-            }],
-            AgentEventKind::ModelStreamEvent {
-                event: ModelStreamEvent::TextDelta { text },
-                ..
-            } => {
-                if self.ux.stream_text {
-                    vec![DisplayEvent::AssistantMessageDelta {
-                        run_id: event.run_id.clone(),
-                        display_message_id: display_message_id(&event.run_id),
-                        text: truncate_text_for_ux(&text, &self.ux).0,
-                    }]
-                } else {
-                    Vec::new()
-                }
-            }
-            AgentEventKind::EffectCommitted {
-                effect: noloong_agent_core::AgentEffect::AppendMessage { message },
-            } if matches!(message.role, noloong_agent_core::MessageRole::Assistant) => {
-                let (message, truncated) = truncate_message_for_ux(message, &self.ux);
-                vec![DisplayEvent::AssistantMessageFinal {
-                    run_id: event.run_id.clone(),
-                    display_message_id: display_message_id(&event.run_id),
-                    message,
-                    truncated,
-                }]
-            }
-            AgentEventKind::ToolExecutionStarted {
-                tool_call_id,
-                tool_name,
-            } => vec![DisplayEvent::ToolStarted {
-                tool_call_id,
-                tool_name,
-            }],
-            AgentEventKind::ToolExecutionUpdate {
-                tool_call_id,
-                update,
-            } => vec![DisplayEvent::ToolUpdated {
-                tool_call_id,
-                update,
-            }],
-            AgentEventKind::ToolExecutionCompleted {
-                tool_call_id,
-                output,
-            } => vec![DisplayEvent::ToolCompleted {
-                tool_call_id,
-                output,
-            }],
-            AgentEventKind::ToolApprovalRequested { approval } => {
-                vec![DisplayEvent::ApprovalRequested { approval }]
-            }
-            _ => Vec::new(),
-        }
-    }
-}
-
 fn queue_messages(
     agent: &noloong_agent_core::Agent,
     queue: InteractionQueueKind,
@@ -917,58 +819,6 @@ fn set_queue_mode(agent: &noloong_agent_core::Agent, queue: InteractionQueueKind
         InteractionQueueKind::Steering => agent.set_steering_mode(mode),
         InteractionQueueKind::FollowUp => agent.set_follow_up_mode(mode),
     }
-}
-
-fn truncate_message_for_ux(
-    mut message: AgentMessage,
-    ux: &InteractionUxCapabilities,
-) -> (AgentMessage, bool) {
-    let Some(max_bytes) = ux.max_message_bytes else {
-        return (message, false);
-    };
-    let mut remaining = max_bytes;
-    let mut truncated = false;
-    for block in &mut message.content {
-        if let ContentBlock::Text { text } = block {
-            let (next, block_truncated) = truncate_text_edges(text, remaining);
-            *text = next;
-            truncated |= block_truncated;
-            remaining = remaining.saturating_sub(text.len());
-        }
-    }
-    (message, truncated)
-}
-
-fn truncate_text_for_ux(text: &str, ux: &InteractionUxCapabilities) -> (String, bool) {
-    ux.max_message_bytes
-        .map(|max_bytes| truncate_text_edges(text, max_bytes))
-        .unwrap_or_else(|| (text.into(), false))
-}
-
-fn truncate_text_edges(text: &str, max_bytes: usize) -> (String, bool) {
-    if text.len() <= max_bytes {
-        return (text.into(), false);
-    }
-    const MARKER: &str = "\n...[truncated]...\n";
-    if max_bytes <= MARKER.len() + 2 {
-        return (text::prefix_to_bytes(text, max_bytes), true);
-    }
-    let content_bytes = max_bytes - MARKER.len();
-    let head_bytes = content_bytes / 2;
-    let tail_bytes = content_bytes - head_bytes;
-    (
-        format!(
-            "{}{}{}",
-            text::prefix_to_bytes(text, head_bytes),
-            MARKER,
-            text::suffix_to_bytes(text, tail_bytes)
-        ),
-        true,
-    )
-}
-
-fn display_message_id(run_id: &str) -> String {
-    format!("{run_id}:assistant")
 }
 
 fn parse_params<T>(params: Value) -> Result<T, InteractionError>

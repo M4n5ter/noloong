@@ -81,6 +81,7 @@ pub enum AppTextKey {
     ChatDisabled,
     ChatConnecting,
     ChatConnected,
+    Thinking,
     ToolsPlaceholder,
     ConfigPath,
     JsoncShortcutHint,
@@ -200,6 +201,7 @@ impl AppTextKey {
         Self::ChatDisabled,
         Self::ChatConnecting,
         Self::ChatConnected,
+        Self::Thinking,
         Self::ToolsPlaceholder,
         Self::ConfigPath,
         Self::JsoncShortcutHint,
@@ -252,6 +254,15 @@ impl AppI18nCatalog {
         match self.locale {
             Locale::Zh => zh_text(key),
             Locale::En => en_text(key),
+        }
+    }
+
+    pub fn thought_elapsed(self, elapsed_ms: u64) -> String {
+        let seconds = ((elapsed_ms as f64) / 1000.0).round().max(1.0) as u64;
+        match self.locale {
+            Locale::Zh => format!("思考了 {seconds} 秒"),
+            Locale::En if seconds == 1 => "Thought for 1 second".into(),
+            Locale::En => format!("Thought for {seconds} seconds"),
         }
     }
 }
@@ -337,6 +348,7 @@ fn zh_text(key: AppTextKey) -> &'static str {
         AppTextKey::ChatDisabled => "发送暂不可用",
         AppTextKey::ChatConnecting => "正在连接",
         AppTextKey::ChatConnected => "已连接",
+        AppTextKey::Thinking => "正在思考",
         AppTextKey::ToolsPlaceholder => "工具状态将在接入 interaction 后显示。",
         AppTextKey::ConfigPath => "配置文件",
         AppTextKey::JsoncShortcutHint => "按 ⌘⇧J 打开完整配置编辑器。",
@@ -476,6 +488,7 @@ fn en_text(key: AppTextKey) -> &'static str {
         AppTextKey::ChatDisabled => "Sending is not available yet",
         AppTextKey::ChatConnecting => "Connecting",
         AppTextKey::ChatConnected => "Connected",
+        AppTextKey::Thinking => "Thinking",
         AppTextKey::ToolsPlaceholder => "Tool status will appear after interaction support lands.",
         AppTextKey::ConfigPath => "Config file",
         AppTextKey::JsoncShortcutHint => "Press ⌘⇧J to open the full configuration editor.",

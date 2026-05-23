@@ -109,6 +109,7 @@ impl ChatSessionStore {
                         role: ChatTranscriptRole::Assistant,
                         text: streaming.text(),
                         streaming: Some(streaming),
+                        thought: None,
                     });
                 }
             }
@@ -129,13 +130,43 @@ impl ChatSessionStore {
                     item.role = ChatTranscriptRole::Assistant;
                     item.text = text;
                     item.streaming = None;
+                    item.thought = None;
                 } else {
                     self.transcript.push(ChatTranscriptItem {
                         message_id: message.id,
                         role: ChatTranscriptRole::Assistant,
                         text,
                         streaming: None,
+                        thought: None,
                     });
+                }
+            }
+            AppDisplayEvent::ThoughtStarted { thought_id, .. } => {
+                self.upsert_thought(&thought_id);
+            }
+            AppDisplayEvent::ThoughtDelta {
+                thought_id,
+                kind,
+                text,
+                ..
+            } => {
+                let item = self.upsert_thought(&thought_id);
+                if let Some(thought) = item.thought.as_mut() {
+                    thought.push_delta(&kind, &text);
+                    item.text = thought.active_text();
+                }
+            }
+            AppDisplayEvent::ThoughtCompleted {
+                thought_id,
+                elapsed_ms,
+                ..
+            } => {
+                let item = self.upsert_thought(&thought_id);
+                if let Some(thought) = item.thought.as_mut() {
+                    thought.completed = true;
+                    thought.elapsed_ms = Some(elapsed_ms);
+                    thought.expanded = false;
+                    item.text = thought.completed_text();
                 }
             }
             AppDisplayEvent::RunStarted { .. }
@@ -143,6 +174,41 @@ impl ChatSessionStore {
             | AppDisplayEvent::RunFailed { .. }
             | AppDisplayEvent::RunPaused { .. } => {}
         }
+    }
+
+    pub fn toggle_thought_expanded(&mut self, thought_id: &str) -> bool {
+        let Some(item) = self
+            .transcript
+            .iter_mut()
+            .find(|item| item.message_id == thought_id)
+        else {
+            return false;
+        };
+        let Some(thought) = item.thought.as_mut() else {
+            return false;
+        };
+        thought.expanded = !thought.expanded;
+        true
+    }
+
+    fn upsert_thought(&mut self, thought_id: &str) -> &mut ChatTranscriptItem {
+        if let Some(index) = self
+            .transcript
+            .iter()
+            .position(|item| item.message_id == thought_id)
+        {
+            return &mut self.transcript[index];
+        }
+        self.transcript.push(ChatTranscriptItem {
+            message_id: thought_id.into(),
+            role: ChatTranscriptRole::Thought,
+            text: ChatThought::default().active_text(),
+            streaming: None,
+            thought: Some(ChatThought::default()),
+        });
+        self.transcript
+            .last_mut()
+            .expect("thought item was just inserted")
     }
 
     fn recover_current_transcript(&mut self, descriptors: &[AppInteractionSessionDescriptor]) {
@@ -173,6 +239,7 @@ impl ChatSessionStore {
                     role,
                     text,
                     streaming: None,
+                    thought: None,
                 })
             })
             .collect();
@@ -211,12 +278,57 @@ pub struct ChatTranscriptItem {
     pub role: ChatTranscriptRole,
     pub text: String,
     pub streaming: Option<StreamingText>,
+    pub thought: Option<ChatThought>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatTranscriptRole {
     User,
     Assistant,
+    Thought,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChatThought {
+    pub summary: String,
+    pub raw: String,
+    pub completed: bool,
+    pub elapsed_ms: Option<u64>,
+    pub expanded: bool,
+}
+
+impl ChatThought {
+    fn push_delta(&mut self, kind: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match kind {
+            "summary" => self.summary.push_str(text),
+            "raw" => self.raw.push_str(text),
+            _ if self.summary.is_empty() => self.raw.push_str(text),
+            _ => {}
+        }
+    }
+
+    fn active_text(&self) -> String {
+        if !self.summary.is_empty() {
+            self.summary.clone()
+        } else if !self.raw.is_empty() {
+            self.raw.clone()
+        } else {
+            "Thinking...".into()
+        }
+    }
+
+    fn completed_text(&self) -> String {
+        let elapsed_ms = self.elapsed_ms.unwrap_or_default();
+        let seconds = ((elapsed_ms as f64) / 1000.0).round().max(1.0) as u64;
+        if seconds == 1 {
+            "Thought for 1 second".into()
+        } else {
+            format!("Thought for {seconds} seconds")
+        }
+    }
 }
 
 fn text_from_message(message: &AppMessage) -> Option<String> {
@@ -322,6 +434,58 @@ mod tests {
             ChatComposerAction::Submit("hello".into())
         );
         assert!(!composer.can_send());
+    }
+
+    #[test]
+    fn thought_summary_takes_priority_over_raw_and_completion_collapses() {
+        let mut store = ChatSessionStore::default();
+        store.refresh(vec![session_descriptor(
+            "session-1",
+            AppInteractionSessionStatus::Running,
+            Vec::new(),
+        )]);
+
+        store.apply_display_event(AppDisplayEvent::ThoughtStarted {
+            run_id: "run-1".into(),
+            thought_id: "run-1:thought".into(),
+        });
+        store.apply_display_event(AppDisplayEvent::ThoughtDelta {
+            run_id: "run-1".into(),
+            thought_id: "run-1:thought".into(),
+            kind: "raw".into(),
+            text: "raw detail".into(),
+        });
+        store.apply_display_event(AppDisplayEvent::ThoughtDelta {
+            run_id: "run-1".into(),
+            thought_id: "run-1:thought".into(),
+            kind: "summary".into(),
+            text: "summary".into(),
+        });
+
+        assert_eq!(store.transcript().len(), 1);
+        let item = &store.transcript()[0];
+        assert_eq!(item.role, ChatTranscriptRole::Thought);
+        assert_eq!(item.text, "summary");
+        let thought = item.thought.as_ref().expect("thought state");
+        assert_eq!(thought.summary, "summary");
+        assert_eq!(thought.raw, "raw detail");
+        assert!(!thought.completed);
+
+        store.apply_display_event(AppDisplayEvent::ThoughtCompleted {
+            run_id: "run-1".into(),
+            thought_id: "run-1:thought".into(),
+            elapsed_ms: 2_000,
+        });
+
+        let item = &store.transcript()[0];
+        assert_eq!(item.text, "Thought for 2 seconds");
+        let thought = item.thought.as_ref().expect("thought state");
+        assert!(thought.completed);
+        assert_eq!(thought.elapsed_ms, Some(2_000));
+        assert!(!thought.expanded);
+
+        assert!(store.toggle_thought_expanded("run-1:thought"));
+        assert!(store.transcript()[0].thought.as_ref().unwrap().expanded);
     }
 
     fn session_descriptor(

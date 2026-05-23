@@ -229,6 +229,21 @@ pub enum AppDisplayEvent {
         run_id: String,
         reason: Value,
     },
+    ThoughtStarted {
+        run_id: String,
+        thought_id: String,
+    },
+    ThoughtDelta {
+        run_id: String,
+        thought_id: String,
+        kind: String,
+        text: String,
+    },
+    ThoughtCompleted {
+        run_id: String,
+        thought_id: String,
+        elapsed_ms: u64,
+    },
     AssistantMessageDelta {
         run_id: String,
         display_message_id: String,
@@ -578,6 +593,32 @@ mod tests {
                 run_id: "run-1".into(),
                 display_message_id: "run-1:assistant".into(),
                 text: "hello".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn display_notification_decodes_thought_delta() {
+        let notification = serde_json::from_value::<AppInteractionDisplayNotification>(json!({
+            "sessionId": "session-1",
+            "subscriptionId": "subscription-1",
+            "event": {
+                "type": "thought_delta",
+                "runId": "run-1",
+                "thoughtId": "run-1:thought",
+                "kind": "summary",
+                "text": "summary"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            notification.event,
+            AppDisplayEvent::ThoughtDelta {
+                run_id: "run-1".into(),
+                thought_id: "run-1:thought".into(),
+                kind: "summary".into(),
+                text: "summary".into(),
             }
         );
     }

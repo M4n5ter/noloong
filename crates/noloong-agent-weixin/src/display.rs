@@ -86,6 +86,9 @@ pub async fn deliver_display_event(
         DisplayEvent::ToolStarted { .. }
         | DisplayEvent::ToolUpdated { .. }
         | DisplayEvent::ToolCompleted { .. }
+        | DisplayEvent::ThoughtStarted { .. }
+        | DisplayEvent::ThoughtDelta { .. }
+        | DisplayEvent::ThoughtCompleted { .. }
         | DisplayEvent::RawEvent { .. } => {}
     }
     Ok(())

@@ -301,6 +301,21 @@ pub enum DisplayEvent {
         run_id: String,
         reason: Value,
     },
+    ThoughtStarted {
+        run_id: String,
+        thought_id: String,
+    },
+    ThoughtDelta {
+        run_id: String,
+        thought_id: String,
+        kind: String,
+        text: String,
+    },
+    ThoughtCompleted {
+        run_id: String,
+        thought_id: String,
+        elapsed_ms: u64,
+    },
     AssistantMessageDelta {
         run_id: String,
         display_message_id: String,

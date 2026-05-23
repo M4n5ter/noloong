@@ -146,4 +146,8 @@ impl AppViewModel {
     pub fn chat_transcript(&self) -> &[ChatTranscriptItem] {
         self.chat.transcript()
     }
+
+    pub fn toggle_thought_expanded(&mut self, thought_id: &str) -> bool {
+        self.chat.toggle_thought_expanded(thought_id)
+    }
 }

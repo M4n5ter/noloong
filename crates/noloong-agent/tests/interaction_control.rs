@@ -11,7 +11,8 @@ use noloong_agent::{
 };
 use noloong_agent_core::{
     AgentMessage, AgentRuntime, AgentState, BoxFuture, CancellationToken, ModelProvider,
-    ModelRequest, ModelStreamEvent, ModelStreamSink, QueueMode, RunStatus, StopReason, ToolCall,
+    ModelRequest, ModelStreamEvent, ModelStreamSink, QueueMode, RunStatus, StopReason,
+    ThinkingDelta, ToolCall,
 };
 use serde_json::{Map, Value, json};
 use std::{
@@ -268,6 +269,72 @@ async fn interaction_control_display_can_be_final_only_and_bounded() {
             .len()
             <= 30
     );
+}
+
+#[tokio::test]
+async fn interaction_control_projects_thinking_stream_as_display_thought_events() {
+    let handler = InteractionControlHandler::new(
+        AgentSessionRegistry::new(model_profile("thinking", Arc::new(ThinkingModel))).unwrap(),
+        InteractionCapabilityPolicy::allow_all(),
+    );
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(
+                1,
+                "initialize",
+                json!({
+                    "name": "thinking-display-client",
+                    "requestedAuthority": ["agent.run"],
+                    "requestedUx": {
+                        "displayEvents": true,
+                        "streamText": true
+                    }
+                }),
+            ),
+            rpc(2, "session/create", json!({"sessionId": "root"})),
+            rpc(
+                3,
+                "display/subscribe",
+                json!({
+                    "sessionId": "root",
+                    "ux": {"displayEvents": true, "streamText": true}
+                }),
+            ),
+            rpc(
+                4,
+                "agent/prompt",
+                json!({
+                    "sessionId": "root",
+                    "input": {"type": "text", "text": "think"}
+                }),
+            ),
+            rpc(5, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    let display_events = messages
+        .iter()
+        .filter(|message| message["method"] == notification::DISPLAY_EVENT)
+        .map(|message| &message["params"]["event"])
+        .collect::<Vec<_>>();
+    let started = display_events
+        .iter()
+        .find(|event| event["type"] == "thought_started")
+        .expect("thought started display event");
+    let run_id = started["runId"].as_str().expect("thought has run id");
+    assert_eq!(started["thoughtId"], format!("{run_id}:thought"));
+    assert!(display_events.iter().any(|event| {
+        event["type"] == "thought_delta" && event["kind"] == "summary" && event["text"] == "summary"
+    }));
+    assert!(display_events.iter().any(|event| {
+        event["type"] == "thought_delta" && event["kind"] == "raw" && event["text"] == "raw detail"
+    }));
+    assert!(display_events.iter().any(|event| {
+        event["type"] == "thought_completed" && event["elapsedMs"].as_u64().is_some()
+    }));
 }
 
 #[tokio::test]
@@ -1583,6 +1650,43 @@ impl ModelProvider for TextModel {
             let events = vec![
                 ModelStreamEvent::Started {
                     stream_id: "test-stream".into(),
+                },
+                ModelStreamEvent::TextDelta { text: "ok".into() },
+                ModelStreamEvent::Finished {
+                    stop_reason: StopReason::Stop,
+                },
+            ];
+            for event in &events {
+                stream(event.clone()).await?;
+            }
+            Ok(events)
+        })
+    }
+}
+
+struct ThinkingModel;
+
+impl ModelProvider for ThinkingModel {
+    fn id(&self) -> &str {
+        "thinking"
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        stream: ModelStreamSink,
+        _cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Vec<ModelStreamEvent>> {
+        Box::pin(async move {
+            let events = vec![
+                ModelStreamEvent::Started {
+                    stream_id: "thinking-stream".into(),
+                },
+                ModelStreamEvent::ThinkingDelta {
+                    delta: ThinkingDelta::from_summary("summary"),
+                },
+                ModelStreamEvent::ThinkingDelta {
+                    delta: ThinkingDelta::from_text("raw detail"),
                 },
                 ModelStreamEvent::TextDelta { text: "ok".into() },
                 ModelStreamEvent::Finished {

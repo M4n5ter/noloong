@@ -951,6 +951,9 @@ impl TelegramBridge {
                 None
             }
             DisplayEvent::RunPaused { .. }
+            | DisplayEvent::ThoughtStarted { .. }
+            | DisplayEvent::ThoughtDelta { .. }
+            | DisplayEvent::ThoughtCompleted { .. }
             | DisplayEvent::ToolStarted { .. }
             | DisplayEvent::ToolUpdated { .. }
             | DisplayEvent::ToolCompleted { .. }

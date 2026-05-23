@@ -1,5 +1,5 @@
 use super::NoloongAppView;
-use crate::chat::{ChatComposer, ChatComposerAction, ChatTranscriptRole};
+use crate::chat::{ChatComposer, ChatComposerAction, ChatTranscriptItem, ChatTranscriptRole};
 use crate::{
     AppInteractionStatus, AppTextKey, ChatEmptyState,
     interaction::{
@@ -182,7 +182,7 @@ impl NoloongAppView {
                     .flex_col()
                     .justify_between()
                     .gap_5()
-                    .child(self.render_transcript())
+                    .child(self.render_transcript(cx))
                     .child(self.render_composer(cx)),
             )
             .into_any_element()
@@ -252,7 +252,7 @@ impl NoloongAppView {
             .into_any_element()
     }
 
-    fn render_transcript(&self) -> AnyElement {
+    fn render_transcript(&self, cx: &mut Context<Self>) -> AnyElement {
         let now_ms = current_time_ms();
         div()
             .flex()
@@ -261,6 +261,9 @@ impl NoloongAppView {
             .gap_4()
             .overflow_hidden()
             .children(self.model.chat_transcript().iter().map(|item| {
+                if item.role == ChatTranscriptRole::Thought {
+                    return self.render_thought_item(item, cx);
+                }
                 let is_user = item.role == ChatTranscriptRole::User;
                 let content =
                     if let Some(streaming) = &item.streaming {
@@ -305,6 +308,91 @@ impl NoloongAppView {
                     )
                     .into_any_element()
             }))
+            .into_any_element()
+    }
+
+    fn render_thought_item(&self, item: &ChatTranscriptItem, cx: &mut Context<Self>) -> AnyElement {
+        let thought_id = item.message_id.clone();
+        let element_id = SharedString::from(format!("thought-{thought_id}"));
+        let thought = item.thought.as_ref();
+        let is_completed = thought.is_some_and(|thought| thought.completed);
+        let is_expanded = thought.is_some_and(|thought| thought.expanded || !thought.completed);
+        let summary = thought
+            .map(|thought| thought.summary.as_str())
+            .unwrap_or("");
+        let raw = thought.map(|thought| thought.raw.as_str()).unwrap_or("");
+        let body = if !summary.is_empty() { summary } else { raw };
+        let title = thought
+            .and_then(|thought| {
+                thought
+                    .completed
+                    .then(|| {
+                        thought
+                            .elapsed_ms
+                            .map(|elapsed| self.catalog.thought_elapsed(elapsed))
+                    })
+                    .flatten()
+            })
+            .unwrap_or_else(|| self.catalog.text(AppTextKey::Thinking).to_string());
+        div()
+            .flex()
+            .justify_start()
+            .child(
+                div()
+                    .id(element_id)
+                    .max_w(px(680.0))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(0x29384b))
+                    .bg(rgb(0x0d151f))
+                    .px_4()
+                    .py_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if this.model.toggle_thought_expanded(&thought_id) {
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(if is_completed {
+                                rgb(0x8da2ba)
+                            } else {
+                                rgb(0xaecbff)
+                            })
+                            .child(title),
+                    )
+                    .when(is_expanded && !body.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xb8c4d2))
+                                .child(body.to_string()),
+                        )
+                    })
+                    .when(is_expanded && !raw.is_empty() && summary != raw, |this| {
+                        this.child(
+                            div()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(0x253545))
+                                .bg(rgb(0x111b26))
+                                .px_3()
+                                .py_2()
+                                .text_xs()
+                                .text_color(rgb(0x7f91a7))
+                                .child(raw.to_string()),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 

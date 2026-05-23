@@ -256,6 +256,9 @@ pub async fn deliver_display_event_with_reply(
         DisplayEvent::ToolUpdated { .. }
         | DisplayEvent::ToolStarted { .. }
         | DisplayEvent::ToolCompleted { .. }
+        | DisplayEvent::ThoughtStarted { .. }
+        | DisplayEvent::ThoughtDelta { .. }
+        | DisplayEvent::ThoughtCompleted { .. }
         | DisplayEvent::RawEvent { .. } => {}
     }
     Ok(cleanup)

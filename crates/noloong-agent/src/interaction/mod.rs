@@ -2,6 +2,7 @@ mod automation;
 #[cfg(feature = "interaction-client")]
 mod client;
 mod control;
+mod display_projector;
 mod error;
 mod goal;
 #[cfg(feature = "interaction-http")]

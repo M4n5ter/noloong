@@ -421,6 +421,40 @@ mod tests {
     }
 
     #[test]
+    fn display_thought_events_round_trip_reasoning_summary_and_completion() {
+        let delta = serde_json::from_value::<DisplayEvent>(json!({
+            "type": "thought_delta",
+            "runId": "run-1",
+            "thoughtId": "run-1:thought",
+            "kind": "summary",
+            "text": "checked the files"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(delta).unwrap(),
+            json!({
+                "type": "thought_delta",
+                "runId": "run-1",
+                "thoughtId": "run-1:thought",
+                "kind": "summary",
+                "text": "checked the files"
+            })
+        );
+
+        let completed = serde_json::from_value::<DisplayEvent>(json!({
+            "type": "thought_completed",
+            "runId": "run-1",
+            "thoughtId": "run-1:thought",
+            "elapsedMs": 2_000
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(completed).unwrap()["elapsedMs"],
+            json!(2_000)
+        );
+    }
+
+    #[test]
     fn initialize_result_round_trips() {
         let result = InteractionInitializeResult {
             server: InteractionServerInfo {
