@@ -10,6 +10,7 @@ use std::{
 
 type BuildResult<T> = Result<T, Box<dyn std::error::Error>>;
 const SOURCE_ARCHIVE_ZSTD_LEVEL: i32 = 3;
+const EMBED_SOURCE_ARCHIVE_ENV: &str = "NOLOONG_EMBED_SOURCE_ARCHIVE";
 
 #[derive(Debug)]
 struct SourceFile {
@@ -25,6 +26,7 @@ struct SourceArchive {
     compressed_bytes: Vec<u8>,
     uncompressed_bytes: usize,
     sha256: String,
+    embedded: bool,
 }
 
 fn main() {
@@ -36,11 +38,24 @@ fn main() {
 fn run() -> BuildResult<()> {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let files = collect_source_files(&root)?;
+    let embed_source_archive = should_embed_source_archive();
 
-    emit_rerun_instructions(&root, &files);
+    emit_rerun_instructions(&root, embed_source_archive);
 
-    let source_archive = build_source_archive(&files)?;
+    let files = if embed_source_archive {
+        collect_source_files(&root)?
+    } else {
+        Vec::new()
+    };
+    if embed_source_archive {
+        emit_source_rerun_instructions(&files);
+    }
+
+    let source_archive = if embed_source_archive {
+        build_source_archive(&files)?
+    } else {
+        SourceArchive::placeholder()
+    };
     let manifest = build_manifest(&root, &files, &source_archive)?;
 
     fs::write(
@@ -50,6 +65,23 @@ fn run() -> BuildResult<()> {
     fs::write(out_dir.join("build-info.json"), manifest)?;
 
     Ok(())
+}
+
+fn should_embed_source_archive() -> bool {
+    env::var_os("CARGO_FEATURE_EMBED_SOURCE_ARCHIVE").is_some()
+        || env::var("PROFILE").is_ok_and(|profile| profile == "release")
+        || env_flag(EMBED_SOURCE_ARCHIVE_ENV)
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn collect_source_files(root: &Path) -> BuildResult<Vec<SourceFile>> {
@@ -158,7 +190,20 @@ fn build_source_archive(files: &[SourceFile]) -> BuildResult<SourceArchive> {
         compressed_bytes,
         uncompressed_bytes,
         sha256,
+        embedded: true,
     })
+}
+
+impl SourceArchive {
+    fn placeholder() -> Self {
+        let compressed_bytes = Vec::new();
+        Self {
+            sha256: hash_bytes(&compressed_bytes),
+            compressed_bytes,
+            uncompressed_bytes: 0,
+            embedded: false,
+        }
+    }
 }
 
 fn build_manifest(
@@ -194,6 +239,7 @@ fn build_manifest(
         },
         "sourceArchive": {
             "format": "tar.zst",
+            "embedded": source_archive.embedded,
             "sha256": source_archive.sha256,
             "compressedBytes": source_archive.compressed_bytes.len(),
             "uncompressedBytes": source_archive.uncompressed_bytes,
@@ -310,12 +356,19 @@ fn command_output<const N: usize>(command: String, args: [&str; N]) -> Option<St
     Some(stdout.trim().to_owned())
 }
 
-fn emit_rerun_instructions(root: &Path, files: &[SourceFile]) {
+fn emit_rerun_instructions(root: &Path, embed_source_archive: bool) {
+    println!("cargo:rerun-if-env-changed={EMBED_SOURCE_ARCHIVE_ENV}");
     println!("cargo:rerun-if-changed=.gitignore");
     println!("cargo:rerun-if-changed=.git/HEAD");
     if let Some(reference) = current_git_ref(root) {
         println!("cargo:rerun-if-changed={}", reference.display());
     }
+    if !embed_source_archive {
+        println!("cargo:rerun-if-changed=build.rs");
+    }
+}
+
+fn emit_source_rerun_instructions(files: &[SourceFile]) {
     for file in files {
         println!("cargo:rerun-if-changed={}", file.path);
     }

@@ -7,14 +7,12 @@ use gpui::{
 use gpui_component::{StyledExt as _, input::Input};
 
 impl NoloongAppView {
-    pub(super) fn render_jsonc_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_jsonc_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .absolute()
-            .right(px(96.0))
-            .top(px(92.0))
-            .bottom(px(72.0))
-            .w(px(440.0))
-            .rounded(px(18.0))
+            .mx_auto()
+            .size_full()
+            .max_w(px(980.0))
+            .rounded(px(20.0))
             .border_1()
             .border_color(if self.model.jsonc_error().is_some() {
                 rgb(0x8b4f52)
@@ -28,7 +26,7 @@ impl NoloongAppView {
             .overflow_hidden()
             .child(self.jsonc_header(cx))
             .child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().overflow_hidden().child(
                     Input::new(&self.jsonc_input)
                         .appearance(false)
                         .size_full()
@@ -47,15 +45,27 @@ impl NoloongAppView {
             .flex()
             .items_center()
             .justify_between()
-            .px_5()
-            .py_4()
+            .px_6()
+            .py_5()
             .border_b_1()
             .border_color(rgb(0x26303a))
             .child(
                 div()
-                    .font_semibold()
-                    .text_color(rgb(0xe6edf3))
-                    .child(self.catalog.text(AppTextKey::JsoncEditor)),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_semibold()
+                            .text_color(rgb(0xe6edf3))
+                            .child(self.catalog.text(AppTextKey::JsoncEditor)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x84909d))
+                            .child(self.catalog.text(AppTextKey::JsoncEditorSubtitle)),
+                    ),
             )
             .child(
                 div()
@@ -77,7 +87,7 @@ impl NoloongAppView {
                             match this.model.format_jsonc() {
                                 Ok(()) => {
                                     this.sync_jsonc_input(window, cx);
-                                    this.sync_profile_inputs(window, cx);
+                                    this.sync_settings_inputs(window, cx);
                                 }
                                 Err(error) => {
                                     this.show_toast(
@@ -95,9 +105,9 @@ impl NoloongAppView {
                     ))
                     .child(self.header_link(
                         "jsonc-close",
-                        self.catalog.text(AppTextKey::Close),
+                        self.catalog.text(AppTextKey::BackToSettings),
                         cx.listener(|this, _, _window, cx| {
-                            this.model.jsonc_open = false;
+                            this.model.close_jsonc();
                             cx.notify();
                         }),
                     )),

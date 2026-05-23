@@ -1,14 +1,18 @@
 use crate::config::{
-    AnthropicProviderReasoningConfig, AnthropicProviderThinkingMode, BuiltInProviderConfig,
-    ChatCompletionsReasoningConfig, ChatGptAuthConfig, CliConfigError, EnvHeaderConfig,
-    HostProfileConfig, ProfileCompactionConfig, ProfileEventStoreConfig, RegistryStoreConfig,
-    ResponsesProviderReasoningConfig, RuntimeProfileConfig, ensure_sqlite_database_parent,
-    resolve_chatgpt_token_file, resolve_state_database_url,
-    validate_responses_reasoning_state_mode,
+    AgentPluginDeclaration as ConfigAgentPluginDeclaration, AnthropicProviderReasoningConfig,
+    AnthropicProviderReasoningEffort, AnthropicProviderThinkingMode, BuiltInProviderConfig,
+    ChatCompletionsReasoningConfig, ChatGptAuthConfig, CliConfigError,
+    ContextCompactionMode as ConfigContextCompactionMode, EnvHeaderConfig, HostProfileConfig,
+    ManifestPatch as ConfigManifestPatch, ProfileCompactionConfig, ProfileEventStoreConfig,
+    RegistryStoreConfig, ResponsesProviderReasoningConfig, ResponsesProviderReasoningEffort,
+    ResponsesProviderReasoningSummary, ResponsesStateMode as ConfigResponsesStateMode,
+    RuntimeProfileConfig, ensure_sqlite_database_parent, resolve_chatgpt_token_file,
+    resolve_state_database_url, validate_responses_reasoning_state_mode,
 };
 use crate::models_dev::ModelsDevRegistry;
 use noloong_agent::{
-    AgentManifest, AgentSession, ManifestPatch, PluginComponent,
+    AgentManifest, AgentPluginDeclaration as RuntimeAgentPluginDeclaration, AgentSession,
+    ManifestPatch as RuntimeManifestPatch, PluginComponent,
     interaction::{
         AgentRuntimeProfile, AgentSessionRegistry, AgentSessionRegistryStore,
         InMemoryAgentSessionRegistryStore, InteractionError, InteractionFuture,
@@ -20,10 +24,12 @@ use noloong_agent::{
 use noloong_agent_core::{
     AgentCoreError, AgentRuntime, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
     BoxFuture, CancellationToken, ChatCompletionsProvider, ChatCompletionsProviderConfig,
-    ContextCompactionConfig, ContextCompactionMode, ContextCompactor, EventStore, HttpAuthContext,
-    HttpAuthHeader, HttpAuthHeaders, HttpAuthProvider, InMemoryEventStore, ModelProvider,
-    ResponsesApiProvider, ResponsesApiProviderConfig, ResponsesReasoningConfig, ResponsesStateMode,
-    SqliteEventStore, SqliteEventStoreConfig,
+    ContextCompactionConfig, ContextCompactionMode as RuntimeContextCompactionMode,
+    ContextCompactor, EventStore, HttpAuthContext, HttpAuthHeader, HttpAuthHeaders,
+    HttpAuthProvider, InMemoryEventStore, ModelProvider, ResponsesApiProvider,
+    ResponsesApiProviderConfig, ResponsesReasoningConfig, ResponsesReasoningEffort,
+    ResponsesReasoningSummary, ResponsesStateMode as RuntimeResponsesStateMode, SqliteEventStore,
+    SqliteEventStoreConfig,
 };
 use noloong_openai::{
     auth::{ChatGptAuthManager, ChatGptTokenStorage, ChatGptTokenStore},
@@ -33,6 +39,7 @@ use opendal::{
     Operator,
     services::{Fs, Memory},
 };
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{env, sync::Arc, time::Duration};
 use thiserror::Error;
@@ -144,25 +151,29 @@ fn manifest_has_enabled_skills(manifest: &AgentManifest) -> bool {
     })
 }
 
-fn default_manifest_patches(config: &RuntimeProfileConfig) -> Vec<ManifestPatch> {
-    let mut patches = config
-        .plugins
-        .iter()
-        .cloned()
-        .map(|plugin| ManifestPatch::RegisterPlugin { plugin })
-        .collect::<Vec<_>>();
-    patches.extend(config.manifest_patches.iter().cloned());
-    patches
+fn default_manifest_patches(
+    config: &RuntimeProfileConfig,
+) -> Result<Vec<RuntimeManifestPatch>, HostBuildError> {
+    let mut patches = Vec::with_capacity(config.plugins.len() + config.manifest_patches.len());
+    for plugin in &config.plugins {
+        patches.push(RuntimeManifestPatch::RegisterPlugin {
+            plugin: runtime_plugin(plugin)?,
+        });
+    }
+    for patch in &config.manifest_patches {
+        patches.push(runtime_manifest_patch(patch)?);
+    }
+    Ok(patches)
 }
 
 fn default_profile_manifest(
     config: &RuntimeProfileConfig,
 ) -> Result<AgentManifest, HostBuildError> {
-    profile_manifest_from_patches(&default_manifest_patches(config))
+    profile_manifest_from_patches(&default_manifest_patches(config)?)
 }
 
 fn profile_manifest_from_patches(
-    patches: &[ManifestPatch],
+    patches: &[RuntimeManifestPatch],
 ) -> Result<AgentManifest, HostBuildError> {
     let mut manifest = AgentManifest::default();
     for patch in patches {
@@ -171,6 +182,33 @@ fn profile_manifest_from_patches(
         })?;
     }
     Ok(manifest)
+}
+
+fn runtime_plugin(
+    plugin: &ConfigAgentPluginDeclaration,
+) -> Result<RuntimeAgentPluginDeclaration, HostBuildError> {
+    convert_config_value(plugin)
+}
+
+fn runtime_manifest_patch(
+    patch: &ConfigManifestPatch,
+) -> Result<RuntimeManifestPatch, HostBuildError> {
+    convert_config_value(patch)
+}
+
+fn convert_config_value<T, U>(value: &T) -> Result<U, HostBuildError>
+where
+    T: Serialize,
+    U: DeserializeOwned,
+{
+    serde_json::from_value(serde_json::to_value(value).map_err(|error| {
+        CliConfigError::ParseConfig(format!("failed to serialize config value: {error}"))
+    })?)
+    .map_err(|error| {
+        HostBuildError::Config(CliConfigError::ParseConfig(format!(
+            "failed to adapt config value to runtime: {error}"
+        )))
+    })
 }
 
 fn resolve_profile_input_limit(
@@ -312,7 +350,7 @@ impl RuntimeProfile {
         default_event_store: Option<Arc<dyn EventStore>>,
         state_database_url: Option<&str>,
     ) -> Result<Self, HostBuildError> {
-        let default_manifest_patches = default_manifest_patches(config);
+        let default_manifest_patches = default_manifest_patches(config)?;
         let validated_manifest = profile_manifest_from_patches(&default_manifest_patches)?;
         let provider = build_provider(&config.profile_id, &config.provider)?;
         let compaction = build_profile_compaction(
@@ -414,7 +452,7 @@ struct ChatGptCompactSource {
     provider_id: String,
     model: String,
     auth_provider: Arc<dyn HttpAuthProvider>,
-    state_mode: ResponsesStateMode,
+    state_mode: RuntimeResponsesStateMode,
 }
 
 fn build_provider(
@@ -472,7 +510,7 @@ fn build_provider(
                 provider_id.clone().unwrap_or_else(|| profile_id.into()),
                 model,
             )
-            .with_state_mode(*state_mode);
+            .with_state_mode(runtime_responses_state_mode(*state_mode));
             if *allow_file_data_url_input {
                 provider = provider.allow_file_data_url_input(true);
             }
@@ -545,7 +583,7 @@ fn build_provider(
                 model,
                 Arc::clone(&auth_provider),
             )
-            .with_state_mode(*state_mode);
+            .with_state_mode(runtime_responses_state_mode(*state_mode));
             if *allow_file_data_url_input {
                 provider_config = provider_config.allow_file_data_url_input(true);
             }
@@ -558,7 +596,7 @@ fn build_provider(
                     provider_id,
                     model: model.clone(),
                     auth_provider,
-                    state_mode: *state_mode,
+                    state_mode: runtime_responses_state_mode(*state_mode),
                 }),
             })
         }
@@ -607,7 +645,7 @@ fn chat_completions_reasoning_extra_body(
 fn apply_responses_reasoning(
     mut provider: ResponsesApiProviderConfig,
     reasoning: Option<&ResponsesProviderReasoningConfig>,
-    state_mode: ResponsesStateMode,
+    state_mode: ConfigResponsesStateMode,
 ) -> Result<ResponsesApiProviderConfig, HostBuildError> {
     let Some(reasoning) = reasoning else {
         return Ok(provider);
@@ -632,10 +670,10 @@ fn responses_reasoning_config(
     }
     let mut config = ResponsesReasoningConfig::new();
     if let Some(effort) = reasoning.effort {
-        config = config.effort(effort.into());
+        config = config.effort(runtime_responses_reasoning_effort(effort));
     }
     if let Some(summary) = reasoning.summary {
-        config = config.summary(summary.into());
+        config = config.summary(runtime_responses_reasoning_summary(summary));
     }
     Some(config)
 }
@@ -648,12 +686,65 @@ fn apply_anthropic_reasoning(
         return provider;
     };
     if let Some(effort) = reasoning.effort {
-        provider = provider.output_effort(effort.into());
+        provider = provider.output_effort(runtime_anthropic_effort(effort));
     }
     match reasoning.thinking {
         Some(AnthropicProviderThinkingMode::Adaptive) => provider.adaptive_thinking(),
         Some(AnthropicProviderThinkingMode::Disabled) => provider.disable_thinking(),
         Some(AnthropicProviderThinkingMode::Omit) | None => provider,
+    }
+}
+
+fn runtime_responses_state_mode(mode: ConfigResponsesStateMode) -> RuntimeResponsesStateMode {
+    match mode {
+        ConfigResponsesStateMode::Stateless => RuntimeResponsesStateMode::Stateless,
+        ConfigResponsesStateMode::Stateful => RuntimeResponsesStateMode::Stateful,
+    }
+}
+
+fn runtime_context_compaction_mode(
+    mode: ConfigContextCompactionMode,
+) -> RuntimeContextCompactionMode {
+    match mode {
+        ConfigContextCompactionMode::PersistentState => {
+            RuntimeContextCompactionMode::PersistentState
+        }
+        ConfigContextCompactionMode::RequestOnly => RuntimeContextCompactionMode::RequestOnly,
+    }
+}
+
+fn runtime_responses_reasoning_effort(
+    effort: ResponsesProviderReasoningEffort,
+) -> ResponsesReasoningEffort {
+    match effort {
+        ResponsesProviderReasoningEffort::Minimal => ResponsesReasoningEffort::Minimal,
+        ResponsesProviderReasoningEffort::Low => ResponsesReasoningEffort::Low,
+        ResponsesProviderReasoningEffort::Medium => ResponsesReasoningEffort::Medium,
+        ResponsesProviderReasoningEffort::High => ResponsesReasoningEffort::High,
+        ResponsesProviderReasoningEffort::XHigh => ResponsesReasoningEffort::XHigh,
+    }
+}
+
+fn runtime_responses_reasoning_summary(
+    summary: ResponsesProviderReasoningSummary,
+) -> ResponsesReasoningSummary {
+    match summary {
+        ResponsesProviderReasoningSummary::Auto => ResponsesReasoningSummary::Auto,
+        ResponsesProviderReasoningSummary::Concise => ResponsesReasoningSummary::Concise,
+        ResponsesProviderReasoningSummary::Detailed => ResponsesReasoningSummary::Detailed,
+        ResponsesProviderReasoningSummary::None => ResponsesReasoningSummary::None,
+    }
+}
+
+fn runtime_anthropic_effort(
+    effort: AnthropicProviderReasoningEffort,
+) -> noloong_agent_core::AnthropicEffort {
+    match effort {
+        AnthropicProviderReasoningEffort::Low => noloong_agent_core::AnthropicEffort::Low,
+        AnthropicProviderReasoningEffort::Medium => noloong_agent_core::AnthropicEffort::Medium,
+        AnthropicProviderReasoningEffort::High => noloong_agent_core::AnthropicEffort::High,
+        AnthropicProviderReasoningEffort::XHigh => noloong_agent_core::AnthropicEffort::XHigh,
+        AnthropicProviderReasoningEffort::Max => noloong_agent_core::AnthropicEffort::Max,
     }
 }
 
@@ -741,7 +832,7 @@ struct OpenAiResponsesCompactionOptions {
     trigger_ratio: Option<f64>,
     summary_budget_tokens: Option<u64>,
     keep_recent_tokens: Option<u64>,
-    mode: Option<ContextCompactionMode>,
+    mode: Option<ConfigContextCompactionMode>,
     request_timeout_secs: Option<u64>,
 }
 
@@ -772,7 +863,12 @@ fn openai_responses_runtime_compaction(
         context_config = context_config.keep_recent_tokens(keep_recent_tokens);
     }
     let context_config = context_config
-        .mode(options.mode.unwrap_or_default())
+        .mode(
+            options
+                .mode
+                .map(runtime_context_compaction_mode)
+                .unwrap_or_default(),
+        )
         .metadata("source", json!("openai_responses"))
         .metadata("profileId", json!(profile_id))
         .metadata("providerId", json!(source.provider_id.clone()))
@@ -888,16 +984,18 @@ mod tests {
         responses_reasoning_config,
     };
     use crate::config::{
-        AnthropicProviderReasoningConfig, AnthropicProviderReasoningEffort,
-        AnthropicProviderThinkingMode, BuiltInProviderConfig, ChatCompletionsReasoningConfig,
-        ChatCompletionsReasoningEffort, HostProfileConfig, ProfileEventStoreConfig,
+        AgentPluginDeclaration as ConfigAgentPluginDeclaration, AnthropicProviderReasoningConfig,
+        AnthropicProviderReasoningEffort, AnthropicProviderThinkingMode, BuiltInProviderConfig,
+        ChatCompletionsReasoningConfig, ChatCompletionsReasoningEffort, HostProfileConfig,
+        ManifestPatch as ConfigManifestPatch, PluginComponent as ConfigPluginComponent,
+        PluginLoadFailurePolicy as ConfigPluginLoadFailurePolicy, ProfileEventStoreConfig,
         ResponsesProviderReasoningConfig, ResponsesProviderReasoningEffort,
-        ResponsesProviderReasoningSummary, RuntimeProfileConfig,
+        ResponsesProviderReasoningSummary, ResponsesStateMode as ConfigResponsesStateMode,
+        RuntimeProfileConfig, SkillsPluginComponent as ConfigSkillsPluginComponent,
     };
     use crate::models_dev::ModelsDevRegistry;
     use noloong_agent::{
-        AgentManifest, AgentPluginDeclaration, AgentSession, ManifestPatch, PluginComponent,
-        PluginLoadFailurePolicy, SkillsPluginComponent,
+        AgentManifest, AgentSession, ManifestPatch,
         interaction::{AgentRuntimeProfile, AgentSessionCreateRequest},
     };
     use noloong_agent_core::{
@@ -905,8 +1003,7 @@ mod tests {
         AnthropicThinkingConfig, BoxFuture, CancellationToken, ChatCompletionsProviderConfig,
         ContextCompactionMode, EventStore as _, ModelProvider, ModelRequest, ModelStreamEvent,
         ModelStreamSink, ResponsesApiProviderConfig, ResponsesReasoningEffort,
-        ResponsesReasoningSummary, ResponsesStateMode, SqliteEventStore, SqliteEventStoreConfig,
-        StopReason,
+        ResponsesReasoningSummary, SqliteEventStore, SqliteEventStoreConfig, StopReason,
     };
     use std::{
         path::{Path, PathBuf},
@@ -1099,7 +1196,7 @@ mod tests {
                 summary: None,
                 include_encrypted: Some(true),
             }),
-            ResponsesStateMode::Stateless,
+            ConfigResponsesStateMode::Stateless,
         )
         .unwrap();
         let disabled = apply_responses_reasoning(
@@ -1110,7 +1207,7 @@ mod tests {
                 summary: Some(ResponsesProviderReasoningSummary::Detailed),
                 include_encrypted: Some(true),
             }),
-            ResponsesStateMode::Stateless,
+            ConfigResponsesStateMode::Stateless,
         )
         .unwrap();
 
@@ -1130,7 +1227,7 @@ mod tests {
                 summary: None,
                 include_encrypted: Some(false),
             }),
-            ResponsesStateMode::Stateless,
+            ConfigResponsesStateMode::Stateless,
         )
         .expect_err("stateless reasoning must not explicitly disable encrypted replay");
 
@@ -1147,7 +1244,7 @@ mod tests {
                 summary: None,
                 include_encrypted: Some(false),
             }),
-            ResponsesStateMode::Stateful,
+            ConfigResponsesStateMode::Stateful,
         )
         .unwrap();
 
@@ -1428,7 +1525,7 @@ mod tests {
         config.plugins.push(skills_plugin("skills-test", false));
         config
             .manifest_patches
-            .push(ManifestPatch::SetPluginEnabled {
+            .push(ConfigManifestPatch::SetPluginEnabled {
                 plugin_id: "skills-test".into(),
                 enabled: true,
             });
@@ -1610,16 +1707,16 @@ mod tests {
         .unwrap()
     }
 
-    fn skills_plugin(plugin_id: &str, enabled: bool) -> AgentPluginDeclaration {
-        AgentPluginDeclaration {
+    fn skills_plugin(plugin_id: &str, enabled: bool) -> ConfigAgentPluginDeclaration {
+        ConfigAgentPluginDeclaration {
             plugin_id: plugin_id.into(),
             display_name: "Skills Test".into(),
             description: None,
-            components: vec![PluginComponent::Skills(SkillsPluginComponent {
+            components: vec![ConfigPluginComponent::Skills(ConfigSkillsPluginComponent {
                 roots: vec![PathBuf::from("/tmp")],
             })],
             enabled,
-            on_load_failure: PluginLoadFailurePolicy::FailRun,
+            on_load_failure: ConfigPluginLoadFailurePolicy::FailRun,
         }
     }
 

@@ -20,6 +20,7 @@ pub fn build_command() -> Result<String, BuildInfoError> {
 }
 
 pub fn source_paths() -> Result<Vec<String>, BuildInfoError> {
+    ensure_source_archive_embedded()?;
     let mut paths = manifest()?
         .files
         .into_iter()
@@ -31,6 +32,7 @@ pub fn source_paths() -> Result<Vec<String>, BuildInfoError> {
 
 pub fn source_file(path: &str) -> Result<Vec<u8>, BuildInfoError> {
     let requested = validate_requested_path(path)?;
+    ensure_source_archive_embedded()?;
     let mut archive = source_archive()?;
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -45,6 +47,7 @@ pub fn source_file(path: &str) -> Result<Vec<u8>, BuildInfoError> {
 }
 
 pub fn write_archive(path: &Path) -> Result<(), BuildInfoError> {
+    ensure_source_archive_embedded()?;
     if path.is_dir() {
         return Err(BuildInfoError::OutputIsDirectory(path.into()));
     }
@@ -59,6 +62,7 @@ pub fn write_archive(path: &Path) -> Result<(), BuildInfoError> {
 }
 
 pub fn extract_source(output_dir: &Path, force: bool) -> Result<(), BuildInfoError> {
+    ensure_source_archive_embedded()?;
     if output_dir.exists() && !output_dir.is_dir() {
         return Err(BuildInfoError::OutputIsFile(output_dir.into()));
     }
@@ -84,6 +88,14 @@ pub fn extract_source(output_dir: &Path, force: bool) -> Result<(), BuildInfoErr
 fn manifest() -> Result<BuildInfoManifest, BuildInfoError> {
     serde_json::from_str(BUILD_INFO_JSON)
         .map_err(|error| BuildInfoError::ManifestInvalid(error.to_string()))
+}
+
+fn ensure_source_archive_embedded() -> Result<(), BuildInfoError> {
+    if manifest()?.source_archive.embedded {
+        Ok(())
+    } else {
+        Err(BuildInfoError::SourceArchiveUnavailable)
+    }
 }
 
 fn source_archive() -> Result<SourceArchiveReader, BuildInfoError> {
@@ -159,12 +171,18 @@ fn directory_has_entries(path: &Path) -> io::Result<bool> {
 #[serde(rename_all = "camelCase")]
 struct BuildInfoManifest {
     build: BuildManifest,
+    source_archive: SourceArchiveManifest,
     files: Vec<ManifestFile>,
 }
 
 #[derive(Debug, Deserialize)]
 struct BuildManifest {
     command: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceArchiveManifest {
+    embedded: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +194,10 @@ struct ManifestFile {
 pub enum BuildInfoError {
     #[error("build info manifest is invalid: {0}")]
     ManifestInvalid(String),
+    #[error(
+        "source archive is not embedded in this build; rebuild with --release, --features embed-source-archive, or NOLOONG_EMBED_SOURCE_ARCHIVE=1"
+    )]
+    SourceArchiveUnavailable,
     #[error("{label} is invalid: {}", path.display())]
     InvalidPath { label: &'static str, path: PathBuf },
     #[error("source path not found in embedded snapshot: {0}")]
@@ -195,7 +217,7 @@ pub enum BuildInfoError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildInfoError, build_command, extract_source, manifest_json, source_file, source_paths,
+        BuildInfoError, build_command, extract_source, manifest_json, source_file,
         validate_archive_path, write_archive,
     };
     use crate::test_support::{remove_temp_dir, remove_temp_file, temp_dir};
@@ -207,6 +229,10 @@ mod tests {
 
         assert_eq!(value["schemaVersion"], 1);
         assert_eq!(value["sourceArchive"]["format"], "tar.zst");
+        assert_eq!(
+            value["sourceArchive"]["embedded"],
+            source_archive_is_embedded()
+        );
     }
 
     #[test]
@@ -218,7 +244,11 @@ mod tests {
 
     #[test]
     fn build_info_source_paths_include_repository_context() {
-        let paths = source_paths().unwrap();
+        if !source_archive_is_embedded() {
+            return;
+        }
+
+        let paths = super::source_paths().unwrap();
 
         assert!(paths.iter().any(|path| path == "Cargo.toml"));
         assert!(paths.iter().any(|path| path == ".github/workflows/ci.yml"));
@@ -231,7 +261,11 @@ mod tests {
 
     #[test]
     fn build_info_source_paths_exclude_private_and_generated_paths() {
-        let paths = source_paths().unwrap();
+        if !source_archive_is_embedded() {
+            return;
+        }
+
+        let paths = super::source_paths().unwrap();
 
         assert!(
             !paths
@@ -260,6 +294,10 @@ mod tests {
 
     #[test]
     fn build_info_source_file_reads_embedded_file() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let bytes = source_file("Cargo.toml").unwrap();
         let text = String::from_utf8(bytes).unwrap();
 
@@ -278,6 +316,10 @@ mod tests {
 
     #[test]
     fn build_info_source_file_reports_missing_paths() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let error = source_file("missing.txt").unwrap_err();
 
         assert!(matches!(error, BuildInfoError::SourceNotFound(_)));
@@ -295,6 +337,10 @@ mod tests {
 
     #[test]
     fn build_info_extract_rejects_non_empty_directory_without_force() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let dir = temp_dir("build-info-extract-non-empty");
         std::fs::write(dir.join("existing.txt"), "existing").unwrap();
 
@@ -306,6 +352,10 @@ mod tests {
 
     #[test]
     fn build_info_extract_allows_non_empty_directory_with_force() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let dir = temp_dir("build-info-extract-force");
         std::fs::write(dir.join("existing.txt"), "existing").unwrap();
 
@@ -318,6 +368,10 @@ mod tests {
 
     #[test]
     fn build_info_extract_writes_snapshot_files() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let dir = temp_dir("build-info-extract");
 
         extract_source(&dir, false).unwrap();
@@ -329,6 +383,10 @@ mod tests {
 
     #[test]
     fn build_info_write_archive_rejects_directory_output() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let dir = temp_dir("build-info-archive-dir");
 
         let error = write_archive(&dir).unwrap_err();
@@ -339,6 +397,10 @@ mod tests {
 
     #[test]
     fn build_info_write_archive_writes_embedded_archive() {
+        if !source_archive_is_embedded() {
+            return;
+        }
+
         let dir = temp_dir("build-info-archive-output");
         let path = dir.join("source.tar.zst");
 
@@ -348,5 +410,34 @@ mod tests {
         remove_temp_dir(dir);
 
         assert!(metadata.len() > 0);
+    }
+
+    #[test]
+    fn build_info_source_operations_report_unavailable_without_archive() {
+        if source_archive_is_embedded() {
+            return;
+        }
+
+        assert!(matches!(
+            super::source_paths(),
+            Err(BuildInfoError::SourceArchiveUnavailable)
+        ));
+        assert!(matches!(
+            source_file("Cargo.toml"),
+            Err(BuildInfoError::SourceArchiveUnavailable)
+        ));
+        assert!(matches!(
+            write_archive(Path::new("source.tar.zst")),
+            Err(BuildInfoError::SourceArchiveUnavailable)
+        ));
+        assert!(matches!(
+            extract_source(Path::new("source"), false),
+            Err(BuildInfoError::SourceArchiveUnavailable)
+        ));
+    }
+
+    fn source_archive_is_embedded() -> bool {
+        let value: serde_json::Value = serde_json::from_str(manifest_json()).unwrap();
+        value["sourceArchive"]["embedded"].as_bool().unwrap()
     }
 }

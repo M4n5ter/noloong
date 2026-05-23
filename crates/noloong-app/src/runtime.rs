@@ -1,5 +1,8 @@
 use crate::{AppError, AppLaunchOptions, AppViewModel, view::NoloongAppView};
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, point, px, size};
+use crate::{SaveSettings, ToggleJsoncEditor, ValidateSettings};
+use gpui::{
+    App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, point, px, size,
+};
 use gpui_component::{Theme, ThemeMode, TitleBar};
 use gpui_platform::application;
 
@@ -12,6 +15,15 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
     let model = AppViewModel::load(options)?;
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        cx.bind_keys([
+            KeyBinding::new(
+                "cmd-shift-j",
+                ToggleJsoncEditor,
+                Some(crate::APP_KEY_CONTEXT),
+            ),
+            KeyBinding::new("cmd-s", SaveSettings, Some(crate::APP_KEY_CONTEXT)),
+            KeyBinding::new("cmd-enter", ValidateSettings, Some(crate::APP_KEY_CONTEXT)),
+        ]);
         Theme::change(ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1180.0), px(780.0)), cx);
         let mut titlebar = TitleBar::title_bar_options();

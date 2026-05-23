@@ -28,6 +28,7 @@ aes = "0.9"
 base64 = "0.22"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 bytes = "1.11"
+config = { version = "0.15", default-features = false, features = ["json"] }
 ecb = { version = "0.2", features = ["alloc"] }
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.4"
@@ -69,6 +70,27 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 [workspace.lints.rust]
 dead_code = "deny"
 
+[profile.dev]
+debug = 1
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.dev.package]
+clap_derive = { opt-level = 3 }
+enum-iterator-derive = { opt-level = 3 }
+gpui-component-macros = { opt-level = 3 }
+gpui_macros = { opt-level = 3 }
+paste = { opt-level = 3 }
+proc-macro2 = { opt-level = 3 }
+quote = { opt-level = 3 }
+schemars_derive = { opt-level = 3 }
+serde_derive = { opt-level = 3 }
+serde_repr = { opt-level = 3 }
+strum_macros = { opt-level = 3 }
+syn = { opt-level = 3 }
+thiserror-impl = { opt-level = 3 }
+toasty-macros = { opt-level = 3 }
+
 [package]
 name = "noloong"
 version.workspace = true
@@ -76,6 +98,9 @@ edition.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+embed-source-archive = []
 
 [dependencies]
 noloong-agent = { workspace = true, features = ["client-state-sqlite", "interaction-http", "json-schema", "mcp", "openai", "registry-store-object", "registry-store-postgres", "registry-store-sqlite"] }

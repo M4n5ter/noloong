@@ -1,11 +1,22 @@
-use noloong_agent::Locale;
 use noloong_config::{
-    CliConfigError, HostProfileConfig, resolve_profile_config_path,
+    BuiltInProviderConfig, ChatGptAuthConfig, CliConfigError, HostProfileConfig, Locale,
+    ProfileCompactionConfig, ProfileEventStoreConfig, ResponsesProviderReasoningConfig,
+    ResponsesProviderReasoningEffort, ResponsesProviderReasoningSummary, ResponsesStateMode,
+    RuntimeProfileConfig, resolve_profile_config_path,
     schema::{ProfileConfigSchemaIndex, ProfileConfigValidator},
     starter_profile_config,
 };
 use std::path::PathBuf;
 use thiserror::Error;
+
+mod helpers;
+mod integrations;
+#[cfg(test)]
+mod tests;
+mod types;
+
+use helpers::*;
+pub use types::*;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AppLaunchOptions {
@@ -16,7 +27,6 @@ pub struct AppLaunchOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppRoute {
     Chat,
-    Profile,
     Tools,
     Settings,
 }
@@ -70,7 +80,7 @@ impl AppViewModel {
             schema_index: ProfileConfigSchemaIndex::new(),
             schema_validator: ProfileConfigValidator::new()?,
             locale: options.locale.unwrap_or_else(Locale::detect),
-            route: AppRoute::Profile,
+            route: AppRoute::Settings,
             jsonc_open: false,
             jsonc_text,
             jsonc_error: None,
@@ -148,7 +158,7 @@ impl AppViewModel {
         }
     }
 
-    pub fn is_profile_form_read_only(&self) -> bool {
+    pub fn is_settings_form_read_only(&self) -> bool {
         self.jsonc_error.is_some()
     }
 
@@ -166,6 +176,130 @@ impl AppViewModel {
             .selected_profile_mut(self.selected_profile_id.as_deref())
     }
 
+    pub fn provider_summaries(&self) -> Vec<ProfileProviderSummary> {
+        self.config
+            .profiles
+            .iter()
+            .map(|profile| {
+                let is_active =
+                    self.config.default_profile_id.as_deref() == Some(profile.profile_id.as_str());
+                let is_selected =
+                    self.selected_profile_id.as_deref() == Some(profile.profile_id.as_str());
+                ProfileProviderSummary {
+                    profile_id: profile.profile_id.clone(),
+                    display_name: profile.display_name.clone(),
+                    provider_type: profile.provider.type_tag().into(),
+                    model: profile.provider.model().into(),
+                    is_active,
+                    is_selected,
+                }
+            })
+            .collect()
+    }
+
+    pub fn select_provider_profile(&mut self, profile_id: String) {
+        if self
+            .config
+            .profiles
+            .iter()
+            .any(|profile| profile.profile_id == profile_id)
+        {
+            self.selected_profile_id = Some(profile_id);
+        }
+    }
+
+    pub fn activate_selected_provider_profile(&mut self) {
+        let Some(profile_id) = self.selected_profile_id.clone() else {
+            return;
+        };
+        if self
+            .config
+            .profiles
+            .iter()
+            .any(|profile| profile.profile_id == profile_id)
+        {
+            self.config.default_profile_id = Some(profile_id);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn add_provider_profile(&mut self) -> String {
+        let next = self.config.profiles.len() + 1;
+        let profile_id = self.unique_profile_id(&format!("provider-{next}"));
+        let display_name = format!("Provider {next}");
+        let profile = RuntimeProfileConfig {
+            profile_id: profile_id.clone(),
+            display_name,
+            description: None,
+            provider: BuiltInProviderConfig::ChatgptResponses {
+                provider_id: None,
+                model: "gpt-5.4-mini".into(),
+                auth: ChatGptAuthConfig::default(),
+                state_mode: ResponsesStateMode::default(),
+                reasoning: Some(ResponsesProviderReasoningConfig {
+                    enabled: true,
+                    effort: Some(ResponsesProviderReasoningEffort::Medium),
+                    summary: Some(ResponsesProviderReasoningSummary::Auto),
+                    include_encrypted: None,
+                }),
+                allow_file_data_url_input: true,
+            },
+            event_store: None,
+            compaction: ProfileCompactionConfig::Auto,
+            plugins: Vec::new(),
+            manifest_patches: Vec::new(),
+            metadata: Default::default(),
+        };
+        self.config.profiles.push(profile);
+        self.selected_profile_id = Some(profile_id.clone());
+        if self.config.default_profile_id.is_none() {
+            self.config.default_profile_id = Some(profile_id.clone());
+        }
+        self.mark_dirty_from_form();
+        profile_id
+    }
+
+    pub fn duplicate_selected_provider_profile(&mut self) -> Option<String> {
+        let mut profile = self.selected_profile()?.clone();
+        profile.profile_id = self.unique_profile_id(&format!("{}-copy", profile.profile_id));
+        profile.display_name = format!("{} Copy", profile.display_name);
+        let profile_id = profile.profile_id.clone();
+        self.config.profiles.push(profile);
+        self.selected_profile_id = Some(profile_id.clone());
+        self.mark_dirty_from_form();
+        Some(profile_id)
+    }
+
+    pub fn remove_selected_provider_profile(&mut self) -> bool {
+        if self.config.profiles.len() <= 1 {
+            return false;
+        }
+        let Some(profile_id) = self.selected_profile_id.clone() else {
+            return false;
+        };
+        let Some(index) = self
+            .config
+            .profiles
+            .iter()
+            .position(|profile| profile.profile_id == profile_id)
+        else {
+            return false;
+        };
+        self.config.profiles.remove(index);
+        let next_index = index.min(self.config.profiles.len().saturating_sub(1));
+        let next_profile_id = self
+            .config
+            .profiles
+            .get(next_index)
+            .map(|profile| profile.profile_id.clone());
+        if self.config.default_profile_id.as_deref() == Some(profile_id.as_str()) {
+            self.config.default_profile_id = next_profile_id.clone();
+        }
+        self.selected_profile_id = next_profile_id;
+        self.mark_dirty_from_form();
+        true
+    }
+
     pub fn select_route(&mut self, route: AppRoute) {
         self.route = route;
     }
@@ -178,21 +312,20 @@ impl AppViewModel {
         Ok(())
     }
 
-    pub fn set_profile_id(&mut self, value: String) {
-        let old_id = self.selected_profile_id.clone();
-        if let Some(profile) = self.selected_profile_mut() {
-            profile.profile_id = value.clone();
-        }
-        if self.config.default_profile_id == old_id {
-            self.config.default_profile_id = Some(value.clone());
-        }
-        self.selected_profile_id = Some(value);
-        self.mark_dirty_from_form();
+    pub fn close_jsonc(&mut self) {
+        self.jsonc_open = false;
     }
 
     pub fn set_display_name(&mut self, value: String) {
         if let Some(profile) = self.selected_profile_mut() {
             profile.display_name = value;
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_description(&mut self, value: String) {
+        if let Some(profile) = self.selected_profile_mut() {
+            profile.description = optional_string(value);
             self.mark_dirty_from_form();
         }
     }
@@ -204,21 +337,114 @@ impl AppViewModel {
         }
     }
 
-    pub fn set_default_profile(&mut self, enabled: bool) {
-        if enabled {
-            if let Some(id) = self.selected_profile_id.clone() {
-                self.config.default_profile_id = Some(id);
-            }
-        } else {
-            self.config.default_profile_id = None;
+    pub fn set_provider_id(&mut self, value: String) {
+        if let Some(provider) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+        {
+            *provider_id_mut(provider) = optional_string(value);
+            self.mark_dirty_from_form();
         }
-        self.mark_dirty_from_form();
     }
 
-    pub fn is_selected_default_profile(&self) -> bool {
-        self.selected_profile_id
-            .as_ref()
-            .is_some_and(|id| Some(id) == self.config.default_profile_id.as_ref())
+    pub fn set_base_url(&mut self, value: String) {
+        if let Some(provider) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            && let Some(field) = base_url_mut(provider)
+        {
+            *field = optional_string(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_api_key_env(&mut self, value: String) {
+        if let Some(provider) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            && let Some(field) = api_key_env_mut(provider)
+        {
+            *field = optional_string(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_max_tokens_text(&mut self, value: String) {
+        if let Some(provider) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            && let Some(field) = max_tokens_mut(provider)
+        {
+            *field = optional_u64(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn toggle_file_data_url_input(&mut self) {
+        if let Some(provider) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            && let Some(field) = allow_file_data_url_input_mut(provider)
+        {
+            *field = !*field;
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn toggle_reasoning_enabled(&mut self) {
+        if let Some(provider) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            && let Some(reasoning) = responses_reasoning_mut(provider)
+        {
+            reasoning.enabled = !reasoning.enabled;
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: &str) {
+        if let Some(reasoning) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            .and_then(responses_reasoning_mut)
+        {
+            reasoning.effort = parse_responses_reasoning_effort(effort);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_reasoning_summary(&mut self, summary: &str) {
+        if let Some(reasoning) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.provider)
+            .and_then(responses_reasoning_mut)
+        {
+            reasoning.summary = parse_responses_reasoning_summary(summary);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_event_store_sqlite_url(&mut self, value: String) {
+        if let Some(profile) = self.selected_profile_mut() {
+            profile.event_store =
+                optional_string(value).map(|database_url| ProfileEventStoreConfig::Sqlite {
+                    database_url,
+                    migrate_on_connect: true,
+                });
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_locale(&mut self, locale: Locale) {
+        if let Some(profile) = self.selected_profile_mut() {
+            profile
+                .manifest_patches
+                .retain(|patch| !matches!(patch, noloong_config::ManifestPatch::SetLocale { .. }));
+            profile
+                .manifest_patches
+                .push(noloong_config::ManifestPatch::SetLocale { locale });
+            self.mark_dirty_from_form();
+        }
     }
 
     pub fn provider_type(&self) -> String {
@@ -228,10 +454,306 @@ impl AppViewModel {
             .into()
     }
 
+    pub fn provider_id(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| provider_id(&profile.provider))
+            .unwrap_or_default()
+    }
+
+    pub fn base_url(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| base_url(&profile.provider))
+            .unwrap_or_default()
+    }
+
+    pub fn api_key_env(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| api_key_env(&profile.provider))
+            .unwrap_or_default()
+    }
+
+    pub fn provider_state_mode(&self) -> Option<String> {
+        self.selected_profile()
+            .and_then(|profile| state_mode(&profile.provider))
+            .map(str::to_string)
+    }
+
+    pub fn provider_auth_summary(&self) -> Option<String> {
+        self.selected_profile()
+            .and_then(|profile| match &profile.provider {
+                BuiltInProviderConfig::ChatgptResponses { auth, .. } => Some(match auth {
+                    ChatGptAuthConfig::TokenFile {
+                        token_file,
+                        token_file_env,
+                    } => token_file
+                        .as_deref()
+                        .or(token_file_env.as_deref())
+                        .unwrap_or("token_file")
+                        .to_string(),
+                    ChatGptAuthConfig::EnvHeaders { id, .. } => format!("env_headers:{id}"),
+                }),
+                _ => None,
+            })
+    }
+
+    pub fn file_data_url_input(&self) -> Option<bool> {
+        self.selected_profile()
+            .and_then(|profile| allow_file_data_url_input(&profile.provider))
+    }
+
+    pub fn supports_base_url(&self) -> bool {
+        self.selected_profile().is_some_and(|profile| {
+            base_url(&profile.provider).is_some() || base_url_supported(&profile.provider)
+        })
+    }
+
+    pub fn supports_api_key_env(&self) -> bool {
+        self.selected_profile().is_some_and(|profile| {
+            api_key_env(&profile.provider).is_some() || api_key_env_supported(&profile.provider)
+        })
+    }
+
+    pub fn supports_max_tokens(&self) -> bool {
+        self.selected_profile()
+            .is_some_and(|profile| max_tokens_supported(&profile.provider))
+    }
+
+    pub fn max_tokens_text(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| max_tokens(&profile.provider))
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn reasoning_summary(&self) -> Option<ReasoningSummary> {
+        self.selected_profile()
+            .and_then(|profile| reasoning_summary(&profile.provider))
+    }
+
     pub fn model(&self) -> String {
         self.selected_profile()
             .map(|profile| profile.provider.model().to_string())
             .unwrap_or_default()
+    }
+
+    pub fn selected_description(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| profile.description.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn compaction_edit(&self) -> CompactionEdit {
+        let Some(profile) = self.selected_profile() else {
+            return CompactionEdit::default();
+        };
+        match &profile.compaction {
+            ProfileCompactionConfig::Auto => CompactionEdit {
+                mode: "auto".into(),
+                ..Default::default()
+            },
+            ProfileCompactionConfig::None => CompactionEdit {
+                mode: "none".into(),
+                ..Default::default()
+            },
+            ProfileCompactionConfig::OpenaiResponses {
+                id,
+                input_limit_model,
+                compact_model,
+                input_limit_tokens,
+                trigger_ratio,
+                summary_budget_tokens,
+                keep_recent_tokens,
+                mode,
+                request_timeout_secs,
+            } => CompactionEdit {
+                mode: "openai_responses".into(),
+                id: id.clone().unwrap_or_default(),
+                input_limit_model: input_limit_model.clone().unwrap_or_default(),
+                compact_model: compact_model.clone().unwrap_or_default(),
+                input_limit_tokens: input_limit_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                trigger_ratio: trigger_ratio
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                summary_budget_tokens: summary_budget_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                keep_recent_tokens: keep_recent_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                state_mode: mode
+                    .map(context_compaction_mode_as_str)
+                    .unwrap_or_default()
+                    .into(),
+                request_timeout_secs: request_timeout_secs
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            },
+        }
+    }
+
+    pub fn set_compaction_mode(&mut self, mode: &str) {
+        let Some(profile) = self.selected_profile_mut() else {
+            return;
+        };
+        profile.compaction = match mode {
+            "none" => ProfileCompactionConfig::None,
+            "openai_responses" => ProfileCompactionConfig::OpenaiResponses {
+                id: None,
+                input_limit_model: None,
+                compact_model: None,
+                input_limit_tokens: None,
+                trigger_ratio: None,
+                summary_budget_tokens: None,
+                keep_recent_tokens: None,
+                mode: None,
+                request_timeout_secs: None,
+            },
+            _ => ProfileCompactionConfig::Auto,
+        };
+        self.mark_dirty_from_form();
+    }
+
+    pub fn set_compaction_id(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses { id, .. }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *id = optional_string(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_input_limit_model(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses {
+            input_limit_model, ..
+        }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *input_limit_model = optional_string(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_compact_model(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses { compact_model, .. }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *compact_model = optional_string(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_input_limit_tokens(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses {
+            input_limit_tokens, ..
+        }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *input_limit_tokens = optional_u64(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_trigger_ratio(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses { trigger_ratio, .. }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *trigger_ratio = optional_f64(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_summary_budget_tokens(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses {
+            summary_budget_tokens,
+            ..
+        }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *summary_budget_tokens = optional_u64(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_keep_recent_tokens(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses {
+            keep_recent_tokens, ..
+        }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *keep_recent_tokens = optional_u64(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_state_mode(&mut self, value: &str) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses { mode, .. }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *mode = parse_context_compaction_mode(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn set_compaction_timeout(&mut self, value: String) {
+        if let Some(ProfileCompactionConfig::OpenaiResponses {
+            request_timeout_secs,
+            ..
+        }) = self
+            .selected_profile_mut()
+            .map(|profile| &mut profile.compaction)
+        {
+            *request_timeout_secs = optional_u64(value);
+            self.mark_dirty_from_form();
+        }
+    }
+
+    pub fn event_store_summary(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| profile.event_store.as_ref())
+            .map(|store| match store {
+                ProfileEventStoreConfig::Memory => "memory".into(),
+                ProfileEventStoreConfig::Sqlite {
+                    database_url,
+                    migrate_on_connect,
+                } => format!(
+                    "sqlite: {database_url} ({})",
+                    if *migrate_on_connect {
+                        "migrate"
+                    } else {
+                        "no migrations"
+                    }
+                ),
+            })
+            .unwrap_or_else(|| "default".into())
+    }
+
+    pub fn event_store_sqlite_url(&self) -> String {
+        self.selected_profile()
+            .and_then(|profile| match profile.event_store.as_ref() {
+                Some(ProfileEventStoreConfig::Sqlite { database_url, .. }) => {
+                    Some(database_url.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn registry_store_summary(&self) -> String {
+        self.config
+            .registry_store
+            .as_ref()
+            .map(registry_store_summary)
+            .unwrap_or_else(|| "default".into())
     }
 
     fn mark_dirty_from_form(&mut self) {
@@ -265,6 +787,30 @@ impl AppViewModel {
                 .map(|profile| profile.profile_id.clone())
         });
     }
+
+    fn unique_profile_id(&self, base: &str) -> String {
+        let base = sanitize_profile_id(base);
+        if !self
+            .config
+            .profiles
+            .iter()
+            .any(|profile| profile.profile_id == base)
+        {
+            return base;
+        }
+        for suffix in 2.. {
+            let candidate = format!("{base}-{suffix}");
+            if !self
+                .config
+                .profiles
+                .iter()
+                .any(|profile| profile.profile_id == candidate)
+            {
+                return candidate;
+            }
+        }
+        unreachable!("unbounded suffix search returns before overflow")
+    }
 }
 
 #[derive(Debug, Error)]
@@ -279,141 +825,4 @@ pub enum AppError {
     MissingHome,
     #[error("JSONC is invalid: {0}")]
     InvalidJsonc(String),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AppError, AppLaunchOptions, AppStatus, AppViewModel};
-    use crate::test_support::{remove_temp_dir, temp_dir};
-    use noloong_agent::Locale;
-    use std::fs;
-
-    #[test]
-    fn app_loads_starter_draft_when_config_is_missing() {
-        let dir = temp_dir("app-missing-config");
-        let path = dir.join("profile-config.jsonc");
-
-        let model = AppViewModel::load(AppLaunchOptions {
-            profile_config_path: Some(path.display().to_string()),
-            locale: Some(Locale::Zh),
-        })
-        .unwrap();
-
-        assert_eq!(model.locale, Locale::Zh);
-        assert_eq!(model.status, AppStatus::StarterDraft);
-        assert_eq!(
-            model.config.default_profile_id.as_deref(),
-            Some("chatgpt-responses")
-        );
-        assert!(!path.exists());
-        remove_temp_dir(dir);
-    }
-
-    #[test]
-    fn app_saves_canonical_config() {
-        let dir = temp_dir("app-save-config");
-        let path = dir.join("profile-config.jsonc");
-        let mut model = AppViewModel::load(AppLaunchOptions {
-            profile_config_path: Some(path.display().to_string()),
-            locale: Some(Locale::En),
-        })
-        .unwrap();
-
-        model.set_display_name("Desktop Profile".into());
-        model.save().unwrap();
-
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"displayName\": \"Desktop Profile\""));
-        assert_eq!(model.status, AppStatus::Saved);
-        remove_temp_dir(dir);
-    }
-
-    #[test]
-    fn app_jsonc_preview_tracks_typed_draft() {
-        let dir = temp_dir("app-jsonc-preview");
-        let path = dir.join("profile-config.jsonc");
-        let mut model = AppViewModel::load(AppLaunchOptions {
-            profile_config_path: Some(path.display().to_string()),
-            locale: None,
-        })
-        .unwrap();
-
-        model.set_model("gpt-5.5".into());
-        let preview = model.jsonc_preview().unwrap();
-
-        assert!(preview.contains("\"model\": \"gpt-5.5\""));
-        remove_temp_dir(dir);
-    }
-
-    #[test]
-    fn app_jsonc_editor_updates_typed_draft() {
-        let dir = temp_dir("app-jsonc-editor-updates");
-        let path = dir.join("profile-config.jsonc");
-        let mut model = AppViewModel::load(AppLaunchOptions {
-            profile_config_path: Some(path.display().to_string()),
-            locale: Some(Locale::Zh),
-        })
-        .unwrap();
-
-        let text = model
-            .jsonc_preview()
-            .unwrap()
-            .replace("ChatGPT Responses", "JSONC Profile")
-            .replace("gpt-5.4-mini", "gpt-5.5");
-
-        assert!(model.set_jsonc_text(text));
-        assert_eq!(
-            model.selected_profile().unwrap().display_name,
-            "JSONC Profile"
-        );
-        assert_eq!(model.model(), "gpt-5.5");
-        assert_eq!(model.jsonc_error(), None);
-        remove_temp_dir(dir);
-    }
-
-    #[test]
-    fn invalid_jsonc_does_not_pollute_typed_draft_and_blocks_save() {
-        let dir = temp_dir("app-jsonc-invalid");
-        let path = dir.join("profile-config.jsonc");
-        let mut model = AppViewModel::load(AppLaunchOptions {
-            profile_config_path: Some(path.display().to_string()),
-            locale: Some(Locale::Zh),
-        })
-        .unwrap();
-
-        let original_model = model.model();
-        assert!(!model.set_jsonc_text("{ invalid".into()));
-
-        assert_eq!(model.model(), original_model);
-        assert!(model.is_profile_form_read_only());
-        assert!(matches!(model.save(), Err(AppError::InvalidJsonc(_))));
-        assert!(!path.exists());
-        remove_temp_dir(dir);
-    }
-
-    #[test]
-    fn fixing_jsonc_restores_form_and_save_writes_canonical_json() {
-        let dir = temp_dir("app-jsonc-fix");
-        let path = dir.join("profile-config.jsonc");
-        let mut model = AppViewModel::load(AppLaunchOptions {
-            profile_config_path: Some(path.display().to_string()),
-            locale: Some(Locale::Zh),
-        })
-        .unwrap();
-
-        assert!(!model.set_jsonc_text("{ invalid".into()));
-        let fixed = model
-            .jsonc_preview()
-            .unwrap()
-            .replace("{ invalid", &model.config.to_canonical_json().unwrap());
-        assert!(model.set_jsonc_text(fixed));
-        assert!(!model.is_profile_form_read_only());
-
-        model.save().unwrap();
-
-        let saved = fs::read_to_string(&path).unwrap();
-        assert_eq!(saved, model.config.to_canonical_json().unwrap());
-        assert_eq!(model.jsonc_preview().unwrap(), saved);
-        remove_temp_dir(dir);
-    }
 }

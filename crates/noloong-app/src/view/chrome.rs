@@ -1,6 +1,6 @@
 use super::{
-    NoloongAppView, TITLE_SAVE_ICON, TITLE_VALIDATE_ICON, TOOLBAR_CHAT_ICON, TOOLBAR_PROFILE_ICON,
-    TOOLBAR_SETTINGS_ICON, TOOLBAR_TOOLS_ICON, ToastTone,
+    NoloongAppView, TITLE_SAVE_ICON, TITLE_VALIDATE_ICON, TOOLBAR_CHAT_ICON, TOOLBAR_SETTINGS_ICON,
+    TOOLBAR_TOOLS_ICON,
 };
 use crate::{AppRoute, AppStatus, AppTextKey};
 use gpui::{
@@ -10,6 +10,25 @@ use gpui::{
 use gpui_component::{StyledExt as _, TitleBar};
 
 impl NoloongAppView {
+    fn title_subtitle(&self) -> String {
+        if self.model.jsonc_open {
+            return self
+                .catalog
+                .text(AppTextKey::JsoncEditorSubtitle)
+                .to_string();
+        }
+        let status = match &self.model.status {
+            AppStatus::StarterDraft => self.catalog.text(AppTextKey::SettingsSubtitle),
+            AppStatus::Loaded => self.catalog.text(AppTextKey::SettingsSubtitle),
+            AppStatus::Dirty => self.catalog.text(AppTextKey::Unsaved),
+            AppStatus::Valid => self.catalog.text(AppTextKey::Valid),
+            AppStatus::Invalid(_) => self.catalog.text(AppTextKey::Invalid),
+            AppStatus::Saved => self.catalog.text(AppTextKey::Saved),
+            AppStatus::SaveFailed(_) => self.catalog.text(AppTextKey::SaveFailed),
+        };
+        format!("{status} - {}", self.model.config_path.display())
+    }
+
     pub(super) fn render_title_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         TitleBar::new()
             .h(px(52.0))
@@ -50,10 +69,20 @@ impl NoloongAppView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_base()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
                             .font_semibold()
                             .text_color(rgb(0xdde7f0))
-                            .child(self.title()),
+                            .child(div().text_base().child(self.title()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_normal()
+                                    .text_color(rgb(0x84909d))
+                                    .child(self.title_subtitle()),
+                            ),
                     )
                     .child(
                         div()
@@ -66,32 +95,14 @@ impl NoloongAppView {
                                 "validate",
                                 TITLE_VALIDATE_ICON,
                                 cx.listener(|this, _, _window, cx| {
-                                    let valid = this.model.validate();
-                                    if valid {
-                                        this.show_toast(
-                                            this.catalog.text(AppTextKey::Valid),
-                                            ToastTone::Success,
-                                            cx,
-                                        );
-                                    } else {
-                                        this.show_status_error_toast(cx);
-                                    }
+                                    this.validate_settings(cx);
                                 }),
                             ))
                             .child(self.title_icon_button(
                                 "save",
                                 TITLE_SAVE_ICON,
-                                cx.listener(|this, _, _window, cx| match this.model.save() {
-                                    Ok(()) => this.show_toast(
-                                        this.catalog.text(AppTextKey::Saved),
-                                        ToastTone::Success,
-                                        cx,
-                                    ),
-                                    Err(error) => {
-                                        this.model.status =
-                                            AppStatus::SaveFailed(error.to_string());
-                                        this.show_status_error_toast(cx);
-                                    }
+                                cx.listener(|this, _, window, cx| {
+                                    this.save_settings(window, cx);
                                 }),
                             )),
                     ),
@@ -151,15 +162,6 @@ impl NoloongAppView {
                 self.model.route == AppRoute::Chat,
                 cx.listener(|this, _, _window, cx| {
                     this.model.select_route(AppRoute::Chat);
-                    cx.notify();
-                }),
-            ))
-            .child(self.route_button(
-                "profile",
-                TOOLBAR_PROFILE_ICON,
-                self.model.route == AppRoute::Profile,
-                cx.listener(|this, _, _window, cx| {
-                    this.model.select_route(AppRoute::Profile);
                     cx.notify();
                 }),
             ))

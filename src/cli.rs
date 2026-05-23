@@ -45,7 +45,7 @@ pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
         CliCommand::Weixin(command) => run_weixin(command).await,
         CliCommand::App(options) => noloong_app::run_app(AppLaunchOptions {
             profile_config_path: options.profile_config,
-            locale: options.locale,
+            locale: options.locale.map(config_locale_from_runtime_locale),
         })
         .map_err(Into::into),
     }
@@ -263,6 +263,21 @@ pub(crate) fn profile_locale(
     profile_config
         .selected_profile(selected_profile_id)
         .and_then(|profile| profile.locale_override())
+        .map(runtime_locale_from_config_locale)
+}
+
+fn runtime_locale_from_config_locale(locale: config::Locale) -> Locale {
+    match locale {
+        config::Locale::En => Locale::En,
+        config::Locale::Zh => Locale::Zh,
+    }
+}
+
+fn config_locale_from_runtime_locale(locale: Locale) -> config::Locale {
+    match locale {
+        Locale::En => config::Locale::En,
+        Locale::Zh => config::Locale::Zh,
+    }
 }
 
 pub(crate) fn interaction_token(token_env: Option<&str>) -> Option<String> {

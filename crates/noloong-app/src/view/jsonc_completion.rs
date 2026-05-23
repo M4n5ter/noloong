@@ -7,17 +7,17 @@ use lsp_types::{
 };
 use noloong_config::schema::{ProfileConfigSchemaCompletionKind, ProfileConfigSchemaIndex};
 
-pub(super) struct ProfileJsoncCompletionProvider {
+pub(super) struct SettingsJsoncCompletionProvider {
     schema_index: ProfileConfigSchemaIndex,
 }
 
-impl ProfileJsoncCompletionProvider {
+impl SettingsJsoncCompletionProvider {
     pub(super) fn new(schema_index: ProfileConfigSchemaIndex) -> Self {
         Self { schema_index }
     }
 }
 
-impl CompletionProvider for ProfileJsoncCompletionProvider {
+impl CompletionProvider for SettingsJsoncCompletionProvider {
     fn completions(
         &self,
         rope: &Rope,
@@ -36,14 +36,16 @@ impl CompletionProvider for ProfileJsoncCompletionProvider {
             let items = completion_set
                 .completions
                 .into_iter()
-                .map(|completion| CompletionItem {
-                    label: completion.label,
+                .enumerate()
+                .map(|(index, completion)| CompletionItem {
+                    label: completion.label.clone(),
                     kind: Some(match completion.kind {
                         ProfileConfigSchemaCompletionKind::Property => CompletionItemKind::PROPERTY,
                         ProfileConfigSchemaCompletionKind::Value => CompletionItemKind::VALUE,
                         ProfileConfigSchemaCompletionKind::Snippet => CompletionItemKind::SNIPPET,
                     }),
                     detail: completion.detail,
+                    sort_text: Some(format!("{index:04}")),
                     documentation: completion
                         .documentation
                         .map(lsp_types::Documentation::String),

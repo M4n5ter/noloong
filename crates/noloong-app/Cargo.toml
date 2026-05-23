@@ -7,7 +7,6 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-noloong-agent.workspace = true
 noloong-config.workspace = true
 anyhow.workspace = true
 gpui.workspace = true

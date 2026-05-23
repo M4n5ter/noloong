@@ -7,8 +7,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-noloong-agent = { workspace = true, features = ["json-schema"] }
-noloong-agent-core = { workspace = true, features = ["json-schema"] }
+config.workspace = true
 jsonc-parser.workspace = true
 jsonschema.workspace = true
 schemars.workspace = true

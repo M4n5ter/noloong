@@ -1233,6 +1233,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "config"
+version = "0.15.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f316c6237b2d38be61949ecd15268a4c6ca32570079394a2444d9ce2c72a72d8"
+dependencies = [
+ "pathdiff",
+ "serde_core",
+ "serde_json",
+ "winnow 1.0.3",
+]
+
+[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4452,7 +4464,6 @@ dependencies = [
  "gpui-component",
  "gpui_platform",
  "lsp-types",
- "noloong-agent",
  "noloong-config",
  "serde_json",
  "thiserror 2.0.18",
@@ -4462,10 +4473,9 @@ dependencies = [
 name = "noloong-config"
 version = "0.1.0"
 dependencies = [
+ "config",
  "jsonc-parser",
  "jsonschema",
- "noloong-agent",
- "noloong-agent-core",
  "schemars",
  "serde",
  "serde_json",
@@ -5009,6 +5019,12 @@ name = "pastey"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
+
+[[package]]
+name = "pathdiff"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pathfinder_geometry"

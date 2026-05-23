@@ -17,13 +17,13 @@ pub(crate) fn should_relaunch_in_bundle() -> bool {
 
 pub(crate) fn launch_in_bundle(options: AppLaunchOptions) -> Result<(), AppError> {
     let bundle = ensure_bundle(&env::current_exe()?)?;
-    let mut command = Command::new("open");
-    command.arg("-n").arg(&bundle);
-    let args = bundle_args(&options);
-    if !args.is_empty() {
-        command.arg("--args").args(args);
+    if is_bundle_running(&bundle) {
+        clear_launch_options();
+        activate_bundle()?;
+        return Ok(());
     }
-    let status = command.status()?;
+    write_launch_options(&options)?;
+    let status = Command::new("open").arg(&bundle).status()?;
     if status.success() {
         Ok(())
     } else {
@@ -57,15 +57,22 @@ fn ensure_bundle(executable: &Path) -> Result<PathBuf, AppError> {
     Ok(bundle)
 }
 
+fn bundle_executable(bundle: &Path) -> PathBuf {
+    bundle.join("Contents").join("MacOS").join("Noloong")
+}
+
 fn bundle_path() -> Result<PathBuf, AppError> {
+    Ok(app_support_dir()?.join("Noloong.app"))
+}
+
+fn app_support_dir() -> Result<PathBuf, AppError> {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or(AppError::MissingHome)?;
     Ok(home
         .join("Library")
         .join("Application Support")
-        .join("Noloong")
-        .join("Noloong.app"))
+        .join("Noloong"))
 }
 
 fn remove_existing_path(path: &Path) -> Result<(), AppError> {
@@ -83,17 +90,49 @@ fn remove_existing_path(path: &Path) -> Result<(), AppError> {
     }
 }
 
-fn bundle_args(options: &AppLaunchOptions) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(path) = options.profile_config_path.as_deref() {
-        args.push("--profile-config".to_string());
-        args.push(path.to_string());
+fn write_launch_options(options: &AppLaunchOptions) -> Result<(), AppError> {
+    let path = launch_options_path()?;
+    if options.profile_config_path.is_none() && options.locale.is_none() {
+        let _ = fs::remove_file(path);
+        return Ok(());
     }
-    if let Some(locale) = options.locale {
-        args.push("--locale".to_string());
-        args.push(locale.code().to_string());
+    fs::write(path, launch_options_text(options))?;
+    Ok(())
+}
+
+fn launch_options_text(options: &AppLaunchOptions) -> String {
+    let profile_config = options
+        .profile_config_path
+        .as_deref()
+        .map(absolute_profile_config_arg)
+        .unwrap_or_default();
+    let locale = options
+        .locale
+        .map(|locale| locale.code())
+        .unwrap_or_default();
+    format!("{profile_config}\n{locale}\n")
+}
+
+fn clear_launch_options() {
+    if let Ok(path) = launch_options_path() {
+        let _ = fs::remove_file(path);
     }
-    args
+}
+
+fn launch_options_path() -> Result<PathBuf, AppError> {
+    Ok(app_support_dir()?.join("launch-options.txt"))
+}
+
+fn absolute_profile_config_arg(path: &str) -> String {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.display().to_string();
+    }
+    env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn info_plist() -> String {
@@ -139,29 +178,81 @@ fn launcher_script() -> &'static str {
 set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export NOLOONG_APP_BUNDLE_CHILD=1
+launch_options="${HOME:-}/Library/Application Support/Noloong/launch-options.txt"
+if [ -n "${HOME:-}" ] && [ -f "$launch_options" ]; then
+  profile_config=$(sed -n '1p' "$launch_options")
+  locale=$(sed -n '2p' "$launch_options")
+  rm -f "$launch_options"
+  if [ -n "$profile_config" ]; then
+    set -- --profile-config "$profile_config" "$@"
+  fi
+  if [ -n "$locale" ]; then
+    set -- "$@" --locale "$locale"
+  fi
+fi
 exec "$script_dir/Noloong" app "$@"
 "#
 }
 
+fn is_bundle_running(bundle: &Path) -> bool {
+    let executable = bundle_executable(bundle).display().to_string();
+    let pattern = format!("^{} app( |$)", regex_escape_literal(&executable));
+    Command::new("pgrep")
+        .args(["-f", pattern.as_str()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn regex_escape_literal(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' | '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => {
+                ['\\', ch]
+            }
+            _ => ['\0', ch],
+        })
+        .filter(|ch| *ch != '\0')
+        .collect()
+}
+
+fn activate_bundle() -> Result<(), AppError> {
+    let script = format!("tell application id \"{BUNDLE_IDENTIFIER}\" to activate");
+    let status = Command::new("osascript")
+        .args(["-e", script.as_str()])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Launch(format!(
+            "failed to activate {BUNDLE_IDENTIFIER}: {status}"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::bundle_args;
+    use super::{absolute_profile_config_arg, launch_options_text};
     use crate::AppLaunchOptions;
-    use noloong_agent::Locale;
+    use noloong_config::Locale;
+    use std::path::Path;
 
     #[test]
-    fn bundle_args_preserve_profile_config_and_locale() {
-        assert_eq!(
-            bundle_args(&AppLaunchOptions {
-                profile_config_path: Some("/tmp/profile config.jsonc".to_string()),
-                locale: Some(Locale::Zh),
-            }),
-            vec![
-                "--profile-config",
-                "/tmp/profile config.jsonc",
-                "--locale",
-                "zh",
-            ]
-        );
+    fn launch_options_preserve_profile_config_and_locale() {
+        let text = launch_options_text(&AppLaunchOptions {
+            profile_config_path: Some("/tmp/profile config.jsonc".to_string()),
+            locale: Some(Locale::Zh),
+        });
+
+        assert_eq!(text, "/tmp/profile config.jsonc\nzh\n");
+    }
+
+    #[test]
+    fn bundle_args_absolutize_relative_profile_config() {
+        let path = absolute_profile_config_arg("examples/profile.jsonc");
+
+        assert!(Path::new(&path).is_absolute(), "{path}");
+        assert!(path.ends_with("examples/profile.jsonc"), "{path}");
     }
 }
