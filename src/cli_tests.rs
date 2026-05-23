@@ -87,6 +87,10 @@ fn cli_app_command_parses_profile_config_and_locale() {
         "profiles.jsonc",
         "--locale",
         "zh",
+        "--interaction-ws-url",
+        "ws://127.0.0.1:8787/jsonrpc/ws",
+        "--interaction-token",
+        "secret",
     ])
     .unwrap();
 
@@ -95,6 +99,11 @@ fn cli_app_command_parses_profile_config_and_locale() {
     };
     assert_eq!(options.profile_config.as_deref(), Some("profiles.jsonc"));
     assert_eq!(options.locale, Some(Locale::Zh));
+    assert_eq!(
+        options.interaction_ws_url.as_deref(),
+        Some("ws://127.0.0.1:8787/jsonrpc/ws")
+    );
+    assert_eq!(options.interaction_token.as_deref(), Some("secret"));
 }
 
 #[test]

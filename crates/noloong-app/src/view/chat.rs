@@ -36,11 +36,13 @@ impl NoloongAppView {
                     .flex()
                     .flex_col()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_color(rgb(0x7d8793))
-                            .child(self.catalog.text(AppTextKey::ChatComposerPlaceholder)),
-                    )
+                    .child(div().text_color(rgb(0x7d8793)).child(
+                        if self.model.has_interaction_endpoint() {
+                            self.catalog.text(AppTextKey::ChatComposerPlaceholder)
+                        } else {
+                            self.catalog.text(AppTextKey::ChatDisabled)
+                        },
+                    ))
                     .child(
                         div()
                             .flex()

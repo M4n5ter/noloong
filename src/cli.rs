@@ -22,7 +22,7 @@ use noloong_agent::{
     },
 };
 use noloong_agent_telegram::{polling::TelegramPollingError, telegram_api::TelegramApiError};
-use noloong_app::AppLaunchOptions;
+use noloong_app::{AppInteractionEndpoint, AppLaunchOptions};
 use std::{env, future::Future, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -46,6 +46,10 @@ pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
         CliCommand::App(options) => noloong_app::run_app(AppLaunchOptions {
             profile_config_path: options.profile_config,
             locale: options.locale.map(config_locale_from_runtime_locale),
+            interaction_endpoint: app_interaction_endpoint(
+                options.interaction_ws_url,
+                options.interaction_token,
+            ),
         })
         .map_err(Into::into),
     }
@@ -112,6 +116,10 @@ pub(crate) struct AppOptions {
     profile_config: Option<String>,
     #[arg(long = "locale", value_parser = parse_locale_arg)]
     locale: Option<Locale>,
+    #[arg(long = "interaction-ws-url")]
+    interaction_ws_url: Option<String>,
+    #[arg(long = "interaction-token")]
+    interaction_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Args, PartialEq, Eq)]
@@ -278,6 +286,16 @@ fn config_locale_from_runtime_locale(locale: Locale) -> config::Locale {
         Locale::En => config::Locale::En,
         Locale::Zh => config::Locale::Zh,
     }
+}
+
+fn app_interaction_endpoint(
+    interaction_ws_url: Option<String>,
+    interaction_token: Option<String>,
+) -> Option<AppInteractionEndpoint> {
+    interaction_ws_url.map(|ws_url| AppInteractionEndpoint {
+        ws_url,
+        bearer_token: non_empty_option(interaction_token),
+    })
 }
 
 pub(crate) fn interaction_token(token_env: Option<&str>) -> Option<String> {

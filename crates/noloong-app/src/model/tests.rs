@@ -1,4 +1,6 @@
-use super::{AppError, AppLaunchOptions, AppStatus, AppViewModel};
+use super::{
+    AppError, AppInteractionEndpoint, AppLaunchOptions, AppRoute, AppStatus, AppViewModel,
+};
 use crate::test_support::{remove_temp_dir, temp_dir};
 use noloong_config::Locale;
 use std::fs;
@@ -11,10 +13,12 @@ fn app_loads_starter_draft_when_config_is_missing() {
     let model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
     assert_eq!(model.locale, Locale::Zh);
+    assert_eq!(model.route, AppRoute::Chat);
     assert_eq!(model.status, AppStatus::StarterDraft);
     assert_eq!(
         model.config.default_profile_id.as_deref(),
@@ -25,12 +29,45 @@ fn app_loads_starter_draft_when_config_is_missing() {
 }
 
 #[test]
+fn app_loads_interaction_endpoint_for_chat_client() {
+    let dir = temp_dir("app-interaction-endpoint");
+    let path = dir.join("profile-config.jsonc");
+
+    let model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::En),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
+            bearer_token: Some("token".into()),
+        }),
+    })
+    .unwrap();
+
+    assert_eq!(
+        model
+            .interaction_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.ws_url.as_str()),
+        Some("ws://127.0.0.1:12345/jsonrpc/ws")
+    );
+    assert_eq!(
+        model
+            .interaction_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.bearer_token.as_deref()),
+        Some("token")
+    );
+    remove_temp_dir(dir);
+}
+
+#[test]
 fn app_saves_canonical_config() {
     let dir = temp_dir("app-save-config");
     let path = dir.join("profile-config.jsonc");
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::En),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -50,6 +87,7 @@ fn app_jsonc_preview_tracks_typed_draft() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: None,
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -67,6 +105,7 @@ fn app_jsonc_editor_updates_typed_draft() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -93,6 +132,7 @@ fn invalid_jsonc_does_not_pollute_typed_draft_and_blocks_save() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -113,6 +153,7 @@ fn fixing_jsonc_restores_form_and_save_writes_canonical_json() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -139,6 +180,7 @@ fn app_visual_mcp_editor_updates_typed_draft_and_jsonc() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -174,6 +216,7 @@ fn app_visual_skills_editor_updates_typed_draft_and_jsonc() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -200,6 +243,7 @@ fn app_provider_switcher_manages_multiple_profiles() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 
@@ -237,6 +281,7 @@ fn app_visual_reasoning_and_compaction_editors_update_jsonc() {
     let mut model = AppViewModel::load(AppLaunchOptions {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
+        interaction_endpoint: None,
     })
     .unwrap();
 

@@ -10,6 +10,6 @@ mod view;
 
 pub(crate) use actions::{APP_KEY_CONTEXT, SaveSettings, ToggleJsoncEditor, ValidateSettings};
 pub(crate) use i18n::{AppI18nCatalog, AppTextKey};
-pub use model::{AppError, AppLaunchOptions};
+pub use model::{AppError, AppInteractionEndpoint, AppLaunchOptions};
 pub(crate) use model::{AppRoute, AppStatus, AppViewModel};
 pub use runtime::run_app;

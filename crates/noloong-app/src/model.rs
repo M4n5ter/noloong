@@ -22,6 +22,13 @@ pub use types::*;
 pub struct AppLaunchOptions {
     pub profile_config_path: Option<String>,
     pub locale: Option<Locale>,
+    pub interaction_endpoint: Option<AppInteractionEndpoint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppInteractionEndpoint {
+    pub ws_url: String,
+    pub bearer_token: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +56,7 @@ pub struct AppViewModel {
     pub schema_index: ProfileConfigSchemaIndex,
     schema_validator: ProfileConfigValidator,
     pub locale: Locale,
+    pub interaction_endpoint: Option<AppInteractionEndpoint>,
     pub route: AppRoute,
     pub jsonc_open: bool,
     pub jsonc_text: String,
@@ -80,7 +88,8 @@ impl AppViewModel {
             schema_index: ProfileConfigSchemaIndex::new(),
             schema_validator: ProfileConfigValidator::new()?,
             locale: options.locale.unwrap_or_else(Locale::detect),
-            route: AppRoute::Settings,
+            interaction_endpoint: options.interaction_endpoint,
+            route: AppRoute::Chat,
             jsonc_open: false,
             jsonc_text,
             jsonc_error: None,
@@ -314,6 +323,10 @@ impl AppViewModel {
 
     pub fn close_jsonc(&mut self) {
         self.jsonc_open = false;
+    }
+
+    pub fn has_interaction_endpoint(&self) -> bool {
+        self.interaction_endpoint.is_some()
     }
 
     pub fn set_display_name(&mut self, value: String) {

@@ -243,6 +243,7 @@ mod tests {
         let text = launch_options_text(&AppLaunchOptions {
             profile_config_path: Some("/tmp/profile config.jsonc".to_string()),
             locale: Some(Locale::Zh),
+            interaction_endpoint: None,
         });
 
         assert_eq!(text, "/tmp/profile config.jsonc\nzh\n");
