@@ -75,10 +75,12 @@ pub(crate) struct NoloongAppView {
     mcp_disabled_tools_input: Entity<InputState>,
     mcp_timeout_input: Entity<InputState>,
     jsonc_input: Entity<InputState>,
+    chat_input: Entity<InputState>,
     toasts: Vec<ToastMessage>,
     next_toast_id: u64,
     last_toast_promotion_at: Option<Instant>,
     chat_refresh_task: Task<()>,
+    chat_run_task: Task<()>,
     toast_task: Task<()>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -308,8 +310,20 @@ impl NoloongAppView {
             ));
             input
         });
+        let chat_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .auto_grow(1, 6)
+                .placeholder(catalog.text(AppTextKey::ChatComposerPlaceholder))
+        });
 
         let _subscriptions = vec![
+            cx.subscribe_in(&chat_input, window, {
+                move |_: &mut Self, _, event: &InputEvent, _window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }
+            }),
             cx.subscribe_in(&display_name_input, window, {
                 let state = display_name_input.clone();
                 move |this: &mut Self, _, event: &InputEvent, _window, cx| {
@@ -636,10 +650,12 @@ impl NoloongAppView {
             mcp_disabled_tools_input,
             mcp_timeout_input,
             jsonc_input,
+            chat_input,
             toasts: Vec::new(),
             next_toast_id: 0,
             last_toast_promotion_at: None,
             chat_refresh_task: Task::ready(()),
+            chat_run_task: Task::ready(()),
             toast_task: Task::ready(()),
             _subscriptions,
         };

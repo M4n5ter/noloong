@@ -13,7 +13,7 @@ mod view;
 pub(crate) use actions::{APP_KEY_CONTEXT, SaveSettings, ToggleJsoncEditor, ValidateSettings};
 pub(crate) use i18n::{AppI18nCatalog, AppTextKey};
 pub use interaction::{
-    AppInteractionEndpoint, AppInteractionHttpClient, AppInteractionStatus,
+    AppInteractionEndpoint, AppInteractionHttpClient, AppInteractionStatus, AppInteractionWsClient,
     initialize_interaction_status,
 };
 pub use model::{AppError, AppLaunchOptions};

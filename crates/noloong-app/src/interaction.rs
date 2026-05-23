@@ -6,6 +6,10 @@ use std::{collections::BTreeSet, future::Future, sync::Arc};
 use thiserror::Error;
 use url::Url;
 
+mod ws;
+
+pub use ws::{AppInteractionWsClient, AppInteractionWsNotification};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppInteractionEndpoint {
     pub ws_url: String,
@@ -134,6 +138,24 @@ pub struct AppSessionRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AppPromptRequest {
+    pub session_id: String,
+    pub input: AppPromptInput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AppPromptInput {
+    Text { text: String },
+    Message { message: AppMessage },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AppInteractionSessionDescriptor {
     pub session_id: String,
     pub profile_id: String,
@@ -186,6 +208,63 @@ pub enum AppContentBlock {
     Other,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AppDisplayEvent {
+    RunStarted {
+        run_id: String,
+    },
+    RunCompleted {
+        run_id: String,
+    },
+    RunFailed {
+        run_id: String,
+        error: String,
+    },
+    RunPaused {
+        run_id: String,
+        reason: Value,
+    },
+    AssistantMessageDelta {
+        run_id: String,
+        display_message_id: String,
+        text: String,
+    },
+    AssistantMessageFinal {
+        run_id: String,
+        display_message_id: String,
+        message: AppMessage,
+        #[serde(default)]
+        truncated: bool,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDisplaySubscribeRequest {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ux: Option<InteractionUxCapabilities>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSubscriptionResult {
+    pub subscription_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInteractionDisplayNotification {
+    pub session_id: String,
+    pub subscription_id: String,
+    pub event: AppDisplayEvent,
+}
+
 pub trait AppInteractionClient {
     fn initialize(
         &self,
@@ -226,6 +305,31 @@ pub trait AppInteractionClient {
             let _ = request;
             Err(AppInteractionError::Protocol(
                 "session/create is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
+    fn prompt(
+        &self,
+        request: AppPromptRequest,
+    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
+    {
+        async move {
+            let _ = request;
+            Err(AppInteractionError::Protocol(
+                "agent/prompt is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
+    fn subscribe_display(
+        &self,
+        request: AppDisplaySubscribeRequest,
+    ) -> impl Future<Output = Result<AppSubscriptionResult, AppInteractionError>> + Send + '_ {
+        async move {
+            let _ = request;
+            Err(AppInteractionError::Protocol(
+                "display/subscribe is not implemented for this interaction client".into(),
             ))
         }
     }
@@ -310,6 +414,20 @@ impl AppInteractionClient for AppInteractionHttpClient {
         request: AppSessionCreateRequest,
     ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
         self.call("session/create", request).await
+    }
+
+    async fn prompt(
+        &self,
+        request: AppPromptRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.call("agent/prompt", request).await
+    }
+
+    async fn subscribe_display(
+        &self,
+        request: AppDisplaySubscribeRequest,
+    ) -> Result<AppSubscriptionResult, AppInteractionError> {
+        self.call("display/subscribe", request).await
     }
 }
 
@@ -402,8 +520,11 @@ pub fn interaction_http_url(ws_url: &str) -> Result<String, AppInteractionError>
 #[cfg(test)]
 mod tests {
     use super::{
-        InteractionAuthorityCapability, InteractionInitializeRequest, interaction_http_url,
+        AppDisplayEvent, AppDisplaySubscribeRequest, AppInteractionDisplayNotification,
+        InteractionAuthorityCapability, InteractionInitializeRequest, InteractionUxCapabilities,
+        interaction_http_url,
     };
+    use serde_json::json;
 
     #[test]
     fn interaction_http_url_derives_jsonrpc_post_endpoint_from_ws_endpoint() {
@@ -434,5 +555,58 @@ mod tests {
         assert!(request.requested_ux.display_events);
         assert!(request.requested_ux.stream_text);
         assert!(request.requested_ux.markdown);
+    }
+
+    #[test]
+    fn display_notification_decodes_assistant_delta() {
+        let notification = serde_json::from_value::<AppInteractionDisplayNotification>(json!({
+            "sessionId": "session-1",
+            "subscriptionId": "subscription-1",
+            "event": {
+                "type": "assistant_message_delta",
+                "runId": "run-1",
+                "displayMessageId": "run-1:assistant",
+                "text": "hello"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(notification.session_id, "session-1");
+        assert_eq!(
+            notification.event,
+            AppDisplayEvent::AssistantMessageDelta {
+                run_id: "run-1".into(),
+                display_message_id: "run-1:assistant".into(),
+                text: "hello".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn display_subscribe_request_requests_streaming_display_ux() {
+        let request = AppDisplaySubscribeRequest {
+            session_id: "session-1".into(),
+            ux: Some(InteractionUxCapabilities {
+                display_events: true,
+                stream_text: true,
+                edit_message: true,
+                markdown: true,
+                max_message_bytes: Some(65_536),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "sessionId": "session-1",
+                "ux": {
+                    "displayEvents": true,
+                    "streamText": true,
+                    "editMessage": true,
+                    "markdown": true,
+                    "maxMessageBytes": 65536
+                }
+            })
+        );
     }
 }

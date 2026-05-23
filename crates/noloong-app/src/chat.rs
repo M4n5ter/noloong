@@ -1,6 +1,14 @@
 use crate::interaction::{
-    AppContentBlock, AppInteractionSessionDescriptor, AppInteractionSessionStatus,
+    AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor, AppInteractionSessionStatus,
+    AppMessage,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
+
+mod composer;
+mod streaming;
+
+pub use composer::{ChatComposer, ChatComposerAction};
+pub use streaming::StreamingText;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatSessionStore {
@@ -74,6 +82,69 @@ impl ChatSessionStore {
         &self.transcript
     }
 
+    pub fn apply_display_event(&mut self, event: AppDisplayEvent) {
+        self.apply_display_event_at(event, now_ms());
+    }
+
+    pub fn apply_display_event_at(&mut self, event: AppDisplayEvent, now_ms: u64) {
+        match event {
+            AppDisplayEvent::AssistantMessageDelta {
+                display_message_id,
+                text,
+                ..
+            } => {
+                if let Some(item) = self
+                    .transcript
+                    .iter_mut()
+                    .find(|item| item.message_id == display_message_id)
+                {
+                    let streaming = item.streaming.get_or_insert_with(StreamingText::default);
+                    streaming.push_delta(text, now_ms);
+                    item.text = streaming.text();
+                } else if !text.is_empty() {
+                    let mut streaming = StreamingText::default();
+                    streaming.push_delta(text, now_ms);
+                    self.transcript.push(ChatTranscriptItem {
+                        message_id: display_message_id,
+                        role: ChatTranscriptRole::Assistant,
+                        text: streaming.text(),
+                        streaming: Some(streaming),
+                    });
+                }
+            }
+            AppDisplayEvent::AssistantMessageFinal {
+                display_message_id,
+                message,
+                ..
+            } => {
+                let Some(text) = text_from_message(&message) else {
+                    return;
+                };
+                if let Some(item) = self
+                    .transcript
+                    .iter_mut()
+                    .find(|item| item.message_id == display_message_id)
+                {
+                    item.message_id = message.id;
+                    item.role = ChatTranscriptRole::Assistant;
+                    item.text = text;
+                    item.streaming = None;
+                } else {
+                    self.transcript.push(ChatTranscriptItem {
+                        message_id: message.id,
+                        role: ChatTranscriptRole::Assistant,
+                        text,
+                        streaming: None,
+                    });
+                }
+            }
+            AppDisplayEvent::RunStarted { .. }
+            | AppDisplayEvent::RunCompleted { .. }
+            | AppDisplayEvent::RunFailed { .. }
+            | AppDisplayEvent::RunPaused { .. } => {}
+        }
+    }
+
     fn recover_current_transcript(&mut self, descriptors: &[AppInteractionSessionDescriptor]) {
         let Some(current_session_id) = self.current_session_id.as_deref() else {
             self.transcript.clear();
@@ -96,21 +167,12 @@ impl ChatSessionStore {
                     "assistant" => ChatTranscriptRole::Assistant,
                     _ => return None,
                 };
-                let text = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        AppContentBlock::Text { text } => Some(text.as_str()),
-                        AppContentBlock::Other => None,
-                    })
-                    .collect::<String>();
-                if text.is_empty() {
-                    return None;
-                }
+                let text = text_from_message(message)?;
                 Some(ChatTranscriptItem {
                     message_id: message.id.clone(),
                     role,
                     text,
+                    streaming: None,
                 })
             })
             .collect();
@@ -148,10 +210,142 @@ pub struct ChatTranscriptItem {
     pub message_id: String,
     pub role: ChatTranscriptRole,
     pub text: String,
+    pub streaming: Option<StreamingText>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatTranscriptRole {
     User,
     Assistant,
+}
+
+fn text_from_message(message: &AppMessage) -> Option<String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            AppContentBlock::Text { text } => Some(text.as_str()),
+            AppContentBlock::Other => None,
+        })
+        .collect::<String>();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChatComposer, ChatComposerAction, ChatSessionStore, ChatTranscriptRole, StreamingText,
+    };
+    use crate::interaction::{
+        AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor,
+        AppInteractionSessionState, AppInteractionSessionStatus, AppMessage,
+    };
+
+    #[test]
+    fn display_delta_streams_then_final_replaces_the_same_assistant_bubble() {
+        let mut store = ChatSessionStore::default();
+        store.refresh(vec![session_descriptor(
+            "session-1",
+            AppInteractionSessionStatus::Running,
+            Vec::new(),
+        )]);
+
+        store.apply_display_event(AppDisplayEvent::AssistantMessageDelta {
+            run_id: "run-1".into(),
+            display_message_id: "run-1:assistant".into(),
+            text: "hel".into(),
+        });
+        store.apply_display_event(AppDisplayEvent::AssistantMessageDelta {
+            run_id: "run-1".into(),
+            display_message_id: "run-1:assistant".into(),
+            text: "lo".into(),
+        });
+
+        assert_eq!(store.transcript().len(), 1);
+        assert_eq!(store.transcript()[0].role, ChatTranscriptRole::Assistant);
+        assert_eq!(store.transcript()[0].text, "hello");
+        assert!(store.transcript()[0].streaming.is_some());
+
+        store.apply_display_event(AppDisplayEvent::AssistantMessageFinal {
+            run_id: "run-1".into(),
+            display_message_id: "run-1:assistant".into(),
+            message: message("assistant-1", "assistant", "hello!"),
+            truncated: false,
+        });
+
+        assert_eq!(store.transcript().len(), 1);
+        assert_eq!(store.transcript()[0].message_id, "assistant-1");
+        assert_eq!(store.transcript()[0].text, "hello!");
+        assert_eq!(store.transcript()[0].streaming, None);
+    }
+
+    #[test]
+    fn streaming_segments_ramp_from_dim_to_stable_opacity() {
+        let mut stream = StreamingText::default();
+
+        stream.push_delta("hel", 1_000);
+        stream.push_delta("lo", 1_080);
+
+        let fresh = stream.visible_segments(1_080);
+        assert_eq!(fresh[0].text, "hel");
+        assert_eq!(fresh[0].opacity, 0.7);
+        assert_eq!(fresh[1].text, "lo");
+        assert_eq!(fresh[1].opacity, 0.35);
+
+        let stable = stream.visible_segments(1_260);
+        assert_eq!(stable[0].opacity, 1.0);
+        assert_eq!(stable[1].opacity, 1.0);
+        assert_eq!(stream.text(), "hello");
+    }
+
+    #[test]
+    fn composer_enter_submits_non_empty_text_and_shift_enter_adds_newline() {
+        let mut composer = ChatComposer::default();
+        assert!(!composer.can_send());
+        assert_eq!(composer.press_enter(false), ChatComposerAction::None);
+
+        composer.set_text("hello".into());
+        assert!(composer.can_send());
+        assert_eq!(
+            composer.press_enter(true),
+            ChatComposerAction::InsertNewline
+        );
+        assert_eq!(
+            composer.press_enter(false),
+            ChatComposerAction::Submit("hello".into())
+        );
+        assert!(!composer.can_send());
+    }
+
+    fn session_descriptor(
+        session_id: &str,
+        status: AppInteractionSessionStatus,
+        messages: Vec<AppMessage>,
+    ) -> AppInteractionSessionDescriptor {
+        AppInteractionSessionDescriptor {
+            session_id: session_id.into(),
+            profile_id: "default".into(),
+            parent_session_id: None,
+            role: None,
+            status,
+            state: AppInteractionSessionState { messages },
+            metadata: Default::default(),
+        }
+    }
+
+    fn message(id: &str, role: &str, text: &str) -> AppMessage {
+        AppMessage {
+            id: id.into(),
+            role: role.into(),
+            content: vec![AppContentBlock::Text { text: text.into() }],
+            metadata: Default::default(),
+        }
+    }
 }

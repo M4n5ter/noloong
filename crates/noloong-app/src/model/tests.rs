@@ -1,9 +1,10 @@
 use super::{AppError, AppLaunchOptions, AppRoute, AppStatus, AppViewModel, ChatEmptyState};
 use crate::chat::ChatTranscriptRole;
 use crate::interaction::{
-    AppContentBlock, AppInteractionClient, AppInteractionEndpoint, AppInteractionError,
-    AppInteractionSessionDescriptor, AppInteractionSessionState, AppInteractionSessionStatus,
-    AppInteractionStatus, AppMessage, AppSessionCreateRequest, InteractionInitializeRequest,
+    AppContentBlock, AppDisplayEvent, AppInteractionClient, AppInteractionDisplayNotification,
+    AppInteractionEndpoint, AppInteractionError, AppInteractionSessionDescriptor,
+    AppInteractionSessionState, AppInteractionSessionStatus, AppInteractionStatus, AppMessage,
+    AppPromptInput, AppPromptRequest, AppSessionCreateRequest, InteractionInitializeRequest,
     InteractionInitializeResult, InteractionProfileDescriptor, InteractionServerInfo,
     initialize_interaction_status,
 };
@@ -251,6 +252,109 @@ async fn app_refreshes_current_session_from_interaction_client() {
     );
     assert_eq!(model.chat_transcript()[1].text, "完成");
     assert_eq!(client.last_get_session_id().as_deref(), Some("session-1"));
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn first_chat_send_creates_session_then_submits_prompt() {
+    let dir = temp_dir("app-chat-first-send");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    let client = FakeInteractionClient::ok()
+        .with_create_session(session_descriptor(
+            "session-new",
+            AppInteractionSessionStatus::Idle,
+            Vec::new(),
+        ))
+        .with_prompt_session(session_descriptor(
+            "session-new",
+            AppInteractionSessionStatus::Running,
+            vec![message("user-1", "user", "hello")],
+        ));
+
+    model
+        .submit_chat_message(&client, "  hello  ".into())
+        .await
+        .unwrap();
+
+    assert_eq!(model.current_chat_session_id(), Some("session-new"));
+    assert_eq!(
+        model.chat_sessions()[0].status,
+        AppInteractionSessionStatus::Running
+    );
+    assert_eq!(model.chat_transcript()[0].text, "hello");
+    assert_eq!(
+        client
+            .last_prompt_request()
+            .map(|request| (request.session_id, request.input)),
+        Some((
+            "session-new".into(),
+            AppPromptInput::Text {
+                text: "hello".into()
+            }
+        ))
+    );
+    remove_temp_dir(dir);
+}
+
+#[test]
+fn app_applies_display_notifications_to_current_chat_session() {
+    let dir = temp_dir("app-chat-display-notification");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    model.apply_chat_session_descriptors(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Running,
+        Vec::new(),
+    )]);
+
+    model.apply_display_notification(AppInteractionDisplayNotification {
+        session_id: "session-1".into(),
+        subscription_id: "subscription-1".into(),
+        event: AppDisplayEvent::AssistantMessageDelta {
+            run_id: "run-1".into(),
+            display_message_id: "run-1:assistant".into(),
+            text: "hello".into(),
+        },
+    });
+    model.apply_display_notification(AppInteractionDisplayNotification {
+        session_id: "other-session".into(),
+        subscription_id: "subscription-2".into(),
+        event: AppDisplayEvent::AssistantMessageDelta {
+            run_id: "run-2".into(),
+            display_message_id: "run-2:assistant".into(),
+            text: "ignored".into(),
+        },
+    });
+
+    assert_eq!(model.chat_transcript().len(), 1);
+    assert_eq!(model.chat_transcript()[0].text, "hello");
     remove_temp_dir(dir);
 }
 
@@ -673,9 +777,11 @@ struct FakeInteractionClient {
     result: Result<InteractionInitializeResult, AppInteractionError>,
     sessions: Vec<AppInteractionSessionDescriptor>,
     create_session: Option<AppInteractionSessionDescriptor>,
+    prompt_session: Option<AppInteractionSessionDescriptor>,
     current_session: Option<AppInteractionSessionDescriptor>,
     last_request: std::sync::Mutex<Option<InteractionInitializeRequest>>,
     last_create_request: std::sync::Mutex<Option<AppSessionCreateRequest>>,
+    last_prompt_request: std::sync::Mutex<Option<AppPromptRequest>>,
     last_get_session_id: std::sync::Mutex<Option<String>>,
 }
 
@@ -697,9 +803,11 @@ impl FakeInteractionClient {
             }),
             sessions: Vec::new(),
             create_session: None,
+            prompt_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
+            last_prompt_request: Default::default(),
             last_get_session_id: Default::default(),
         }
     }
@@ -709,9 +817,11 @@ impl FakeInteractionClient {
             result: Err(AppInteractionError::Transport(message.into())),
             sessions: Vec::new(),
             create_session: None,
+            prompt_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
+            last_prompt_request: Default::default(),
             last_get_session_id: Default::default(),
         }
     }
@@ -731,6 +841,11 @@ impl FakeInteractionClient {
         self
     }
 
+    fn with_prompt_session(mut self, descriptor: AppInteractionSessionDescriptor) -> Self {
+        self.prompt_session = Some(descriptor);
+        self
+    }
+
     fn last_request(&self) -> Option<InteractionInitializeRequest> {
         self.last_request
             .lock()
@@ -740,6 +855,13 @@ impl FakeInteractionClient {
 
     fn last_create_request(&self) -> Option<AppSessionCreateRequest> {
         self.last_create_request
+            .lock()
+            .expect("fake interaction lock")
+            .clone()
+    }
+
+    fn last_prompt_request(&self) -> Option<AppPromptRequest> {
+        self.last_prompt_request
             .lock()
             .expect("fake interaction lock")
             .clone()
@@ -779,6 +901,19 @@ impl AppInteractionClient for FakeInteractionClient {
         self.create_session
             .clone()
             .ok_or_else(|| AppInteractionError::Protocol("missing fake create session".into()))
+    }
+
+    async fn prompt(
+        &self,
+        request: AppPromptRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        *self
+            .last_prompt_request
+            .lock()
+            .expect("fake interaction lock") = Some(request);
+        self.prompt_session
+            .clone()
+            .ok_or_else(|| AppInteractionError::Protocol("missing fake prompt session".into()))
     }
 
     async fn get_session(

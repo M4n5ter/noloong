@@ -4460,6 +4460,7 @@ name = "noloong-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "gpui",
  "gpui-component",
  "gpui_platform",
@@ -4470,6 +4471,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "url",
 ]
 
