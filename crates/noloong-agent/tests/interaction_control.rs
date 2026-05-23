@@ -1468,6 +1468,97 @@ async fn interaction_control_lists_and_resolves_tool_approvals() {
     server.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn interaction_display_run_paused_redacts_tool_approval_continuation() {
+    let registry = AgentSessionRegistry::new(model_profile(
+        "approval",
+        Arc::new(HostExecApprovalModel::default()),
+    ))
+    .unwrap();
+    registry
+        .create_session(AgentSessionCreateRequest {
+            session_id: Some("root".into()),
+            manifest: Some(
+                AgentManifest::default()
+                    .with_enabled_tool(BuiltInToolName::HostExecStart)
+                    .with_file_edit_tool_policy(noloong_agent::FileEditToolPolicy::Disabled),
+            ),
+            ..AgentSessionCreateRequest::default()
+        })
+        .await
+        .unwrap();
+    let handler =
+        InteractionControlHandler::new(registry, InteractionCapabilityPolicy::allow_all());
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server);
+    let server = tokio::spawn(serve_jsonrpc(server_reader, server_writer, handler));
+    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let mut lines = BufReader::new(client_reader).lines();
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            1,
+            "initialize",
+            json!({
+                "name": "display-pause-client",
+                "requestedAuthority": ["agent.run"],
+                "requestedUx": {"displayEvents": true, "streamText": true}
+            }),
+        ),
+    )
+    .await;
+    read_message(&mut lines).await;
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            2,
+            "display/subscribe",
+            json!({
+                "sessionId": "root",
+                "ux": {"displayEvents": true, "streamText": true}
+            }),
+        ),
+    )
+    .await;
+    read_message(&mut lines).await;
+
+    write_rpc(
+        &mut client_writer,
+        rpc(
+            3,
+            "agent/prompt",
+            json!({
+                "sessionId": "root",
+                "input": {"type": "text", "text": "run command"}
+            }),
+        ),
+    )
+    .await;
+
+    let mut pause_reason = None;
+    loop {
+        let message = read_message(&mut lines).await;
+        if message["method"] == notification::DISPLAY_EVENT
+            && message["params"]["event"]["type"] == "run_paused"
+        {
+            pause_reason = Some(message["params"]["event"]["reason"].clone());
+        }
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            assert_eq!(message["result"]["status"], "paused");
+            break;
+        }
+    }
+
+    assert_eq!(pause_reason, Some(json!({"type": "tool_approval"})));
+
+    write_rpc(&mut client_writer, rpc(4, "shutdown", json!({}))).await;
+    read_message(&mut lines).await;
+    drop(client_writer);
+    server.await.unwrap().unwrap();
+}
+
 async fn test_handler(profile_id: &str) -> InteractionControlHandler {
     InteractionControlHandler::new(
         AgentSessionRegistry::new(text_profile(profile_id)).unwrap(),

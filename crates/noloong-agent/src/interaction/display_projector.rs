@@ -4,9 +4,9 @@ use super::{
 };
 use crate::text;
 use noloong_agent_core::{
-    AgentEvent, AgentEventKind, AgentMessage, ContentBlock, ModelStreamEvent,
+    AgentEvent, AgentEventKind, AgentMessage, ContentBlock, ModelStreamEvent, RunPauseReason,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Instant};
 
 pub(super) struct DisplayProjector {
@@ -75,7 +75,7 @@ impl DisplayProjector {
             }
             AgentEventKind::RunPaused { reason } => vec![DisplayEvent::RunPaused {
                 run_id: event.run_id,
-                reason: serde_json::to_value(reason).unwrap_or(Value::Null),
+                reason: display_pause_reason(&reason),
             }],
             AgentEventKind::ModelStreamEvent {
                 event: ModelStreamEvent::ThinkingDelta { delta },
@@ -172,6 +172,12 @@ impl DisplayProjector {
             thought_id,
             elapsed_ms: started_at.elapsed().as_millis() as u64,
         }]
+    }
+}
+
+fn display_pause_reason(reason: &RunPauseReason) -> Value {
+    match reason {
+        RunPauseReason::ToolApproval { .. } => json!({"type": "tool_approval"}),
     }
 }
 

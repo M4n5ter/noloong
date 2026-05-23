@@ -23,7 +23,7 @@ pub(crate) fn launch_in_bundle(options: AppLaunchOptions) -> Result<(), AppError
         return Ok(());
     }
     write_launch_options(&options)?;
-    let status = Command::new("open").arg(&bundle).status()?;
+    let status = Command::new("open").arg("-W").arg(&bundle).status()?;
     if status.success() {
         Ok(())
     } else {
@@ -92,7 +92,10 @@ fn remove_existing_path(path: &Path) -> Result<(), AppError> {
 
 fn write_launch_options(options: &AppLaunchOptions) -> Result<(), AppError> {
     let path = launch_options_path()?;
-    if options.profile_config_path.is_none() && options.locale.is_none() {
+    if options.profile_config_path.is_none()
+        && options.locale.is_none()
+        && options.interaction_endpoint.is_none()
+    {
         let _ = fs::remove_file(path);
         return Ok(());
     }
@@ -110,7 +113,17 @@ fn launch_options_text(options: &AppLaunchOptions) -> String {
         .locale
         .map(|locale| locale.code())
         .unwrap_or_default();
-    format!("{profile_config}\n{locale}\n")
+    let interaction_ws_url = options
+        .interaction_endpoint
+        .as_ref()
+        .map(|endpoint| endpoint.ws_url.as_str())
+        .unwrap_or_default();
+    let interaction_token = options
+        .interaction_endpoint
+        .as_ref()
+        .and_then(|endpoint| endpoint.bearer_token.as_deref())
+        .unwrap_or_default();
+    format!("{profile_config}\n{locale}\n{interaction_ws_url}\n{interaction_token}\n")
 }
 
 fn clear_launch_options() {
@@ -182,12 +195,20 @@ launch_options="${HOME:-}/Library/Application Support/Noloong/launch-options.txt
 if [ -n "${HOME:-}" ] && [ -f "$launch_options" ]; then
   profile_config=$(sed -n '1p' "$launch_options")
   locale=$(sed -n '2p' "$launch_options")
+  interaction_ws_url=$(sed -n '3p' "$launch_options")
+  interaction_token=$(sed -n '4p' "$launch_options")
   rm -f "$launch_options"
   if [ -n "$profile_config" ]; then
     set -- --profile-config "$profile_config" "$@"
   fi
   if [ -n "$locale" ]; then
     set -- "$@" --locale "$locale"
+  fi
+  if [ -n "$interaction_ws_url" ]; then
+    set -- "$@" --interaction-ws-url "$interaction_ws_url"
+  fi
+  if [ -n "$interaction_token" ]; then
+    set -- "$@" --interaction-token "$interaction_token"
   fi
 fi
 exec "$script_dir/Noloong" app "$@"
@@ -234,7 +255,7 @@ fn activate_bundle() -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{absolute_profile_config_arg, launch_options_text};
-    use crate::AppLaunchOptions;
+    use crate::{AppInteractionEndpoint, AppLaunchOptions};
     use noloong_config::Locale;
     use std::path::Path;
 
@@ -247,7 +268,25 @@ mod tests {
             interaction_status: None,
         });
 
-        assert_eq!(text, "/tmp/profile config.jsonc\nzh\n");
+        assert_eq!(text, "/tmp/profile config.jsonc\nzh\n\n\n");
+    }
+
+    #[test]
+    fn launch_options_preserve_interaction_endpoint() {
+        let text = launch_options_text(&AppLaunchOptions {
+            profile_config_path: Some("/tmp/profile.jsonc".to_string()),
+            locale: Some(Locale::En),
+            interaction_endpoint: Some(AppInteractionEndpoint {
+                ws_url: "ws://127.0.0.1:9876/jsonrpc/ws".into(),
+                bearer_token: Some("secret token".into()),
+            }),
+            interaction_status: None,
+        });
+
+        assert_eq!(
+            text,
+            "/tmp/profile.jsonc\nen\nws://127.0.0.1:9876/jsonrpc/ws\nsecret token\n"
+        );
     }
 
     #[test]
