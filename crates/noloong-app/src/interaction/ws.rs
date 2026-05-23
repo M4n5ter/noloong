@@ -1,8 +1,8 @@
 use super::{
-    AppDisplaySubscribeRequest, AppInteractionClient, AppInteractionDisplayNotification,
-    AppInteractionEndpoint, AppInteractionError, AppInteractionSessionDescriptor, AppPromptRequest,
-    AppSessionCreateRequest, AppSessionRequest, AppSubscriptionResult,
-    InteractionInitializeRequest, InteractionInitializeResult,
+    AppApprovalResolveRequest, AppDisplaySubscribeRequest, AppInteractionClient,
+    AppInteractionDisplayNotification, AppInteractionEndpoint, AppInteractionError,
+    AppInteractionSessionDescriptor, AppPromptRequest, AppSessionCreateRequest, AppSessionRequest,
+    AppSubscriptionResult, InteractionInitializeRequest, InteractionInitializeResult,
 };
 use futures_util::{
     SinkExt, StreamExt,
@@ -218,6 +218,13 @@ impl AppInteractionClient for AppInteractionWsClient {
         request: AppSessionRequest,
     ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
         self.request_as("agent/abort", request).await
+    }
+
+    async fn resolve_approval(
+        &self,
+        request: AppApprovalResolveRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.request_as("approval/resolve", request).await
     }
 
     async fn subscribe_display(

@@ -1,13 +1,13 @@
 use super::NoloongAppView;
-use crate::chat::{
-    ChatComposer, ChatComposerAction, ChatRunStatus, ChatTranscriptItem, ChatTranscriptRole,
-};
+use crate::chat::{ChatComposer, ChatComposerAction, ChatRunStatus};
 use crate::{
     AppInteractionStatus, AppTextKey, ChatEmptyState,
     interaction::{
-        AppDisplaySubscribeRequest, AppInteractionClient as _, AppInteractionDisplayNotification,
-        AppInteractionSessionDescriptor, AppInteractionSessionStatus, AppPromptInput,
-        AppPromptRequest, AppSessionCreateRequest, AppSessionRequest, InteractionUxCapabilities,
+        AppApprovalResolveRequest, AppDisplaySubscribeRequest, AppInteractionClient as _,
+        AppInteractionDisplayNotification, AppInteractionSessionDescriptor,
+        AppInteractionSessionStatus, AppPromptInput, AppPromptRequest, AppSessionCreateRequest,
+        AppSessionRequest, AppToolPermissionDecision, AppToolPermissionOutcome,
+        InteractionUxCapabilities,
     },
 };
 use gpui::{
@@ -262,138 +262,11 @@ impl NoloongAppView {
             .flex_col()
             .gap_4()
             .overflow_hidden()
-            .children(self.model.chat_transcript().iter().map(|item| {
-                if item.role == ChatTranscriptRole::Thought {
-                    return self.render_thought_item(item, cx);
-                }
-                let is_user = item.role == ChatTranscriptRole::User;
-                let content =
-                    if let Some(streaming) = &item.streaming {
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .children(streaming.visible_segments(now_ms).into_iter().map(
-                                |segment| {
-                                    div()
-                                        .opacity(segment.opacity)
-                                        .child(segment.text)
-                                        .into_any_element()
-                                },
-                            ))
-                            .into_any_element()
-                    } else {
-                        div().child(item.text.clone()).into_any_element()
-                    };
-                div()
-                    .flex()
-                    .justify_end_when(is_user)
-                    .child(
-                        div()
-                            .max_w(px(680.0))
-                            .rounded_xl()
-                            .border_1()
-                            .border_color(if is_user {
-                                rgb(0x315f4b)
-                            } else {
-                                rgb(0x27384a)
-                            })
-                            .bg(if is_user {
-                                rgb(0x16362b)
-                            } else {
-                                rgb(0x101923)
-                            })
-                            .px_4()
-                            .py_3()
-                            .text_base()
-                            .text_color(rgb(0xe6edf3))
-                            .child(content),
-                    )
-                    .into_any_element()
-            }))
-            .into_any_element()
-    }
-
-    fn render_thought_item(&self, item: &ChatTranscriptItem, cx: &mut Context<Self>) -> AnyElement {
-        let thought_id = item.message_id.clone();
-        let element_id = SharedString::from(format!("thought-{thought_id}"));
-        let thought = item.thought.as_ref();
-        let is_completed = thought.is_some_and(|thought| thought.completed);
-        let is_expanded = thought.is_some_and(|thought| thought.expanded || !thought.completed);
-        let summary = thought
-            .map(|thought| thought.summary.as_str())
-            .unwrap_or("");
-        let raw = thought.map(|thought| thought.raw.as_str()).unwrap_or("");
-        let body = if !summary.is_empty() { summary } else { raw };
-        let title = thought
-            .and_then(|thought| {
-                thought
-                    .completed
-                    .then(|| {
-                        thought
-                            .elapsed_ms
-                            .map(|elapsed| self.catalog.thought_elapsed(elapsed))
-                    })
-                    .flatten()
-            })
-            .unwrap_or_else(|| self.catalog.text(AppTextKey::Thinking).to_string());
-        div()
-            .flex()
-            .justify_start()
-            .child(
-                div()
-                    .id(element_id)
-                    .max_w(px(680.0))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(rgb(0x29384b))
-                    .bg(rgb(0x0d151f))
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        if this.model.toggle_thought_expanded(&thought_id) {
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(if is_completed {
-                                rgb(0x8da2ba)
-                            } else {
-                                rgb(0xaecbff)
-                            })
-                            .child(title),
-                    )
-                    .when(is_expanded && !body.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xb8c4d2))
-                                .child(body.to_string()),
-                        )
-                    })
-                    .when(is_expanded && !raw.is_empty() && summary != raw, |this| {
-                        this.child(
-                            div()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(rgb(0x253545))
-                                .bg(rgb(0x111b26))
-                                .px_3()
-                                .py_2()
-                                .text_xs()
-                                .text_color(rgb(0x7f91a7))
-                                .child(raw.to_string()),
-                        )
-                    }),
+            .children(
+                self.model
+                    .chat_transcript()
+                    .iter()
+                    .map(|item| self.render_transcript_item(item, now_ms, cx)),
             )
             .into_any_element()
     }
@@ -519,6 +392,48 @@ impl NoloongAppView {
             };
             match client.abort(AppSessionRequest { session_id }).await {
                 Ok(session) => update_chat_session(this, cx, session),
+                Err(error) => update_chat_error(this, cx, error.to_string()),
+            }
+        });
+    }
+
+    pub(super) fn start_resolve_chat_approval(
+        &mut self,
+        approval_id: String,
+        outcome: AppToolPermissionOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(endpoint) = self.model.interaction_endpoint.clone() else {
+            return;
+        };
+        let Some(session_id) = self.model.current_chat_session_id().map(str::to_string) else {
+            return;
+        };
+        self.chat_approval_task = cx.spawn(async move |this, cx| {
+            let client = match crate::interaction::AppInteractionWsClient::connect(&endpoint).await
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    update_chat_error(this, cx, error.to_string());
+                    return;
+                }
+            };
+            let request = AppApprovalResolveRequest {
+                session_id,
+                approval_id: approval_id.clone(),
+                decision: AppToolPermissionDecision::from_outcome(outcome),
+            };
+            match client.resolve_approval(request).await {
+                Ok(session) => {
+                    let Some(this) = this.upgrade() else {
+                        return;
+                    };
+                    this.update(cx, |this, cx| {
+                        this.model
+                            .apply_chat_approval_resolution(&approval_id, outcome, session);
+                        cx.notify();
+                    });
+                }
                 Err(error) => update_chat_error(this, cx, error.to_string()),
             }
         });
@@ -689,19 +604,6 @@ impl NoloongAppView {
             .text_lg()
             .text_color(rgb(0xaab4c0))
             .child(self.catalog.text(key))
-    }
-}
-
-trait ChatElementExt {
-    fn justify_end_when(self, enabled: bool) -> Self;
-}
-
-impl<E> ChatElementExt for E
-where
-    E: Styled,
-{
-    fn justify_end_when(self, enabled: bool) -> Self {
-        if enabled { self.justify_end() } else { self }
     }
 }
 

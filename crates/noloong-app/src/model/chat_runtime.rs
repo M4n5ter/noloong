@@ -1,14 +1,17 @@
 #[cfg(test)]
 use super::AppError;
 use super::AppViewModel;
-use crate::chat::{ChatRunState, ChatRunStatus, ChatSessionSummary, ChatTranscriptItem};
+use crate::chat::{
+    ChatApprovalStatus, ChatRunState, ChatRunStatus, ChatSessionSummary, ChatTranscriptItem,
+};
 #[cfg(test)]
 use crate::interaction::{
-    AppInteractionClient, AppPromptInput, AppPromptRequest, AppSessionCreateRequest,
-    AppSessionRequest,
+    AppApprovalResolveRequest, AppInteractionClient, AppPromptInput, AppPromptRequest,
+    AppSessionCreateRequest, AppSessionRequest, AppToolPermissionDecision,
 };
 use crate::interaction::{
     AppInteractionDisplayNotification, AppInteractionSessionDescriptor, AppInteractionStatus,
+    AppToolPermissionOutcome,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +151,43 @@ impl AppViewModel {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub async fn resolve_chat_approval(
+        &mut self,
+        client: &impl AppInteractionClient,
+        approval_id: String,
+        outcome: AppToolPermissionOutcome,
+    ) -> Result<(), AppError> {
+        let Some(session_id) = self.current_chat_session_id().map(str::to_string) else {
+            return Ok(());
+        };
+        let descriptor = client
+            .resolve_approval(AppApprovalResolveRequest {
+                session_id,
+                approval_id: approval_id.clone(),
+                decision: AppToolPermissionDecision::from_outcome(outcome),
+            })
+            .await
+            .map_err(|error| AppError::Interaction(error.to_string()))?;
+        self.apply_chat_approval_resolution(&approval_id, outcome, descriptor);
+        Ok(())
+    }
+
+    pub fn apply_chat_approval_resolution(
+        &mut self,
+        approval_id: &str,
+        outcome: AppToolPermissionOutcome,
+        descriptor: AppInteractionSessionDescriptor,
+    ) {
+        let status = match outcome {
+            AppToolPermissionOutcome::Allow => ChatApprovalStatus::Allowed,
+            AppToolPermissionOutcome::Deny => ChatApprovalStatus::Denied,
+        };
+        self.chat.resolve_approval(approval_id, status);
+        self.chat
+            .update_session_descriptor_preserving_transcript(descriptor);
+    }
+
     pub fn current_chat_run(&self) -> Option<&ChatRunState> {
         self.chat.current_run()
     }
@@ -190,5 +230,9 @@ impl AppViewModel {
 
     pub fn toggle_thought_expanded(&mut self, thought_id: &str) -> bool {
         self.chat.toggle_thought_expanded(thought_id)
+    }
+
+    pub fn toggle_tool_expanded(&mut self, tool_call_id: &str) -> bool {
+        self.chat.toggle_tool_expanded(tool_call_id)
     }
 }

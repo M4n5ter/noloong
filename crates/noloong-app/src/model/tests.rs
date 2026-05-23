@@ -1,10 +1,11 @@
 use super::{AppError, AppLaunchOptions, AppRoute, AppStatus, AppViewModel, ChatEmptyState};
-use crate::chat::ChatTranscriptRole;
+use crate::chat::{ChatApprovalStatus, ChatTranscriptRole};
 use crate::interaction::{
-    AppContentBlock, AppDisplayEvent, AppInteractionClient, AppInteractionDisplayNotification,
-    AppInteractionEndpoint, AppInteractionError, AppInteractionSessionDescriptor,
-    AppInteractionSessionState, AppInteractionSessionStatus, AppInteractionStatus, AppMessage,
-    AppPromptInput, AppPromptRequest, AppSessionCreateRequest, AppSessionRequest,
+    AppApprovalResolveRequest, AppContentBlock, AppDisplayEvent, AppInteractionClient,
+    AppInteractionDisplayNotification, AppInteractionEndpoint, AppInteractionError,
+    AppInteractionSessionDescriptor, AppInteractionSessionState, AppInteractionSessionStatus,
+    AppInteractionStatus, AppMessage, AppPromptInput, AppPromptRequest, AppSessionCreateRequest,
+    AppSessionRequest, AppToolApprovalRequest, AppToolPermissionOutcome,
     InteractionInitializeRequest, InteractionInitializeResult, InteractionProfileDescriptor,
     InteractionServerInfo, initialize_interaction_status,
 };
@@ -115,10 +116,10 @@ async fn app_refreshes_real_sessions_and_recovers_current_transcript() {
     assert_eq!(model.current_chat_session_id(), Some("session-1"));
     let transcript = model.chat_transcript();
     assert_eq!(transcript.len(), 2);
-    assert_eq!(transcript[0].role, ChatTranscriptRole::User);
-    assert_eq!(transcript[0].text, "请帮我检查项目");
-    assert_eq!(transcript[1].role, ChatTranscriptRole::Assistant);
-    assert_eq!(transcript[1].text, "我会先查看当前状态。");
+    assert_eq!(transcript[0].role(), ChatTranscriptRole::User);
+    assert_eq!(transcript[0].text(), "请帮我检查项目");
+    assert_eq!(transcript[1].role(), ChatTranscriptRole::Assistant);
+    assert_eq!(transcript[1].text(), "我会先查看当前状态。");
     remove_temp_dir(dir);
 }
 
@@ -168,8 +169,8 @@ async fn app_selects_chat_session_without_mutating_other_session_status() {
             .map(|session| session.status),
         Some(AppInteractionSessionStatus::Running)
     );
-    assert_eq!(model.chat_transcript()[0].text, "总结一下");
-    assert_eq!(model.chat_transcript()[1].text, "总结完成。");
+    assert_eq!(model.chat_transcript()[0].text(), "总结一下");
+    assert_eq!(model.chat_transcript()[1].text(), "总结完成。");
     remove_temp_dir(dir);
 }
 
@@ -250,7 +251,7 @@ async fn app_refreshes_current_session_from_interaction_client() {
         model.chat_sessions()[0].status,
         AppInteractionSessionStatus::Completed
     );
-    assert_eq!(model.chat_transcript()[1].text, "完成");
+    assert_eq!(model.chat_transcript()[1].text(), "完成");
     assert_eq!(client.last_get_session_id().as_deref(), Some("session-1"));
     remove_temp_dir(dir);
 }
@@ -295,7 +296,7 @@ async fn first_chat_send_creates_session_then_submits_prompt() {
         model.chat_sessions()[0].status,
         AppInteractionSessionStatus::Running
     );
-    assert_eq!(model.chat_transcript()[0].text, "hello");
+    assert_eq!(model.chat_transcript()[0].text(), "hello");
     assert_eq!(
         client
             .last_prompt_request()
@@ -354,6 +355,124 @@ async fn abort_current_chat_run_calls_agent_abort_for_current_session_only() {
     remove_temp_dir(dir);
 }
 
+#[tokio::test]
+async fn app_resolves_chat_approval_without_aborting_current_run() {
+    let dir = temp_dir("app-chat-resolve-approval");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    model.apply_chat_session_descriptors(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Paused,
+        Vec::new(),
+    )]);
+    model.apply_display_notification(AppInteractionDisplayNotification {
+        session_id: "session-1".into(),
+        subscription_id: "subscription-1".into(),
+        event: AppDisplayEvent::ApprovalRequested {
+            approval: approval_request("approval-1", "host.exec.start"),
+        },
+    });
+    let client = FakeInteractionClient::ok().with_approval_session(session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Running,
+        Vec::new(),
+    ));
+
+    model
+        .resolve_chat_approval(
+            &client,
+            "approval-1".into(),
+            AppToolPermissionOutcome::Allow,
+        )
+        .await
+        .unwrap();
+
+    let request = client.last_approval_request().expect("approval request");
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.approval_id, "approval-1");
+    assert_eq!(request.decision.outcome, AppToolPermissionOutcome::Allow);
+    assert_eq!(client.last_abort_request(), None);
+    assert_eq!(
+        model.chat_transcript()[0].approval().unwrap().status,
+        ChatApprovalStatus::Allowed
+    );
+    assert_eq!(
+        model.chat_sessions()[0].status,
+        AppInteractionSessionStatus::Running
+    );
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn app_rejects_chat_approval_with_deny_decision() {
+    let dir = temp_dir("app-chat-reject-approval");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    model.apply_chat_session_descriptors(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Paused,
+        Vec::new(),
+    )]);
+    model.apply_display_notification(AppInteractionDisplayNotification {
+        session_id: "session-1".into(),
+        subscription_id: "subscription-1".into(),
+        event: AppDisplayEvent::ApprovalRequested {
+            approval: approval_request("approval-1", "host.exec.start"),
+        },
+    });
+    let client = FakeInteractionClient::ok().with_approval_session(session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Running,
+        Vec::new(),
+    ));
+
+    model
+        .resolve_chat_approval(&client, "approval-1".into(), AppToolPermissionOutcome::Deny)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        client
+            .last_approval_request()
+            .expect("approval request")
+            .decision
+            .outcome,
+        AppToolPermissionOutcome::Deny
+    );
+    assert_eq!(
+        model.chat_transcript()[0].approval().unwrap().status,
+        ChatApprovalStatus::Denied
+    );
+    assert_eq!(client.last_abort_request(), None);
+    remove_temp_dir(dir);
+}
+
 #[test]
 fn app_applies_display_notifications_to_current_chat_session() {
     let dir = temp_dir("app-chat-display-notification");
@@ -398,7 +517,7 @@ fn app_applies_display_notifications_to_current_chat_session() {
     });
 
     assert_eq!(model.chat_transcript().len(), 1);
-    assert_eq!(model.chat_transcript()[0].text, "hello");
+    assert_eq!(model.chat_transcript()[0].text(), "hello");
     remove_temp_dir(dir);
 }
 
@@ -823,11 +942,13 @@ struct FakeInteractionClient {
     create_session: Option<AppInteractionSessionDescriptor>,
     prompt_session: Option<AppInteractionSessionDescriptor>,
     abort_session: Option<AppInteractionSessionDescriptor>,
+    approval_session: Option<AppInteractionSessionDescriptor>,
     current_session: Option<AppInteractionSessionDescriptor>,
     last_request: std::sync::Mutex<Option<InteractionInitializeRequest>>,
     last_create_request: std::sync::Mutex<Option<AppSessionCreateRequest>>,
     last_prompt_request: std::sync::Mutex<Option<AppPromptRequest>>,
     last_abort_request: std::sync::Mutex<Option<AppSessionRequest>>,
+    last_approval_request: std::sync::Mutex<Option<AppApprovalResolveRequest>>,
     last_get_session_id: std::sync::Mutex<Option<String>>,
 }
 
@@ -851,11 +972,13 @@ impl FakeInteractionClient {
             create_session: None,
             prompt_session: None,
             abort_session: None,
+            approval_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
             last_prompt_request: Default::default(),
             last_abort_request: Default::default(),
+            last_approval_request: Default::default(),
             last_get_session_id: Default::default(),
         }
     }
@@ -867,11 +990,13 @@ impl FakeInteractionClient {
             create_session: None,
             prompt_session: None,
             abort_session: None,
+            approval_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
             last_prompt_request: Default::default(),
             last_abort_request: Default::default(),
+            last_approval_request: Default::default(),
             last_get_session_id: Default::default(),
         }
     }
@@ -901,6 +1026,11 @@ impl FakeInteractionClient {
         self
     }
 
+    fn with_approval_session(mut self, descriptor: AppInteractionSessionDescriptor) -> Self {
+        self.approval_session = Some(descriptor);
+        self
+    }
+
     fn last_request(&self) -> Option<InteractionInitializeRequest> {
         self.last_request
             .lock()
@@ -924,6 +1054,13 @@ impl FakeInteractionClient {
 
     fn last_abort_request(&self) -> Option<AppSessionRequest> {
         self.last_abort_request
+            .lock()
+            .expect("fake interaction lock")
+            .clone()
+    }
+
+    fn last_approval_request(&self) -> Option<AppApprovalResolveRequest> {
+        self.last_approval_request
             .lock()
             .expect("fake interaction lock")
             .clone()
@@ -991,6 +1128,19 @@ impl AppInteractionClient for FakeInteractionClient {
             .ok_or_else(|| AppInteractionError::Protocol("missing fake abort session".into()))
     }
 
+    async fn resolve_approval(
+        &self,
+        request: AppApprovalResolveRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        *self
+            .last_approval_request
+            .lock()
+            .expect("fake interaction lock") = Some(request);
+        self.approval_session
+            .clone()
+            .ok_or_else(|| AppInteractionError::Protocol("missing fake approval session".into()))
+    }
+
     async fn get_session(
         &self,
         session_id: &str,
@@ -1027,5 +1177,24 @@ fn message(id: &str, role: &str, text: &str) -> AppMessage {
         role: role.into(),
         content: vec![AppContentBlock::Text { text: text.into() }],
         metadata: Default::default(),
+    }
+}
+
+fn approval_request(approval_id: &str, tool_name: &str) -> AppToolApprovalRequest {
+    AppToolApprovalRequest {
+        approval_id: approval_id.into(),
+        tool_call: crate::interaction::AppToolCall {
+            id: "call-1".into(),
+            name: tool_name.into(),
+            arguments: serde_json::json!({"command": "echo ok"}),
+        },
+        permissions: Vec::new(),
+        hook_id: None,
+        request: crate::interaction::AppToolApprovalRequestSpec {
+            prompt: Some("Approve command?".into()),
+            reason: Some("Needs host command permission".into()),
+            expires_at_ms: None,
+            metadata: serde_json::json!({}),
+        },
     }
 }

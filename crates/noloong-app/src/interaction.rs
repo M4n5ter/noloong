@@ -138,6 +138,14 @@ pub struct AppSessionRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AppApprovalResolveRequest {
+    pub session_id: String,
+    pub approval_id: String,
+    pub decision: AppToolPermissionDecision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AppPromptRequest {
     pub session_id: String,
     pub input: AppPromptInput,
@@ -259,6 +267,137 @@ pub enum AppDisplayEvent {
         #[serde(default)]
         truncated: bool,
     },
+    ToolStarted {
+        tool_call_id: String,
+        tool_name: String,
+    },
+    ToolUpdated {
+        tool_call_id: String,
+        update: AppToolUpdate,
+    },
+    ToolCompleted {
+        tool_call_id: String,
+        output: AppToolOutput,
+    },
+    ApprovalRequested {
+        approval: AppToolApprovalRequest,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolUpdate {
+    #[serde(default)]
+    pub content: Vec<AppContentBlock>,
+    #[serde(default)]
+    pub details: Value,
+}
+
+impl AppToolUpdate {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![AppContentBlock::Text { text: text.into() }],
+            details: Value::Null,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolOutput {
+    #[serde(default)]
+    pub content: Vec<AppContentBlock>,
+    #[serde(default)]
+    pub details: Value,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub updates: Vec<AppToolUpdate>,
+}
+
+impl AppToolOutput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![AppContentBlock::Text { text: text.into() }],
+            details: Value::Null,
+            is_error: false,
+            updates: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolCall {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolPermissionRequirement {
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolApprovalRequestSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolApprovalRequest {
+    pub approval_id: String,
+    pub tool_call: AppToolCall,
+    #[serde(default)]
+    pub permissions: Vec<AppToolPermissionRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_id: Option<String>,
+    pub request: AppToolApprovalRequestSpec,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppToolPermissionOutcome {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppToolPermissionDecision {
+    pub outcome: AppToolPermissionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+impl AppToolPermissionDecision {
+    pub fn from_outcome(outcome: AppToolPermissionOutcome) -> Self {
+        Self {
+            outcome,
+            reason: Some("Resolved from noloong app".into()),
+            approver: Some("noloong-app".into()),
+            metadata: Value::Null,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -349,6 +488,19 @@ pub trait AppInteractionClient {
             let _ = request;
             Err(AppInteractionError::Protocol(
                 "agent/abort is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
+    fn resolve_approval(
+        &self,
+        request: AppApprovalResolveRequest,
+    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
+    {
+        async move {
+            let _ = request;
+            Err(AppInteractionError::Protocol(
+                "approval/resolve is not implemented for this interaction client".into(),
             ))
         }
     }
@@ -461,6 +613,13 @@ impl AppInteractionClient for AppInteractionHttpClient {
         self.call("agent/abort", request).await
     }
 
+    async fn resolve_approval(
+        &self,
+        request: AppApprovalResolveRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.call("approval/resolve", request).await
+    }
+
     async fn subscribe_display(
         &self,
         request: AppDisplaySubscribeRequest,
@@ -558,7 +717,8 @@ pub fn interaction_http_url(ws_url: &str) -> Result<String, AppInteractionError>
 #[cfg(test)]
 mod tests {
     use super::{
-        AppDisplayEvent, AppDisplaySubscribeRequest, AppInteractionDisplayNotification,
+        AppApprovalResolveRequest, AppDisplayEvent, AppDisplaySubscribeRequest,
+        AppInteractionDisplayNotification, AppToolPermissionDecision, AppToolPermissionOutcome,
         InteractionAuthorityCapability, InteractionInitializeRequest, InteractionUxCapabilities,
         interaction_http_url,
     };
@@ -663,6 +823,81 @@ mod tests {
             AppDisplayEvent::RunAborted {
                 run_id: "run-1".into(),
             }
+        );
+    }
+
+    #[test]
+    fn display_notification_decodes_tool_and_approval_events() {
+        let tool = serde_json::from_value::<AppInteractionDisplayNotification>(json!({
+            "sessionId": "session-1",
+            "subscriptionId": "subscription-1",
+            "event": {
+                "type": "tool_completed",
+                "toolCallId": "call-1",
+                "output": {
+                    "content": [{"type": "text", "text": "done"}],
+                    "isError": false
+                }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            tool.event,
+            AppDisplayEvent::ToolCompleted {
+                ref tool_call_id,
+                ..
+            } if tool_call_id == "call-1"
+        ));
+
+        let approval = serde_json::from_value::<AppInteractionDisplayNotification>(json!({
+            "sessionId": "session-1",
+            "subscriptionId": "subscription-1",
+            "event": {
+                "type": "approval_requested",
+                "approval": {
+                    "approvalId": "approval-1",
+                    "toolCall": {
+                        "id": "call-1",
+                        "name": "host.exec.start",
+                        "arguments": {"command": "echo ok"}
+                    },
+                    "permissions": [],
+                    "request": {
+                        "prompt": "Approve command?",
+                        "metadata": {}
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            approval.event,
+            AppDisplayEvent::ApprovalRequested { ref approval }
+                if approval.approval_id == "approval-1"
+                    && approval.tool_call.name == "host.exec.start"
+        ));
+    }
+
+    #[test]
+    fn approval_resolve_request_uses_interaction_protocol_shape() {
+        let request = AppApprovalResolveRequest {
+            session_id: "session-1".into(),
+            approval_id: "approval-1".into(),
+            decision: AppToolPermissionDecision::from_outcome(AppToolPermissionOutcome::Deny),
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "sessionId": "session-1",
+                "approvalId": "approval-1",
+                "decision": {
+                    "outcome": "deny",
+                    "reason": "Resolved from noloong app",
+                    "approver": "noloong-app",
+                    "metadata": null
+                }
+            })
         );
     }
 

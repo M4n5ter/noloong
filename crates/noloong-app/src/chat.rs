@@ -1,14 +1,18 @@
 use crate::interaction::{
     AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor, AppInteractionSessionStatus,
-    AppMessage,
+    AppMessage, AppToolApprovalRequest, AppToolOutput,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod composer;
 mod streaming;
+mod transcript;
 
 pub use composer::{ChatComposer, ChatComposerAction};
 pub use streaming::StreamingText;
+pub use transcript::{
+    ChatApprovalCard, ChatApprovalStatus, ChatToolActivity, ChatTranscriptItem, ChatTranscriptRole,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatSessionStore {
@@ -55,6 +59,8 @@ impl ChatSessionStore {
 
     pub fn upsert_and_select(&mut self, descriptor: AppInteractionSessionDescriptor) {
         let session_id = descriptor.session_id.clone();
+        let previous_transcript = (self.current_session_id.as_deref() == Some(session_id.as_str()))
+            .then(|| self.transcript.clone());
         if let Some(existing) = self
             .descriptors
             .iter_mut()
@@ -72,6 +78,9 @@ impl ChatSessionStore {
         self.current_session_id = Some(session_id);
         let descriptors = self.descriptors.clone();
         self.recover_current_transcript(&descriptors);
+        if let Some(previous_transcript) = previous_transcript {
+            self.merge_live_display_items(previous_transcript);
+        }
         self.recover_current_run(&descriptors);
     }
 
@@ -97,6 +106,45 @@ impl ChatSessionStore {
 
     pub fn set_connection_error(&mut self, error: String) {
         self.connection_error = Some(error);
+    }
+
+    pub fn resolve_approval(&mut self, approval_id: &str, status: ChatApprovalStatus) -> bool {
+        let Some(approval) = self
+            .transcript
+            .iter_mut()
+            .find(|item| item.message_id == approval_id)
+            .and_then(ChatTranscriptItem::approval_mut)
+        else {
+            return false;
+        };
+        approval.resolve(status);
+        true
+    }
+
+    pub fn update_session_descriptor_preserving_transcript(
+        &mut self,
+        descriptor: AppInteractionSessionDescriptor,
+    ) {
+        let session_id = descriptor.session_id.clone();
+        if let Some(existing) = self
+            .descriptors
+            .iter_mut()
+            .find(|existing| existing.session_id == session_id)
+        {
+            *existing = descriptor;
+        } else {
+            self.descriptors.push(descriptor);
+        }
+        self.sessions = self
+            .descriptors
+            .iter()
+            .map(ChatSessionSummary::from)
+            .collect();
+        if self.current_session_id.is_none() {
+            self.current_session_id = Some(session_id);
+        }
+        let descriptors = self.descriptors.clone();
+        self.recover_current_run(&descriptors);
     }
 
     pub fn can_send_current_message(&self) -> bool {
@@ -173,19 +221,15 @@ impl ChatSessionStore {
                     .iter_mut()
                     .find(|item| item.message_id == display_message_id)
                 {
-                    let streaming = item.streaming.get_or_insert_with(StreamingText::default);
-                    streaming.push_delta(text, now_ms);
-                    item.text = streaming.text();
+                    item.push_assistant_delta(text, now_ms);
                 } else if !text.is_empty() {
                     let mut streaming = StreamingText::default();
                     streaming.push_delta(text, now_ms);
-                    self.transcript.push(ChatTranscriptItem {
-                        message_id: display_message_id,
-                        role: ChatTranscriptRole::Assistant,
-                        text: streaming.text(),
-                        streaming: Some(streaming),
-                        thought: None,
-                    });
+                    self.transcript.push(ChatTranscriptItem::assistant(
+                        display_message_id,
+                        streaming.text(),
+                        Some(streaming),
+                    ));
                 }
             }
             AppDisplayEvent::AssistantMessageFinal {
@@ -201,19 +245,10 @@ impl ChatSessionStore {
                     .iter_mut()
                     .find(|item| item.message_id == display_message_id)
                 {
-                    item.message_id = message.id;
-                    item.role = ChatTranscriptRole::Assistant;
-                    item.text = text;
-                    item.streaming = None;
-                    item.thought = None;
+                    item.replace_with_assistant(message.id, text);
                 } else {
-                    self.transcript.push(ChatTranscriptItem {
-                        message_id: message.id,
-                        role: ChatTranscriptRole::Assistant,
-                        text,
-                        streaming: None,
-                        thought: None,
-                    });
+                    self.transcript
+                        .push(ChatTranscriptItem::assistant(message.id, text, None));
                 }
             }
             AppDisplayEvent::ThoughtStarted { thought_id, .. } => {
@@ -226,9 +261,8 @@ impl ChatSessionStore {
                 ..
             } => {
                 let item = self.upsert_thought(&thought_id);
-                if let Some(thought) = item.thought.as_mut() {
+                if let Some(thought) = item.thought_mut() {
                     thought.push_delta(&kind, &text);
-                    item.text = thought.active_text();
                 }
             }
             AppDisplayEvent::ThoughtCompleted {
@@ -237,12 +271,37 @@ impl ChatSessionStore {
                 ..
             } => {
                 let item = self.upsert_thought(&thought_id);
-                if let Some(thought) = item.thought.as_mut() {
+                if let Some(thought) = item.thought_mut() {
                     thought.completed = true;
                     thought.elapsed_ms = Some(elapsed_ms);
                     thought.expanded = false;
-                    item.text = thought.completed_text();
                 }
+            }
+            AppDisplayEvent::ToolStarted {
+                tool_call_id,
+                tool_name,
+            } => {
+                let tool = self.upsert_tool(&tool_call_id, &tool_name);
+                tool.tool_name = tool_name;
+                tool.completed = false;
+            }
+            AppDisplayEvent::ToolUpdated {
+                tool_call_id,
+                update,
+            } => {
+                let text = text_from_content_blocks(&update.content);
+                self.upsert_tool(&tool_call_id, "").push_update(text);
+            }
+            AppDisplayEvent::ToolCompleted {
+                tool_call_id,
+                output,
+            } => {
+                let tool_output = tool_output_from_app(output);
+                self.upsert_tool(&tool_call_id, "").complete(tool_output);
+            }
+            AppDisplayEvent::ApprovalRequested { approval } => {
+                let approval = approval_card_from_app(approval);
+                self.upsert_approval(approval);
             }
         }
     }
@@ -255,10 +314,23 @@ impl ChatSessionStore {
         else {
             return false;
         };
-        let Some(thought) = item.thought.as_mut() else {
+        let Some(thought) = item.thought_mut() else {
             return false;
         };
         thought.expanded = !thought.expanded;
+        true
+    }
+
+    pub fn toggle_tool_expanded(&mut self, tool_call_id: &str) -> bool {
+        let Some(tool) = self
+            .transcript
+            .iter_mut()
+            .find(|item| item.message_id == tool_call_id)
+            .and_then(ChatTranscriptItem::tool_activity_mut)
+        else {
+            return false;
+        };
+        tool.expanded = !tool.expanded;
         true
     }
 
@@ -270,16 +342,46 @@ impl ChatSessionStore {
         {
             return &mut self.transcript[index];
         }
-        self.transcript.push(ChatTranscriptItem {
-            message_id: thought_id.into(),
-            role: ChatTranscriptRole::Thought,
-            text: ChatThought::default().active_text(),
-            streaming: None,
-            thought: Some(ChatThought::default()),
-        });
+        self.transcript
+            .push(ChatTranscriptItem::thought_item(thought_id));
         self.transcript
             .last_mut()
             .expect("thought item was just inserted")
+    }
+
+    fn upsert_tool(&mut self, tool_call_id: &str, tool_name: &str) -> &mut ChatToolActivity {
+        if let Some(index) = self
+            .transcript
+            .iter()
+            .position(|item| item.message_id == tool_call_id)
+        {
+            let item = &mut self.transcript[index];
+            if item.tool_activity().is_none() {
+                *item = ChatTranscriptItem::tool_item(tool_call_id, tool_name);
+            }
+            return item
+                .tool_activity_mut()
+                .expect("tool item was just converted");
+        }
+        self.transcript
+            .push(ChatTranscriptItem::tool_item(tool_call_id, tool_name));
+        self.transcript
+            .last_mut()
+            .and_then(ChatTranscriptItem::tool_activity_mut)
+            .expect("tool item was just inserted")
+    }
+
+    fn upsert_approval(&mut self, approval: ChatApprovalCard) {
+        if let Some(item) = self
+            .transcript
+            .iter_mut()
+            .find(|item| item.message_id == approval.approval_id)
+        {
+            *item = ChatTranscriptItem::approval_item(approval);
+            return;
+        }
+        self.transcript
+            .push(ChatTranscriptItem::approval_item(approval));
     }
 
     fn set_current_run(&mut self, run: ChatRunState, session_status: AppInteractionSessionStatus) {
@@ -322,19 +424,16 @@ impl ChatSessionStore {
             .messages
             .iter()
             .filter_map(|message| {
-                let role = match message.role.as_str() {
-                    "user" => ChatTranscriptRole::User,
-                    "assistant" => ChatTranscriptRole::Assistant,
-                    _ => return None,
-                };
                 let text = text_from_message(message)?;
-                Some(ChatTranscriptItem {
-                    message_id: message.id.clone(),
-                    role,
-                    text,
-                    streaming: None,
-                    thought: None,
-                })
+                match message.role.as_str() {
+                    "user" => Some(ChatTranscriptItem::user(message.id.clone(), text)),
+                    "assistant" => Some(ChatTranscriptItem::assistant(
+                        message.id.clone(),
+                        text,
+                        None,
+                    )),
+                    _ => None,
+                }
             })
             .collect();
     }
@@ -352,6 +451,30 @@ impl ChatSessionStore {
             return;
         };
         self.current_run = ChatRunState::from_session_status(descriptor.status);
+    }
+
+    fn merge_live_display_items(&mut self, previous: Vec<ChatTranscriptItem>) {
+        let mut insert_at = self
+            .transcript
+            .iter()
+            .rposition(|item| item.role() == ChatTranscriptRole::Assistant)
+            .unwrap_or(self.transcript.len());
+        for item in previous {
+            if !matches!(
+                item.role(),
+                ChatTranscriptRole::Thought
+                    | ChatTranscriptRole::Tool
+                    | ChatTranscriptRole::Approval
+            ) || self
+                .transcript
+                .iter()
+                .any(|existing| existing.message_id == item.message_id)
+            {
+                continue;
+            }
+            self.transcript.insert(insert_at, item);
+            insert_at += 1;
+        }
     }
 }
 
@@ -379,22 +502,6 @@ impl From<&AppInteractionSessionDescriptor> for ChatSessionSummary {
             title,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChatTranscriptItem {
-    pub message_id: String,
-    pub role: ChatTranscriptRole,
-    pub text: String,
-    pub streaming: Option<StreamingText>,
-    pub thought: Option<ChatThought>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChatTranscriptRole {
-    User,
-    Assistant,
-    Thought,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -431,59 +538,51 @@ pub enum ChatRunStatus {
     Paused,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ChatThought {
-    pub summary: String,
-    pub raw: String,
-    pub completed: bool,
-    pub elapsed_ms: Option<u64>,
-    pub expanded: bool,
-}
-
-impl ChatThought {
-    fn push_delta(&mut self, kind: &str, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        match kind {
-            "summary" => self.summary.push_str(text),
-            "raw" => self.raw.push_str(text),
-            _ if self.summary.is_empty() => self.raw.push_str(text),
-            _ => {}
-        }
-    }
-
-    fn active_text(&self) -> String {
-        if !self.summary.is_empty() {
-            self.summary.clone()
-        } else if !self.raw.is_empty() {
-            self.raw.clone()
-        } else {
-            "Thinking...".into()
-        }
-    }
-
-    fn completed_text(&self) -> String {
-        let elapsed_ms = self.elapsed_ms.unwrap_or_default();
-        let seconds = ((elapsed_ms as f64) / 1000.0).round().max(1.0) as u64;
-        if seconds == 1 {
-            "Thought for 1 second".into()
-        } else {
-            format!("Thought for {seconds} seconds")
-        }
-    }
-}
-
 fn text_from_message(message: &AppMessage) -> Option<String> {
-    let text = message
-        .content
+    let text = text_from_content_blocks(&message.content);
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn text_from_content_blocks(blocks: &[AppContentBlock]) -> String {
+    blocks
         .iter()
         .filter_map(|block| match block {
             AppContentBlock::Text { text } => Some(text.as_str()),
             AppContentBlock::Other => None,
         })
-        .collect::<String>();
-    if text.is_empty() { None } else { Some(text) }
+        .collect::<String>()
+}
+
+fn tool_output_from_app(output: AppToolOutput) -> transcript::ChatToolOutput {
+    let mut text = text_from_content_blocks(&output.content);
+    for update in output.updates {
+        text.push_str(&text_from_content_blocks(&update.content));
+    }
+    transcript::ChatToolOutput {
+        text,
+        is_error: output.is_error,
+    }
+}
+
+fn approval_card_from_app(approval: AppToolApprovalRequest) -> ChatApprovalCard {
+    ChatApprovalCard {
+        approval_id: approval.approval_id,
+        tool_call_id: approval.tool_call.id,
+        tool_name: approval.tool_call.name,
+        prompt: approval.request.prompt,
+        reason: approval.request.reason,
+        permissions: approval
+            .permissions
+            .into_iter()
+            .map(|permission| {
+                permission
+                    .description
+                    .filter(|description| !description.trim().is_empty())
+                    .unwrap_or(permission.capability)
+            })
+            .collect(),
+        status: ChatApprovalStatus::Pending,
+    }
 }
 
 fn now_ms() -> u64 {
@@ -494,273 +593,4 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        ChatComposer, ChatComposerAction, ChatRunStatus, ChatSessionStore, ChatTranscriptRole,
-        StreamingText,
-    };
-    use crate::interaction::{
-        AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor,
-        AppInteractionSessionState, AppInteractionSessionStatus, AppMessage,
-    };
-
-    #[test]
-    fn display_delta_streams_then_final_replaces_the_same_assistant_bubble() {
-        let mut store = ChatSessionStore::default();
-        store.refresh(vec![session_descriptor(
-            "session-1",
-            AppInteractionSessionStatus::Running,
-            Vec::new(),
-        )]);
-
-        store.apply_display_event(AppDisplayEvent::AssistantMessageDelta {
-            run_id: "run-1".into(),
-            display_message_id: "run-1:assistant".into(),
-            text: "hel".into(),
-        });
-        store.apply_display_event(AppDisplayEvent::AssistantMessageDelta {
-            run_id: "run-1".into(),
-            display_message_id: "run-1:assistant".into(),
-            text: "lo".into(),
-        });
-
-        assert_eq!(store.transcript().len(), 1);
-        assert_eq!(store.transcript()[0].role, ChatTranscriptRole::Assistant);
-        assert_eq!(store.transcript()[0].text, "hello");
-        assert!(store.transcript()[0].streaming.is_some());
-
-        store.apply_display_event(AppDisplayEvent::AssistantMessageFinal {
-            run_id: "run-1".into(),
-            display_message_id: "run-1:assistant".into(),
-            message: message("assistant-1", "assistant", "hello!"),
-            truncated: false,
-        });
-
-        assert_eq!(store.transcript().len(), 1);
-        assert_eq!(store.transcript()[0].message_id, "assistant-1");
-        assert_eq!(store.transcript()[0].text, "hello!");
-        assert_eq!(store.transcript()[0].streaming, None);
-    }
-
-    #[test]
-    fn streaming_segments_ramp_from_dim_to_stable_opacity() {
-        let mut stream = StreamingText::default();
-
-        stream.push_delta("hel", 1_000);
-        stream.push_delta("lo", 1_080);
-
-        let fresh = stream.visible_segments(1_080);
-        assert_eq!(fresh[0].text, "hel");
-        assert_eq!(fresh[0].opacity, 0.7);
-        assert_eq!(fresh[1].text, "lo");
-        assert_eq!(fresh[1].opacity, 0.35);
-
-        let stable = stream.visible_segments(1_260);
-        assert_eq!(stable[0].opacity, 1.0);
-        assert_eq!(stable[1].opacity, 1.0);
-        assert_eq!(stream.text(), "hello");
-    }
-
-    #[test]
-    fn composer_enter_submits_non_empty_text_and_shift_enter_adds_newline() {
-        let mut composer = ChatComposer::default();
-        assert!(!composer.can_send());
-        assert_eq!(composer.press_enter(false), ChatComposerAction::None);
-
-        composer.set_text("hello".into());
-        assert!(composer.can_send());
-        assert_eq!(
-            composer.press_enter(true),
-            ChatComposerAction::InsertNewline
-        );
-        assert_eq!(
-            composer.press_enter(false),
-            ChatComposerAction::Submit("hello".into())
-        );
-        assert!(!composer.can_send());
-    }
-
-    #[test]
-    fn thought_summary_takes_priority_over_raw_and_completion_collapses() {
-        let mut store = ChatSessionStore::default();
-        store.refresh(vec![session_descriptor(
-            "session-1",
-            AppInteractionSessionStatus::Running,
-            Vec::new(),
-        )]);
-
-        store.apply_display_event(AppDisplayEvent::ThoughtStarted {
-            run_id: "run-1".into(),
-            thought_id: "run-1:thought".into(),
-        });
-        store.apply_display_event(AppDisplayEvent::ThoughtDelta {
-            run_id: "run-1".into(),
-            thought_id: "run-1:thought".into(),
-            kind: "raw".into(),
-            text: "raw detail".into(),
-        });
-        store.apply_display_event(AppDisplayEvent::ThoughtDelta {
-            run_id: "run-1".into(),
-            thought_id: "run-1:thought".into(),
-            kind: "summary".into(),
-            text: "summary".into(),
-        });
-
-        assert_eq!(store.transcript().len(), 1);
-        let item = &store.transcript()[0];
-        assert_eq!(item.role, ChatTranscriptRole::Thought);
-        assert_eq!(item.text, "summary");
-        let thought = item.thought.as_ref().expect("thought state");
-        assert_eq!(thought.summary, "summary");
-        assert_eq!(thought.raw, "raw detail");
-        assert!(!thought.completed);
-
-        store.apply_display_event(AppDisplayEvent::ThoughtCompleted {
-            run_id: "run-1".into(),
-            thought_id: "run-1:thought".into(),
-            elapsed_ms: 2_000,
-        });
-
-        let item = &store.transcript()[0];
-        assert_eq!(item.text, "Thought for 2 seconds");
-        let thought = item.thought.as_ref().expect("thought state");
-        assert!(thought.completed);
-        assert_eq!(thought.elapsed_ms, Some(2_000));
-        assert!(!thought.expanded);
-
-        assert!(store.toggle_thought_expanded("run-1:thought"));
-        assert!(store.transcript()[0].thought.as_ref().unwrap().expanded);
-    }
-
-    #[test]
-    fn run_lifecycle_updates_current_status_and_composer_availability() {
-        let mut store = ChatSessionStore::default();
-        store.refresh(vec![session_descriptor(
-            "session-1",
-            AppInteractionSessionStatus::Idle,
-            Vec::new(),
-        )]);
-
-        store.apply_display_event(AppDisplayEvent::RunStarted {
-            run_id: "run-1".into(),
-        });
-        assert_eq!(
-            store.current_run().map(|run| run.status),
-            Some(ChatRunStatus::Running)
-        );
-        assert_eq!(
-            store.sessions()[0].status,
-            AppInteractionSessionStatus::Running
-        );
-        assert!(!store.can_send_current_message());
-
-        store.apply_display_event(AppDisplayEvent::RunPaused {
-            run_id: "run-1".into(),
-            reason: serde_json::json!({"type": "approval_required"}),
-        });
-        assert_eq!(
-            store.current_run().map(|run| run.status),
-            Some(ChatRunStatus::Paused)
-        );
-        assert_eq!(
-            store.sessions()[0].status,
-            AppInteractionSessionStatus::Paused
-        );
-        assert!(!store.can_send_current_message());
-
-        store.apply_display_event(AppDisplayEvent::RunAborted {
-            run_id: "run-1".into(),
-        });
-        assert_eq!(
-            store.current_run().map(|run| run.status),
-            Some(ChatRunStatus::Aborted)
-        );
-        assert_eq!(
-            store.sessions()[0].status,
-            AppInteractionSessionStatus::Aborted
-        );
-        assert!(store.can_send_current_message());
-    }
-
-    #[test]
-    fn run_failure_keeps_error_visible_until_next_run_starts() {
-        let mut store = ChatSessionStore::default();
-        store.refresh(vec![session_descriptor(
-            "session-1",
-            AppInteractionSessionStatus::Running,
-            Vec::new(),
-        )]);
-
-        store.apply_display_event(AppDisplayEvent::RunFailed {
-            run_id: "run-1".into(),
-            error: "provider 400".into(),
-        });
-
-        assert_eq!(
-            store.current_run().map(|run| run.status),
-            Some(ChatRunStatus::Failed)
-        );
-        assert_eq!(
-            store.current_run().and_then(|run| run.error.as_deref()),
-            Some("provider 400")
-        );
-        assert!(store.can_send_current_message());
-
-        store.apply_display_event(AppDisplayEvent::RunStarted {
-            run_id: "run-2".into(),
-        });
-        assert_eq!(
-            store.current_run().map(|run| run.status),
-            Some(ChatRunStatus::Running)
-        );
-        assert_eq!(
-            store.current_run().and_then(|run| run.error.as_deref()),
-            None
-        );
-    }
-
-    #[test]
-    fn connection_error_is_visible_until_next_run_starts() {
-        let mut store = ChatSessionStore::default();
-        store.refresh(vec![session_descriptor(
-            "session-1",
-            AppInteractionSessionStatus::Running,
-            Vec::new(),
-        )]);
-
-        store.set_connection_error("websocket closed".into());
-
-        assert_eq!(store.connection_error(), Some("websocket closed"));
-
-        store.apply_display_event(AppDisplayEvent::RunStarted {
-            run_id: "run-2".into(),
-        });
-
-        assert_eq!(store.connection_error(), None);
-    }
-
-    fn session_descriptor(
-        session_id: &str,
-        status: AppInteractionSessionStatus,
-        messages: Vec<AppMessage>,
-    ) -> AppInteractionSessionDescriptor {
-        AppInteractionSessionDescriptor {
-            session_id: session_id.into(),
-            profile_id: "default".into(),
-            parent_session_id: None,
-            role: None,
-            status,
-            state: AppInteractionSessionState { messages },
-            metadata: Default::default(),
-        }
-    }
-
-    fn message(id: &str, role: &str, text: &str) -> AppMessage {
-        AppMessage {
-            id: id.into(),
-            role: role.into(),
-            content: vec![AppContentBlock::Text { text: text.into() }],
-            metadata: Default::default(),
-        }
-    }
-}
+mod tests;
