@@ -140,6 +140,14 @@ pub struct AppSessionRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AppSessionMetadataUpdateRequest {
+    pub session_id: String,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AppApprovalResolveRequest {
     pub session_id: String,
     pub approval_id: String,
@@ -471,6 +479,19 @@ pub trait AppInteractionClient {
         }
     }
 
+    fn update_session_metadata(
+        &self,
+        request: AppSessionMetadataUpdateRequest,
+    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
+    {
+        async move {
+            let _ = request;
+            Err(AppInteractionError::Protocol(
+                "session/update_metadata is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
     fn prompt(
         &self,
         request: AppPromptRequest,
@@ -602,6 +623,13 @@ impl AppInteractionClient for AppInteractionHttpClient {
         request: AppSessionCreateRequest,
     ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
         self.call("session/create", request).await
+    }
+
+    async fn update_session_metadata(
+        &self,
+        request: AppSessionMetadataUpdateRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.call("session/update_metadata", request).await
     }
 
     async fn prompt(

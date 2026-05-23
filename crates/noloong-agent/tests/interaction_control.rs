@@ -58,6 +58,39 @@ async fn interaction_control_initializes_and_lists_profiles() {
 }
 
 #[tokio::test]
+async fn interaction_control_updates_session_metadata() {
+    let handler = test_handler("default").await;
+
+    let messages = run_jsonrpc(
+        handler,
+        vec![
+            rpc(1, "initialize", json!({"name": "test-client"})),
+            rpc(2, "session/create", json!({"sessionId": "root"})),
+            rpc(
+                3,
+                "session/update_metadata",
+                json!({
+                    "sessionId": "root",
+                    "metadata": {"title": "Renamed session"}
+                }),
+            ),
+            rpc(4, "session/get", json!({"sessionId": "root"})),
+            rpc(5, "shutdown", json!({})),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response(&messages, 3)["result"]["metadata"]["title"],
+        "Renamed session"
+    );
+    assert_eq!(
+        response(&messages, 4)["result"]["metadata"]["title"],
+        "Renamed session"
+    );
+}
+
+#[tokio::test]
 async fn interaction_control_prompts_and_emits_raw_and_display_events() {
     let handler = test_handler("default").await;
 

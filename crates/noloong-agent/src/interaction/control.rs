@@ -13,8 +13,9 @@ use super::{
         InteractionInitializeResult, InteractionQueueKind, InteractionServerInfo,
         ManifestApplyResult, ManifestProposalRequest, ProcessJobRequest, ProcessReadRequest,
         ProcessWaitRequest, ProcessWriteRequest, QueueEditRequest, QueueRequest,
-        QueueSetModeRequest, RawEventNotification, SessionDeleteRequest, SessionRequest,
-        SubscriptionResult, UnsubscribeResult, method, notification,
+        QueueSetModeRequest, RawEventNotification, SessionDeleteRequest,
+        SessionMetadataUpdateRequest, SessionRequest, SubscriptionResult, UnsubscribeResult,
+        method, notification,
     },
     store::missing_session_error,
 };
@@ -176,6 +177,11 @@ impl JsonRpcHandler for InteractionControlHandler {
                     let request = parse_params::<SessionRequest>(params)?;
                     let descriptor = self.session_descriptor(&request.session_id).await?;
                     value(descriptor)?
+                }
+                method::SESSION_UPDATE_METADATA => {
+                    let request = parse_params::<SessionMetadataUpdateRequest>(params)?;
+                    let registered = self.session(&request.session_id).await?;
+                    value(registered.update_metadata(request.metadata).await?)?
                 }
                 method::SESSION_DELETE => {
                     self.require(method, InteractionAuthorityCapability::SessionDelete)?;

@@ -5,9 +5,9 @@ use crate::interaction::{
     AppInteractionDisplayNotification, AppInteractionEndpoint, AppInteractionError,
     AppInteractionSessionDescriptor, AppInteractionSessionState, AppInteractionSessionStatus,
     AppInteractionStatus, AppMessage, AppPromptInput, AppPromptRequest, AppSessionCreateRequest,
-    AppSessionRequest, AppToolApprovalRequest, AppToolPermissionOutcome,
-    InteractionInitializeRequest, InteractionInitializeResult, InteractionProfileDescriptor,
-    InteractionServerInfo, initialize_interaction_status,
+    AppSessionMetadataUpdateRequest, AppSessionRequest, AppToolApprovalRequest,
+    AppToolPermissionOutcome, InteractionInitializeRequest, InteractionInitializeResult,
+    InteractionProfileDescriptor, InteractionServerInfo, initialize_interaction_status,
 };
 use crate::test_support::{remove_temp_dir, temp_dir};
 use noloong_config::Locale;
@@ -120,6 +120,97 @@ async fn app_refreshes_real_sessions_and_recovers_current_transcript() {
     assert_eq!(transcript[0].text(), "请帮我检查项目");
     assert_eq!(transcript[1].role(), ChatTranscriptRole::Assistant);
     assert_eq!(transcript[1].text(), "我会先查看当前状态。");
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn current_chat_context_exposes_title_profile_model_and_workdir() {
+    let dir = temp_dir("app-chat-context");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    let mut descriptor = session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![message("user-1", "user", "检查工作区")],
+    );
+    descriptor.profile_id = "chatgpt-responses".into();
+    descriptor
+        .metadata
+        .insert("title".into(), serde_json::json!("检查工作区"));
+    descriptor
+        .metadata
+        .insert("workdir".into(), serde_json::json!("/tmp/noloong"));
+
+    model.apply_chat_session_descriptors(vec![descriptor]);
+
+    let context = model.current_chat_context().unwrap();
+    assert_eq!(context.title, "检查工作区");
+    assert_eq!(context.profile_name, "ChatGPT Responses");
+    assert_eq!(context.profile_id, "chatgpt-responses");
+    assert_eq!(context.model, "gpt-5.4-mini");
+    assert_eq!(context.workdir, "/tmp/noloong");
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn renaming_current_chat_session_updates_session_metadata() {
+    let dir = temp_dir("app-chat-rename");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    let mut renamed = session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![message("user-1", "user", "检查工作区")],
+    );
+    renamed
+        .metadata
+        .insert("title".into(), serde_json::json!("重命名后的会话"));
+    let client = FakeInteractionClient::ok().with_metadata_session(renamed.clone());
+    model.apply_chat_session_descriptors(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![message("user-1", "user", "检查工作区")],
+    )]);
+
+    model
+        .rename_current_chat_session(&client, "  重命名后的会话  ".into())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        client.last_metadata_request().unwrap().metadata["title"],
+        "重命名后的会话"
+    );
+    assert_eq!(
+        model.current_chat_context().unwrap().title,
+        "重命名后的会话"
+    );
     remove_temp_dir(dir);
 }
 
@@ -307,6 +398,10 @@ async fn first_chat_send_creates_session_then_submits_prompt() {
                 text: "hello".into()
             }
         ))
+    );
+    assert_eq!(
+        client.last_create_request().unwrap().metadata["title"],
+        "hello"
     );
     remove_temp_dir(dir);
 }
@@ -941,12 +1036,14 @@ struct FakeInteractionClient {
     sessions: Vec<AppInteractionSessionDescriptor>,
     create_session: Option<AppInteractionSessionDescriptor>,
     prompt_session: Option<AppInteractionSessionDescriptor>,
+    metadata_session: Option<AppInteractionSessionDescriptor>,
     abort_session: Option<AppInteractionSessionDescriptor>,
     approval_session: Option<AppInteractionSessionDescriptor>,
     current_session: Option<AppInteractionSessionDescriptor>,
     last_request: std::sync::Mutex<Option<InteractionInitializeRequest>>,
     last_create_request: std::sync::Mutex<Option<AppSessionCreateRequest>>,
     last_prompt_request: std::sync::Mutex<Option<AppPromptRequest>>,
+    last_metadata_request: std::sync::Mutex<Option<AppSessionMetadataUpdateRequest>>,
     last_abort_request: std::sync::Mutex<Option<AppSessionRequest>>,
     last_approval_request: std::sync::Mutex<Option<AppApprovalResolveRequest>>,
     last_get_session_id: std::sync::Mutex<Option<String>>,
@@ -971,12 +1068,14 @@ impl FakeInteractionClient {
             sessions: Vec::new(),
             create_session: None,
             prompt_session: None,
+            metadata_session: None,
             abort_session: None,
             approval_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
             last_prompt_request: Default::default(),
+            last_metadata_request: Default::default(),
             last_abort_request: Default::default(),
             last_approval_request: Default::default(),
             last_get_session_id: Default::default(),
@@ -989,12 +1088,14 @@ impl FakeInteractionClient {
             sessions: Vec::new(),
             create_session: None,
             prompt_session: None,
+            metadata_session: None,
             abort_session: None,
             approval_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
             last_prompt_request: Default::default(),
+            last_metadata_request: Default::default(),
             last_abort_request: Default::default(),
             last_approval_request: Default::default(),
             last_get_session_id: Default::default(),
@@ -1018,6 +1119,11 @@ impl FakeInteractionClient {
 
     fn with_prompt_session(mut self, descriptor: AppInteractionSessionDescriptor) -> Self {
         self.prompt_session = Some(descriptor);
+        self
+    }
+
+    fn with_metadata_session(mut self, descriptor: AppInteractionSessionDescriptor) -> Self {
+        self.metadata_session = Some(descriptor);
         self
     }
 
@@ -1047,6 +1153,13 @@ impl FakeInteractionClient {
 
     fn last_prompt_request(&self) -> Option<AppPromptRequest> {
         self.last_prompt_request
+            .lock()
+            .expect("fake interaction lock")
+            .clone()
+    }
+
+    fn last_metadata_request(&self) -> Option<AppSessionMetadataUpdateRequest> {
+        self.last_metadata_request
             .lock()
             .expect("fake interaction lock")
             .clone()
@@ -1113,6 +1226,19 @@ impl AppInteractionClient for FakeInteractionClient {
         self.prompt_session
             .clone()
             .ok_or_else(|| AppInteractionError::Protocol("missing fake prompt session".into()))
+    }
+
+    async fn update_session_metadata(
+        &self,
+        request: AppSessionMetadataUpdateRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        *self
+            .last_metadata_request
+            .lock()
+            .expect("fake interaction lock") = Some(request);
+        self.metadata_session
+            .clone()
+            .ok_or_else(|| AppInteractionError::Protocol("missing fake metadata session".into()))
     }
 
     async fn abort(

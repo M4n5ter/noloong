@@ -19,7 +19,7 @@ use crate::tools::{
     SubagentSpawnRequest as ToolSubagentSpawnRequest, SubagentSummary, SubagentWaitOutcome,
     final_assistant_output, update_goal_audit,
 };
-use crate::{AgentManifest, AgentSession, ManifestPatch, SystemPromptAddition};
+use crate::{AgentManifest, AgentSession, HostEnvironment, ManifestPatch, SystemPromptAddition};
 use noloong_agent_core::{
     Agent, AgentCoreError, AgentEvent, AgentEventKind, AgentInput, AgentMessage, AgentState,
     BoxFuture, CancellationToken, RunStatus,
@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
@@ -235,6 +236,27 @@ impl RegisteredAgentSession {
 
     pub async fn save_snapshot(&self) -> Result<InteractionSessionDescriptor, InteractionError> {
         let record = self.snapshot_record().await;
+        self.store.save(record.clone()).await?;
+        *self
+            .record
+            .lock()
+            .expect("interaction session record lock poisoned") = record.clone();
+        Ok(descriptor_from_record(&record))
+    }
+
+    pub async fn update_metadata(
+        &self,
+        metadata: Map<String, Value>,
+    ) -> Result<InteractionSessionDescriptor, InteractionError> {
+        let mut record = self.snapshot_record().await;
+        for (key, value) in metadata {
+            if value.is_null() {
+                record.metadata.remove(&key);
+            } else {
+                record.metadata.insert(key, value);
+            }
+        }
+        record.updated_at_ms = current_unix_ms();
         self.store.save(record.clone()).await?;
         *self
             .record
@@ -1012,6 +1034,7 @@ impl AgentSessionRegistry {
         let active_goal = self.inner.store.get_goal(&record.session_id).await?;
         let session = AgentSession::builder()
             .with_manifest(record.manifest.clone())
+            .with_environment(host_environment_for_record(&record))
             .with_run_id_prefix(record.run_id_prefix.clone())
             .with_subagent_depth(subagent_depth_for_record(&record))
             .with_subagent_controller(Arc::new(RegistrySubagentController {
@@ -1564,6 +1587,19 @@ fn descriptor_from_record(record: &AgentSessionRecord) -> InteractionSessionDesc
         state: record.state.clone(),
         metadata: record.metadata.clone(),
     }
+}
+
+fn host_environment_for_record(record: &AgentSessionRecord) -> HostEnvironment {
+    let mut environment = HostEnvironment::detect(Some(record.manifest.locale));
+    if let Some(workdir) = record
+        .metadata
+        .get(super::protocol::SESSION_WORKDIR_METADATA_KEY)
+        .and_then(Value::as_str)
+        .filter(|workdir| !workdir.trim().is_empty())
+    {
+        environment.cwd = PathBuf::from(workdir);
+    }
+    environment
 }
 
 fn queue_snapshot_from_agent(agent: &Agent) -> AgentSessionQueueSnapshot {

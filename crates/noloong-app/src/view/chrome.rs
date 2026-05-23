@@ -17,6 +17,15 @@ impl NoloongAppView {
                 .text(AppTextKey::JsoncEditorSubtitle)
                 .to_string();
         }
+        if self.model.route == AppRoute::Chat {
+            if let Some(context) = self.model.current_chat_context() {
+                return format!(
+                    "{} · {} · {}",
+                    context.profile_name, context.model, context.workdir
+                );
+            }
+            return self.chat_connection_status_text();
+        }
         let status = match &self.model.status {
             AppStatus::StarterDraft => self.catalog.text(AppTextKey::SettingsSubtitle),
             AppStatus::Loaded => self.catalog.text(AppTextKey::SettingsSubtitle),

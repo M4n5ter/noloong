@@ -12,6 +12,7 @@ use serde_json::Value;
 
 pub const SERVER_NAME: &str = "noloong-agent";
 pub const PROTOCOL_VERSION: &str = "2026-05-05";
+pub const SESSION_WORKDIR_METADATA_KEY: &str = "workdir";
 
 pub fn request_params<T>(params: T) -> Value
 where
@@ -27,6 +28,7 @@ pub mod method {
     pub const SESSION_CREATE: &str = "session/create";
     pub const SESSION_LIST: &str = "session/list";
     pub const SESSION_GET: &str = "session/get";
+    pub const SESSION_UPDATE_METADATA: &str = "session/update_metadata";
     pub const SESSION_DELETE: &str = "session/delete";
     pub const SUBAGENT_SPAWN: &str = "subagent/spawn";
     pub const GOAL_SET: &str = "goal/set";
@@ -111,6 +113,14 @@ pub struct SessionDeleteRequest {
     pub session_id: String,
     #[serde(default)]
     pub force_abort: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetadataUpdateRequest {
+    pub session_id: String,
+    #[serde(default)]
+    pub metadata: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

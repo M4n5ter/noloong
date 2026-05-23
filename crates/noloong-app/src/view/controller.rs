@@ -483,14 +483,18 @@ impl NoloongAppView {
             .child(img(PathBuf::from(LOGO_PATH)).size(size - px(4.0)))
     }
 
-    pub(super) fn title(&self) -> &'static str {
+    pub(super) fn title(&self) -> String {
         if self.model.jsonc_open {
-            return self.catalog.text(AppTextKey::JsoncEditor);
+            return self.catalog.text(AppTextKey::JsoncEditor).into();
         }
         match self.model.route {
-            AppRoute::Chat => self.catalog.text(AppTextKey::AppTitle),
-            AppRoute::Tools => self.catalog.text(AppTextKey::Tools),
-            AppRoute::Settings => self.catalog.text(AppTextKey::Settings),
+            AppRoute::Chat => self
+                .model
+                .current_chat_context()
+                .map(|context| context.title)
+                .unwrap_or_else(|| self.catalog.text(AppTextKey::AppTitle).into()),
+            AppRoute::Tools => self.catalog.text(AppTextKey::Tools).into(),
+            AppRoute::Settings => self.catalog.text(AppTextKey::Settings).into(),
         }
     }
 

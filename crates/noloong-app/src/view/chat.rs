@@ -1,6 +1,7 @@
 use super::NoloongAppView;
 use crate::chat::{
     ChatAttachmentDraft, ChatComposer, ChatComposerAction, ChatComposerSubmission, ChatRunStatus,
+    session_metadata_for_prompt,
 };
 use crate::{
     AppInteractionStatus, AppTextKey, ChatEmptyState,
@@ -615,6 +616,7 @@ impl NoloongAppView {
         if matches!(&input, AppPromptInput::Text { text } if text.trim().is_empty()) {
             return;
         }
+        let create_metadata = session_metadata_for_prompt(&input);
         let current_session_id = self.model.current_chat_session_id().map(str::to_string);
         let profile_id = self.model.selected_profile_id.clone();
         self.chat_run_task = cx.spawn(async move |this, cx| {
@@ -633,7 +635,7 @@ impl NoloongAppView {
                     .create_session(AppSessionCreateRequest {
                         session_id: None,
                         profile_id,
-                        metadata: Default::default(),
+                        metadata: create_metadata,
                     })
                     .await
                 {
@@ -726,7 +728,7 @@ impl NoloongAppView {
         .to_string()
     }
 
-    fn chat_connection_status_text(&self) -> String {
+    pub(super) fn chat_connection_status_text(&self) -> String {
         if let Some(error) = self.model.chat_connection_error() {
             return error.to_string();
         }

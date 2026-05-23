@@ -5,9 +5,12 @@ use crate::chat::{
     ChatApprovalStatus, ChatRunState, ChatRunStatus, ChatSessionSummary, ChatTranscriptItem,
 };
 #[cfg(test)]
+use crate::chat::{SESSION_TITLE_METADATA_KEY, session_metadata_for_prompt};
+#[cfg(test)]
 use crate::interaction::{
     AppApprovalResolveRequest, AppInteractionClient, AppPromptInput, AppPromptRequest,
-    AppSessionCreateRequest, AppSessionRequest, AppToolPermissionDecision,
+    AppSessionCreateRequest, AppSessionMetadataUpdateRequest, AppSessionRequest,
+    AppToolPermissionDecision,
 };
 use crate::interaction::{
     AppInteractionDisplayNotification, AppInteractionSessionDescriptor, AppInteractionStatus,
@@ -92,6 +95,7 @@ impl AppViewModel {
         if text.is_empty() {
             return Ok(());
         }
+        let input = AppPromptInput::Text { text };
         let session_id = match self.current_chat_session_id().map(str::to_string) {
             Some(session_id) => session_id,
             None => {
@@ -99,7 +103,7 @@ impl AppViewModel {
                     .create_session(AppSessionCreateRequest {
                         session_id: None,
                         profile_id: self.selected_profile_id.clone(),
-                        metadata: Default::default(),
+                        metadata: session_metadata_for_prompt(&input),
                     })
                     .await
                     .map_err(|error| AppError::Interaction(error.to_string()))?;
@@ -109,10 +113,7 @@ impl AppViewModel {
             }
         };
         let descriptor = client
-            .prompt(AppPromptRequest {
-                session_id,
-                input: AppPromptInput::Text { text },
-            })
+            .prompt(AppPromptRequest { session_id, input })
             .await
             .map_err(|error| AppError::Interaction(error.to_string()))?;
         self.chat.upsert_and_select(descriptor);
@@ -129,6 +130,32 @@ impl AppViewModel {
         };
         let descriptor = client
             .get_session(&session_id)
+            .await
+            .map_err(|error| AppError::Interaction(error.to_string()))?;
+        self.chat.upsert_and_select(descriptor);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn rename_current_chat_session(
+        &mut self,
+        client: &impl AppInteractionClient,
+        title: String,
+    ) -> Result<(), AppError> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Ok(());
+        }
+        let Some(session_id) = self.current_chat_session_id().map(str::to_string) else {
+            return Ok(());
+        };
+        let descriptor = client
+            .update_session_metadata(AppSessionMetadataUpdateRequest {
+                session_id,
+                metadata: [(SESSION_TITLE_METADATA_KEY.into(), serde_json::json!(title))]
+                    .into_iter()
+                    .collect(),
+            })
             .await
             .map_err(|error| AppError::Interaction(error.to_string()))?;
         self.chat.upsert_and_select(descriptor);
@@ -214,6 +241,26 @@ impl AppViewModel {
 
     pub fn chat_sessions(&self) -> &[ChatSessionSummary] {
         self.chat.sessions()
+    }
+
+    pub fn current_chat_context(&self) -> Option<super::ChatContextSummary> {
+        let session = self.chat.current_session()?;
+        let profile = self
+            .config
+            .profiles
+            .iter()
+            .find(|profile| profile.profile_id == session.profile_id);
+        Some(super::ChatContextSummary {
+            title: session.title.clone(),
+            profile_id: session.profile_id.clone(),
+            profile_name: profile
+                .map(|profile| profile.display_name.clone())
+                .unwrap_or_else(|| session.profile_id.clone()),
+            model: profile
+                .map(|profile| profile.provider.model().to_string())
+                .unwrap_or_default(),
+            workdir: session.workdir.clone(),
+        })
     }
 
     pub fn current_chat_session_id(&self) -> Option<&str> {

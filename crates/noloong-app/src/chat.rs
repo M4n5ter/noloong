@@ -5,10 +5,14 @@ use crate::interaction::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod composer;
+mod metadata;
 mod streaming;
 mod transcript;
 
 pub use composer::{ChatAttachmentDraft, ChatComposer, ChatComposerAction, ChatComposerSubmission};
+pub use metadata::{
+    SESSION_TITLE_METADATA_KEY, SESSION_WORKDIR_METADATA_KEY, session_metadata_for_prompt,
+};
 pub use streaming::StreamingText;
 pub use transcript::{
     ChatApprovalCard, ChatApprovalStatus, ChatToolActivity, ChatTranscriptItem, ChatTranscriptRole,
@@ -86,6 +90,13 @@ impl ChatSessionStore {
 
     pub fn sessions(&self) -> &[ChatSessionSummary] {
         &self.sessions
+    }
+
+    pub fn current_session(&self) -> Option<&ChatSessionSummary> {
+        let session_id = self.current_session_id.as_deref()?;
+        self.sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
     }
 
     pub fn current_session_id(&self) -> Option<&str> {
@@ -484,24 +495,39 @@ pub struct ChatSessionSummary {
     pub profile_id: String,
     pub status: AppInteractionSessionStatus,
     pub title: String,
+    pub workdir: String,
 }
 
 impl From<&AppInteractionSessionDescriptor> for ChatSessionSummary {
     fn from(descriptor: &AppInteractionSessionDescriptor) -> Self {
         let title = descriptor
             .metadata
-            .get("title")
+            .get(SESSION_TITLE_METADATA_KEY)
             .and_then(|value| value.as_str())
             .filter(|title| !title.trim().is_empty())
             .unwrap_or(&descriptor.session_id)
             .to_string();
+        let workdir = descriptor
+            .metadata
+            .get(SESSION_WORKDIR_METADATA_KEY)
+            .and_then(|value| value.as_str())
+            .filter(|workdir| !workdir.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(default_workdir);
         Self {
             session_id: descriptor.session_id.clone(),
             profile_id: descriptor.profile_id.clone(),
             status: descriptor.status,
             title,
+            workdir,
         }
     }
+}
+
+fn default_workdir() -> String {
+    std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".into())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

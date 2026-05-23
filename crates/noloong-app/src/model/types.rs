@@ -15,6 +15,15 @@ pub struct ProfileProviderSummary {
     pub is_selected: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatContextSummary {
+    pub title: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub model: String,
+    pub workdir: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompactionEdit {
     pub mode: String,
