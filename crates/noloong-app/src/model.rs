@@ -9,6 +9,8 @@ use noloong_config::{
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::interaction::{AppInteractionEndpoint, AppInteractionStatus};
+
 mod helpers;
 mod integrations;
 #[cfg(test)]
@@ -23,12 +25,7 @@ pub struct AppLaunchOptions {
     pub profile_config_path: Option<String>,
     pub locale: Option<Locale>,
     pub interaction_endpoint: Option<AppInteractionEndpoint>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AppInteractionEndpoint {
-    pub ws_url: String,
-    pub bearer_token: Option<String>,
+    pub interaction_status: Option<AppInteractionStatus>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +46,14 @@ pub enum AppStatus {
     SaveFailed(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatEmptyState {
+    MissingConfig,
+    Connecting,
+    ConnectionFailed(String),
+    NoSession,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppViewModel {
     pub config_path: PathBuf,
@@ -57,6 +62,7 @@ pub struct AppViewModel {
     schema_validator: ProfileConfigValidator,
     pub locale: Locale,
     pub interaction_endpoint: Option<AppInteractionEndpoint>,
+    pub interaction_status: AppInteractionStatus,
     pub route: AppRoute,
     pub jsonc_open: bool,
     pub jsonc_text: String,
@@ -82,13 +88,22 @@ impl AppViewModel {
                 .map(|profile| profile.profile_id.clone())
         });
         let jsonc_text = config.to_canonical_json()?;
+        let interaction_endpoint = options.interaction_endpoint;
+        let interaction_status = options.interaction_status.unwrap_or_else(|| {
+            if interaction_endpoint.is_some() {
+                AppInteractionStatus::Pending
+            } else {
+                AppInteractionStatus::Unavailable
+            }
+        });
         Ok(Self {
             config_path,
             config,
             schema_index: ProfileConfigSchemaIndex::new(),
             schema_validator: ProfileConfigValidator::new()?,
             locale: options.locale.unwrap_or_else(Locale::detect),
-            interaction_endpoint: options.interaction_endpoint,
+            interaction_endpoint,
+            interaction_status,
             route: AppRoute::Chat,
             jsonc_open: false,
             jsonc_text,
@@ -327,6 +342,15 @@ impl AppViewModel {
 
     pub fn has_interaction_endpoint(&self) -> bool {
         self.interaction_endpoint.is_some()
+    }
+
+    pub fn chat_empty_state(&self) -> ChatEmptyState {
+        match &self.interaction_status {
+            AppInteractionStatus::Ready { .. } => ChatEmptyState::NoSession,
+            AppInteractionStatus::Pending => ChatEmptyState::Connecting,
+            AppInteractionStatus::Failed(error) => ChatEmptyState::ConnectionFailed(error.clone()),
+            AppInteractionStatus::Unavailable => ChatEmptyState::MissingConfig,
+        }
     }
 
     pub fn set_display_name(&mut self, value: String) {

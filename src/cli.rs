@@ -22,7 +22,10 @@ use noloong_agent::{
     },
 };
 use noloong_agent_telegram::{polling::TelegramPollingError, telegram_api::TelegramApiError};
-use noloong_app::{AppInteractionEndpoint, AppLaunchOptions};
+use noloong_app::{
+    AppInteractionEndpoint, AppInteractionHttpClient, AppLaunchOptions,
+    initialize_interaction_status,
+};
 use std::{env, future::Future, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -43,15 +46,7 @@ pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
         CliCommand::TelegramBridge(options) => run_telegram_bridge(options).await,
         CliCommand::Telegram(options) => run_telegram(options).await,
         CliCommand::Weixin(command) => run_weixin(command).await,
-        CliCommand::App(options) => noloong_app::run_app(AppLaunchOptions {
-            profile_config_path: options.profile_config,
-            locale: options.locale.map(config_locale_from_runtime_locale),
-            interaction_endpoint: app_interaction_endpoint(
-                options.interaction_ws_url,
-                options.interaction_token,
-            ),
-        })
-        .map_err(Into::into),
+        CliCommand::App(options) => run_app_command(options).await,
     }
 }
 
@@ -199,6 +194,17 @@ pub(crate) struct EmbeddedInteraction {
     listener: TcpListener,
 }
 
+pub(crate) struct EmbeddedInteractionServer {
+    interaction_ws_url: String,
+    interaction_token: String,
+    server_task: JoinHandle<Result<(), noloong_agent::interaction::InteractionError>>,
+}
+
+pub(crate) struct PreparedAppLaunch {
+    pub(crate) launch_options: AppLaunchOptions,
+    embedded_server: Option<EmbeddedInteractionServer>,
+}
+
 pub(crate) async fn start_embedded_interaction(
     profile_config_path: Option<String>,
 ) -> Result<EmbeddedInteraction, CliError> {
@@ -231,8 +237,15 @@ impl EmbeddedInteraction {
         self,
         bridge: impl Future<Output = Result<(), CliError>>,
     ) -> Result<(), CliError> {
+        let server = self.start_server().await?;
+        run_with_embedded_interaction(server.server_task, bridge).await
+    }
+
+    pub(crate) async fn start_server(self) -> Result<EmbeddedInteractionServer, CliError> {
         let registry = build_registry(&self.profile_config).await?;
         let server_token = self.interaction_token.clone();
+        let interaction_ws_url = self.interaction_ws_url;
+        let interaction_token = self.interaction_token;
         let listener = self.listener;
         let server_task = tokio::spawn(async move {
             serve_interaction_http(
@@ -242,8 +255,103 @@ impl EmbeddedInteraction {
             )
             .await
         });
-        run_with_embedded_interaction(server_task, bridge).await
+        Ok(EmbeddedInteractionServer {
+            interaction_ws_url,
+            interaction_token,
+            server_task,
+        })
     }
+}
+
+impl EmbeddedInteractionServer {
+    fn endpoint(&self) -> AppInteractionEndpoint {
+        AppInteractionEndpoint {
+            ws_url: self.interaction_ws_url.clone(),
+            bearer_token: Some(self.interaction_token.clone()),
+        }
+    }
+
+    async fn shutdown(self) {
+        self.server_task.abort();
+        let _ = self.server_task.await;
+    }
+}
+
+impl PreparedAppLaunch {
+    #[cfg(test)]
+    pub(crate) fn has_embedded_server(&self) -> bool {
+        self.embedded_server.is_some()
+    }
+
+    pub(crate) async fn shutdown(self) {
+        if let Some(server) = self.embedded_server {
+            server.shutdown().await;
+        }
+    }
+}
+
+async fn run_app_command(options: AppOptions) -> Result<(), CliError> {
+    let prepared = prepare_app_launch(options).await?;
+    let result = noloong_app::run_app(prepared.launch_options.clone()).map_err(Into::into);
+    prepared.shutdown().await;
+    result
+}
+
+pub(crate) async fn prepare_app_launch(options: AppOptions) -> Result<PreparedAppLaunch, CliError> {
+    let locale = options.locale.map(config_locale_from_runtime_locale);
+    let profile_config_path = options.profile_config;
+    if options.interaction_ws_url.is_some() {
+        let interaction_endpoint =
+            app_interaction_endpoint(options.interaction_ws_url, options.interaction_token);
+        let interaction_status = initialize_app_interaction(interaction_endpoint.as_ref()).await;
+        return Ok(PreparedAppLaunch {
+            launch_options: AppLaunchOptions {
+                profile_config_path,
+                locale,
+                interaction_endpoint,
+                interaction_status,
+            },
+            embedded_server: None,
+        });
+    }
+
+    let resolved_profile_config = resolve_profile_config_path(profile_config_path.as_deref())?;
+    if !resolved_profile_config.exists() {
+        return Ok(PreparedAppLaunch {
+            launch_options: AppLaunchOptions {
+                profile_config_path,
+                locale,
+                interaction_endpoint: None,
+                interaction_status: None,
+            },
+            embedded_server: None,
+        });
+    }
+
+    let embedded = start_embedded_interaction(profile_config_path.clone()).await?;
+    let server = embedded.start_server().await?;
+    let interaction_endpoint = server.endpoint();
+    let interaction_status = initialize_app_interaction(Some(&interaction_endpoint)).await;
+    Ok(PreparedAppLaunch {
+        launch_options: AppLaunchOptions {
+            profile_config_path,
+            locale,
+            interaction_endpoint: Some(interaction_endpoint),
+            interaction_status,
+        },
+        embedded_server: Some(server),
+    })
+}
+
+async fn initialize_app_interaction(
+    endpoint: Option<&AppInteractionEndpoint>,
+) -> Option<noloong_app::AppInteractionStatus> {
+    let endpoint = endpoint?;
+    let status = match AppInteractionHttpClient::from_endpoint(endpoint) {
+        Ok(client) => initialize_interaction_status(&client).await,
+        Err(error) => noloong_app::AppInteractionStatus::Failed(error.to_string()),
+    };
+    Some(status)
 }
 
 async fn run_with_embedded_interaction(

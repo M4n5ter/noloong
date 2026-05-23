@@ -1,4 +1,4 @@
-use super::{Cli, CliCommand, CliError, validate_interaction_bind};
+use super::{AppOptions, Cli, CliCommand, CliError, prepare_app_launch, validate_interaction_bind};
 use crate::build_info_cli::{BuildInfoSourceSubcommand, BuildInfoSubcommand};
 use crate::cli::profile_locale;
 use crate::config::HostProfileConfig;
@@ -10,6 +10,8 @@ use crate::test_support::{remove_temp_file, write_temp_file};
 use crate::weixin_cli::{WeixinBridgeOptions, WeixinSubcommand, weixin_config_from_values};
 use clap::Parser;
 use noloong_agent::Locale;
+use noloong_app::AppInteractionStatus;
+use serde_json::json;
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 #[test]
@@ -104,6 +106,113 @@ fn cli_app_command_parses_profile_config_and_locale() {
         Some("ws://127.0.0.1:8787/jsonrpc/ws")
     );
     assert_eq!(options.interaction_token.as_deref(), Some("secret"));
+}
+
+#[tokio::test]
+async fn cli_app_prepares_external_interaction_endpoint_without_embedded_server() {
+    let prepared = prepare_app_launch(AppOptions {
+        profile_config: Some("profiles.jsonc".into()),
+        locale: Some(Locale::Zh),
+        interaction_ws_url: Some("ws://127.0.0.1:8787/jsonrpc/ws".into()),
+        interaction_token: Some("secret".into()),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .launch_options
+            .interaction_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.ws_url.as_str()),
+        Some("ws://127.0.0.1:8787/jsonrpc/ws")
+    );
+    assert_eq!(
+        prepared
+            .launch_options
+            .interaction_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.bearer_token.as_deref()),
+        Some("secret")
+    );
+    assert!(!prepared.has_embedded_server());
+}
+
+#[tokio::test]
+async fn cli_app_records_external_interaction_initialize_failure() {
+    let prepared = prepare_app_launch(AppOptions {
+        profile_config: Some("profiles.jsonc".into()),
+        locale: Some(Locale::Zh),
+        interaction_ws_url: Some("ftp://127.0.0.1/jsonrpc/ws".into()),
+        interaction_token: None,
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        prepared.launch_options.interaction_status,
+        Some(AppInteractionStatus::Failed(_))
+    ));
+    assert!(!prepared.has_embedded_server());
+}
+
+#[tokio::test]
+async fn cli_app_prepares_embedded_loopback_interaction_when_config_exists() {
+    let config = app_embedded_test_config().to_canonical_json().unwrap();
+    let path = write_temp_file("app-profile-config", "jsonc", &config);
+
+    let prepared = prepare_app_launch(AppOptions {
+        profile_config: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_ws_url: None,
+        interaction_token: None,
+    })
+    .await
+    .unwrap();
+
+    let endpoint = prepared
+        .launch_options
+        .interaction_endpoint
+        .as_ref()
+        .expect("embedded endpoint");
+    assert!(endpoint.ws_url.starts_with("ws://127.0.0.1:"));
+    assert!(endpoint.ws_url.ends_with("/jsonrpc/ws"));
+    assert!(
+        endpoint
+            .bearer_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(matches!(
+        prepared.launch_options.interaction_status,
+        Some(AppInteractionStatus::Ready { .. })
+    ));
+    assert!(prepared.has_embedded_server());
+
+    prepared.shutdown().await;
+    remove_temp_file(path);
+}
+
+fn app_embedded_test_config() -> HostProfileConfig {
+    serde_json::from_value(json!({
+        "registryStore": {
+            "type": "memory"
+        },
+        "profiles": [
+            {
+                "profileId": "default",
+                "displayName": "Default",
+                "provider": {
+                    "type": "chat_completions",
+                    "model": "gpt-5.4-mini"
+                },
+                "eventStore": {
+                    "type": "memory"
+                }
+            }
+        ]
+    }))
+    .unwrap()
 }
 
 #[test]

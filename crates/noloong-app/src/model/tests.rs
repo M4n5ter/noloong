@@ -1,5 +1,8 @@
-use super::{
-    AppError, AppInteractionEndpoint, AppLaunchOptions, AppRoute, AppStatus, AppViewModel,
+use super::{AppError, AppLaunchOptions, AppRoute, AppStatus, AppViewModel, ChatEmptyState};
+use crate::interaction::{
+    AppInteractionClient, AppInteractionEndpoint, AppInteractionError, AppInteractionStatus,
+    InteractionInitializeRequest, InteractionInitializeResult, InteractionProfileDescriptor,
+    InteractionServerInfo, initialize_interaction_status,
 };
 use crate::test_support::{remove_temp_dir, temp_dir};
 use noloong_config::Locale;
@@ -14,6 +17,7 @@ fn app_loads_starter_draft_when_config_is_missing() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -29,6 +33,47 @@ fn app_loads_starter_draft_when_config_is_missing() {
 }
 
 #[test]
+fn chat_empty_state_guides_missing_config_to_settings() {
+    let dir = temp_dir("app-chat-missing-config");
+    let path = dir.join("profile-config.jsonc");
+
+    let model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: None,
+        interaction_status: None,
+    })
+    .unwrap();
+
+    assert_eq!(model.chat_empty_state(), ChatEmptyState::MissingConfig);
+    remove_temp_dir(dir);
+}
+
+#[test]
+fn chat_empty_state_offers_new_session_after_runtime_initialize() {
+    let dir = temp_dir("app-chat-ready-empty");
+    let path = dir.join("profile-config.jsonc");
+
+    let model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
+            bearer_token: Some("token".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+
+    assert_eq!(model.chat_empty_state(), ChatEmptyState::NoSession);
+    remove_temp_dir(dir);
+}
+
+#[test]
 fn app_loads_interaction_endpoint_for_chat_client() {
     let dir = temp_dir("app-interaction-endpoint");
     let path = dir.join("profile-config.jsonc");
@@ -40,6 +85,7 @@ fn app_loads_interaction_endpoint_for_chat_client() {
             ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
             bearer_token: Some("token".into()),
         }),
+        interaction_status: None,
     })
     .unwrap();
 
@@ -61,6 +107,124 @@ fn app_loads_interaction_endpoint_for_chat_client() {
 }
 
 #[test]
+fn app_loads_initial_interaction_status_from_launcher() {
+    let dir = temp_dir("app-initial-interaction-status");
+    let path = dir.join("profile-config.jsonc");
+
+    let model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::En),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
+            bearer_token: Some("token".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+
+    assert_eq!(
+        model.interaction_status,
+        AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }
+    );
+    remove_temp_dir(dir);
+}
+
+#[test]
+fn app_without_initial_status_waits_for_endpoint_initialize() {
+    let dir = temp_dir("app-pending-interaction-status");
+    let path = dir.join("profile-config.jsonc");
+
+    let model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::En),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
+            bearer_token: Some("token".into()),
+        }),
+        interaction_status: None,
+    })
+    .unwrap();
+
+    assert_eq!(model.interaction_status, AppInteractionStatus::Pending);
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn app_initializes_interaction_with_typed_client() {
+    let dir = temp_dir("app-interaction-initialize");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::En),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
+            bearer_token: Some("token".into()),
+        }),
+        interaction_status: None,
+    })
+    .unwrap();
+
+    let client = FakeInteractionClient::ok();
+    model.interaction_status = initialize_interaction_status(&client).await;
+
+    assert_eq!(
+        client
+            .last_request()
+            .as_ref()
+            .map(|request| request.name.as_str()),
+        Some("noloong-app")
+    );
+    assert_eq!(
+        model.interaction_status,
+        AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: vec![InteractionProfileDescriptor {
+                profile_id: "default".into(),
+                display_name: "Default".into(),
+                description: None,
+                default_manifest_patches: Vec::new(),
+                metadata: Default::default(),
+            }]
+        }
+    );
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn app_records_interaction_initialize_failure() {
+    let dir = temp_dir("app-interaction-initialize-failure");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::En),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:12345/jsonrpc/ws".into(),
+            bearer_token: Some("token".into()),
+        }),
+        interaction_status: None,
+    })
+    .unwrap();
+
+    let client = FakeInteractionClient::err("connection refused");
+    model.interaction_status = initialize_interaction_status(&client).await;
+
+    assert_eq!(
+        model.interaction_status,
+        AppInteractionStatus::Failed("connection refused".into())
+    );
+    remove_temp_dir(dir);
+}
+
+#[test]
 fn app_saves_canonical_config() {
     let dir = temp_dir("app-save-config");
     let path = dir.join("profile-config.jsonc");
@@ -68,6 +232,7 @@ fn app_saves_canonical_config() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::En),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -88,6 +253,7 @@ fn app_jsonc_preview_tracks_typed_draft() {
         profile_config_path: Some(path.display().to_string()),
         locale: None,
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -106,6 +272,7 @@ fn app_jsonc_editor_updates_typed_draft() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -133,6 +300,7 @@ fn invalid_jsonc_does_not_pollute_typed_draft_and_blocks_save() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -154,6 +322,7 @@ fn fixing_jsonc_restores_form_and_save_writes_canonical_json() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -181,6 +350,7 @@ fn app_visual_mcp_editor_updates_typed_draft_and_jsonc() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -217,6 +387,7 @@ fn app_visual_skills_editor_updates_typed_draft_and_jsonc() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -244,6 +415,7 @@ fn app_provider_switcher_manages_multiple_profiles() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -282,6 +454,7 @@ fn app_visual_reasoning_and_compaction_editors_update_jsonc() {
         profile_config_path: Some(path.display().to_string()),
         locale: Some(Locale::Zh),
         interaction_endpoint: None,
+        interaction_status: None,
     })
     .unwrap();
 
@@ -313,4 +486,54 @@ fn app_visual_reasoning_and_compaction_editors_update_jsonc() {
     assert!(preview.contains("\"type\": \"openai_responses\""));
     assert!(preview.contains("\"inputLimitTokens\": 272000"));
     remove_temp_dir(dir);
+}
+
+struct FakeInteractionClient {
+    result: Result<InteractionInitializeResult, AppInteractionError>,
+    last_request: std::sync::Mutex<Option<InteractionInitializeRequest>>,
+}
+
+impl FakeInteractionClient {
+    fn ok() -> Self {
+        Self {
+            result: Ok(InteractionInitializeResult {
+                server: InteractionServerInfo {
+                    name: "noloong-agent".into(),
+                    protocol_version: "2026-05-05".into(),
+                },
+                profiles: vec![InteractionProfileDescriptor {
+                    profile_id: "default".into(),
+                    display_name: "Default".into(),
+                    description: None,
+                    default_manifest_patches: Vec::new(),
+                    metadata: Default::default(),
+                }],
+            }),
+            last_request: Default::default(),
+        }
+    }
+
+    fn err(message: &str) -> Self {
+        Self {
+            result: Err(AppInteractionError::Transport(message.into())),
+            last_request: Default::default(),
+        }
+    }
+
+    fn last_request(&self) -> Option<InteractionInitializeRequest> {
+        self.last_request
+            .lock()
+            .expect("fake interaction lock")
+            .clone()
+    }
+}
+
+impl AppInteractionClient for FakeInteractionClient {
+    async fn initialize(
+        &self,
+        request: InteractionInitializeRequest,
+    ) -> Result<InteractionInitializeResult, AppInteractionError> {
+        *self.last_request.lock().expect("fake interaction lock") = Some(request);
+        self.result.clone()
+    }
 }
