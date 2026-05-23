@@ -8,7 +8,7 @@ mod composer;
 mod streaming;
 mod transcript;
 
-pub use composer::{ChatComposer, ChatComposerAction};
+pub use composer::{ChatAttachmentDraft, ChatComposer, ChatComposerAction, ChatComposerSubmission};
 pub use streaming::StreamingText;
 pub use transcript::{
     ChatApprovalCard, ChatApprovalStatus, ChatToolActivity, ChatTranscriptItem, ChatTranscriptRole,
@@ -548,6 +548,7 @@ fn text_from_content_blocks(blocks: &[AppContentBlock]) -> String {
         .iter()
         .filter_map(|block| match block {
             AppContentBlock::Text { text } => Some(text.as_str()),
+            AppContentBlock::Media { .. } => None,
             AppContentBlock::Other => None,
         })
         .collect::<String>()

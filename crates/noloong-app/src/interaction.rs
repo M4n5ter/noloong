@@ -6,8 +6,10 @@ use std::{collections::BTreeSet, future::Future, sync::Arc};
 use thiserror::Error;
 use url::Url;
 
+mod media;
 mod ws;
 
+pub use media::{AppMediaBlock, AppMediaKind, AppMediaSource};
 pub use ws::{AppInteractionWsClient, AppInteractionWsNotification};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,6 +211,9 @@ pub struct AppMessage {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppContentBlock {
+    Media {
+        media: AppMediaBlock,
+    },
     Text {
         text: String,
     },

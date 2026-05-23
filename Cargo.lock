@@ -4465,6 +4465,7 @@ dependencies = [
  "gpui-component",
  "gpui_platform",
  "lsp-types",
+ "mime_guess",
  "noloong-config",
  "reqwest",
  "serde",

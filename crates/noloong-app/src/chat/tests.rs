@@ -4,8 +4,10 @@ use super::{
 };
 use crate::interaction::{
     AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor, AppInteractionSessionState,
-    AppInteractionSessionStatus, AppMessage, AppToolApprovalRequest, AppToolOutput, AppToolUpdate,
+    AppInteractionSessionStatus, AppMediaKind, AppMediaSource, AppMessage, AppPromptInput,
+    AppToolApprovalRequest, AppToolOutput, AppToolUpdate,
 };
+use std::fs;
 
 #[test]
 fn display_delta_streams_then_final_replaces_the_same_assistant_bubble() {
@@ -81,6 +83,73 @@ fn composer_enter_submits_non_empty_text_and_shift_enter_adds_newline() {
         ChatComposerAction::Submit("hello".into())
     );
     assert!(!composer.can_send());
+}
+
+#[test]
+fn composer_converts_file_attachment_to_media_message_input() {
+    let dir = tempfile_dir("composer-attachment");
+    let path = dir.join("notes.txt");
+    fs::write(&path, "hello").unwrap();
+    let mut composer = ChatComposer::default();
+    composer.set_text("see attached".into());
+
+    composer.add_attachment_path(&path).unwrap();
+
+    let ChatComposerAction::Submit(submission) = composer.press_enter(false) else {
+        panic!("expected submission");
+    };
+    let AppPromptInput::Message { message } = submission.into_prompt_input("user-1") else {
+        panic!("attachment submission must use message input");
+    };
+    assert_eq!(message.id, "user-1");
+    assert_eq!(message.role, "user");
+    assert_eq!(
+        message.content[0],
+        AppContentBlock::Text {
+            text: "see attached".into()
+        }
+    );
+    let AppContentBlock::Media { media } = &message.content[1] else {
+        panic!("expected media block");
+    };
+    assert_eq!(media.kind, AppMediaKind::File);
+    assert_eq!(media.name.as_deref(), Some("notes.txt"));
+    assert_eq!(media.mime_type.as_deref(), Some("text/plain"));
+    assert_eq!(
+        media.source,
+        AppMediaSource::Uri {
+            uri: format!("file://{}", path.display())
+        }
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn composer_rejects_directories_and_keeps_draft_unchanged() {
+    let dir = tempfile_dir("composer-unsupported-attachment");
+    let mut composer = ChatComposer::default();
+
+    assert!(composer.add_attachment_path(&dir).is_err());
+
+    assert!(composer.attachments().is_empty());
+    assert_eq!(composer.press_enter(false), ChatComposerAction::None);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn composer_removes_attachment_from_draft() {
+    let dir = tempfile_dir("composer-attachment-remove");
+    let path = dir.join("notes.txt");
+    fs::write(&path, "hello").unwrap();
+    let mut composer = ChatComposer::default();
+    composer.add_attachment_path(&path).unwrap();
+    let attachment_id = composer.attachments()[0].id.clone();
+
+    assert!(composer.remove_attachment(&attachment_id));
+
+    assert!(composer.attachments().is_empty());
+    assert!(!composer.can_send());
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -425,4 +494,11 @@ fn approval_request(approval_id: &str, tool_name: &str) -> AppToolApprovalReques
             metadata: serde_json::json!({}),
         },
     }
+}
+
+fn tempfile_dir(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("noloong-app-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&path);
+    fs::create_dir_all(&path).unwrap();
+    path
 }

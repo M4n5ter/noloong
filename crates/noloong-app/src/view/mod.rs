@@ -1,3 +1,4 @@
+use crate::chat::ChatAttachmentDraft;
 use crate::interaction::AppInteractionClient as _;
 use crate::{
     APP_KEY_CONTEXT, AppI18nCatalog, AppInteractionHttpClient, AppInteractionStatus, AppRoute,
@@ -77,6 +78,7 @@ pub(crate) struct NoloongAppView {
     mcp_timeout_input: Entity<InputState>,
     jsonc_input: Entity<InputState>,
     chat_input: Entity<InputState>,
+    chat_attachments: Vec<ChatAttachmentDraft>,
     toasts: Vec<ToastMessage>,
     next_toast_id: u64,
     last_toast_promotion_at: Option<Instant>,
@@ -84,6 +86,7 @@ pub(crate) struct NoloongAppView {
     chat_run_task: Task<()>,
     chat_abort_task: Task<()>,
     chat_approval_task: Task<()>,
+    chat_attachment_task: Task<()>,
     toast_task: Task<()>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -654,6 +657,7 @@ impl NoloongAppView {
             mcp_timeout_input,
             jsonc_input,
             chat_input,
+            chat_attachments: Vec::new(),
             toasts: Vec::new(),
             next_toast_id: 0,
             last_toast_promotion_at: None,
@@ -661,6 +665,7 @@ impl NoloongAppView {
             chat_run_task: Task::ready(()),
             chat_abort_task: Task::ready(()),
             chat_approval_task: Task::ready(()),
+            chat_attachment_task: Task::ready(()),
             toast_task: Task::ready(()),
             _subscriptions,
         };

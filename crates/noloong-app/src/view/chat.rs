@@ -1,5 +1,7 @@
 use super::NoloongAppView;
-use crate::chat::{ChatComposer, ChatComposerAction, ChatRunStatus};
+use crate::chat::{
+    ChatAttachmentDraft, ChatComposer, ChatComposerAction, ChatComposerSubmission, ChatRunStatus,
+};
 use crate::{
     AppInteractionStatus, AppTextKey, ChatEmptyState,
     interaction::{
@@ -11,11 +13,15 @@ use crate::{
     },
 };
 use gpui::{
-    AnyElement, AsyncApp, Context, IntoElement, KeyDownEvent, ParentElement as _, SharedString,
-    Styled, WeakEntity, div, prelude::*, px, rgb,
+    AnyElement, AsyncApp, Context, ExternalPaths, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, PathPromptOptions, SharedString, Styled, WeakEntity, div,
+    prelude::*, px, rgb,
 };
 use gpui_component::{StyledExt as _, input::Input};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 impl NoloongAppView {
     pub(super) fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -274,6 +280,8 @@ impl NoloongAppView {
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut composer = ChatComposer::default();
         composer.set_text(self.chat_input.read(cx).value().to_string());
+        composer.set_attachments(self.chat_attachments.clone());
+        let attachments_supported = self.chat_attachments_supported();
         let can_abort = self.model.can_abort_current_chat_run();
         let can_send = self.model.has_interaction_endpoint()
             && self.model.can_send_chat_message()
@@ -296,6 +304,15 @@ impl NoloongAppView {
                     cx.stop_propagation();
                 }
             }))
+            .when(attachments_supported, |this| {
+                this.can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                        this.add_chat_attachment_paths(paths.paths().iter().cloned(), cx);
+                    }))
+            })
+            .when(!composer.attachments().is_empty(), |this| {
+                this.child(self.render_chat_attachment_chips(cx))
+            })
             .child(
                 div().flex_1().child(
                     Input::new(&self.chat_input)
@@ -314,9 +331,35 @@ impl NoloongAppView {
                     .items_center()
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(rgb(0x7d8793))
-                            .child(self.chat_connection_status_text()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0x7d8793))
+                                    .child(self.chat_connection_status_text()),
+                            )
+                            .when(attachments_supported, |this| {
+                                this.child(
+                                    div()
+                                        .id("chat-attach-button")
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(rgb(0x304052))
+                                        .bg(rgb(0x121c27))
+                                        .px_3()
+                                        .py_1()
+                                        .text_sm()
+                                        .text_color(rgb(0xaecbff))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(0x172638)))
+                                        .child("+")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.start_pick_chat_attachments(window, cx);
+                                        })),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -359,10 +402,130 @@ impl NoloongAppView {
             .into_any_element()
     }
 
+    fn chat_attachments_supported(&self) -> bool {
+        self.model.file_data_url_input().unwrap_or(false)
+    }
+
+    fn render_chat_attachment_chips(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(
+                self.chat_attachments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, attachment)| {
+                        self.render_chat_attachment_chip(index, attachment, cx)
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_chat_attachment_chip(
+        &self,
+        index: usize,
+        attachment: &ChatAttachmentDraft,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let attachment_id = attachment.id.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .max_w(px(260.0))
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(0x304052))
+            .bg(rgb(0x132131))
+            .px_3()
+            .py_1()
+            .text_sm()
+            .text_color(rgb(0xcbd7e3))
+            .child(div().truncate().child(attachment.file_name.clone()))
+            .child(
+                div()
+                    .id(("chat-remove-attachment", index))
+                    .rounded_full()
+                    .px_1()
+                    .text_color(rgb(0x8ea1b6))
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(0xf1b4b4)))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.remove_chat_attachment(&attachment_id, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn start_pick_chat_attachments(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if !self.chat_attachments_supported() {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(self.catalog.text(AppTextKey::AttachFiles).into()),
+        });
+        self.chat_attachment_task = cx.spawn(async move |this, cx| {
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return,
+            };
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.add_chat_attachment_paths(paths, cx);
+            });
+        });
+    }
+
+    fn add_chat_attachment_paths(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chat_attachments_supported() {
+            return;
+        }
+        let mut composer = ChatComposer::default();
+        composer.set_attachments(std::mem::take(&mut self.chat_attachments));
+        let mut first_error = None;
+        for path in paths {
+            if let Err(error) = composer.add_attachment_path(path) {
+                first_error.get_or_insert_with(|| error.to_string());
+            }
+        }
+        self.chat_attachments = composer.into_attachments();
+        if let Some(error) = first_error {
+            self.show_toast(
+                format!(
+                    "{}: {error}",
+                    self.catalog.text(AppTextKey::AttachmentRejected)
+                ),
+                super::ToastTone::Error,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn remove_chat_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) {
+        let mut composer = ChatComposer::default();
+        composer.set_attachments(std::mem::take(&mut self.chat_attachments));
+        composer.remove_attachment(attachment_id);
+        self.chat_attachments = composer.into_attachments();
+        cx.notify();
+    }
+
     fn submit_chat_input(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let mut composer = ChatComposer::default();
         composer.set_text(self.chat_input.read(cx).value().to_string());
-        let ChatComposerAction::Submit(text) = composer.press_enter(false) else {
+        composer.set_attachments(self.chat_attachments.clone());
+        let ChatComposerAction::Submit(submission) = composer.press_enter(false) else {
             return;
         };
         if !self.model.has_interaction_endpoint() || !self.model.can_send_chat_message() {
@@ -370,7 +533,8 @@ impl NoloongAppView {
         }
         self.chat_input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.start_submit_chat_message(text, cx);
+        self.chat_attachments.clear();
+        self.start_submit_chat_message(submission, cx);
         cx.notify();
     }
 
@@ -439,12 +603,16 @@ impl NoloongAppView {
         });
     }
 
-    fn start_submit_chat_message(&mut self, text: String, cx: &mut Context<Self>) {
+    fn start_submit_chat_message(
+        &mut self,
+        submission: ChatComposerSubmission,
+        cx: &mut Context<Self>,
+    ) {
         let Some(endpoint) = self.model.interaction_endpoint.clone() else {
             return;
         };
-        let text = text.trim().to_string();
-        if text.is_empty() {
+        let input = submission.into_prompt_input(format!("app-user-{}", current_time_ms()));
+        if matches!(&input, AppPromptInput::Text { text } if text.trim().is_empty()) {
             return;
         }
         let current_session_id = self.model.current_chat_session_id().map(str::to_string);
@@ -496,10 +664,7 @@ impl NoloongAppView {
                 update_chat_error(this, cx, error.to_string());
                 return;
             }
-            let prompt = client.prompt(AppPromptRequest {
-                session_id,
-                input: AppPromptInput::Text { text },
-            });
+            let prompt = client.prompt(AppPromptRequest { session_id, input });
             tokio::pin!(prompt);
             loop {
                 tokio::select! {
