@@ -1,7 +1,8 @@
 use noloong_config::ManifestPatch;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::BTreeSet, future::Future};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 use thiserror::Error;
 use url::Url;
 
@@ -114,11 +115,120 @@ pub struct InteractionProfileDescriptor {
     pub metadata: Map<String, Value>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSessionCreateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSessionRequest {
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInteractionSessionDescriptor {
+    pub session_id: String,
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub status: AppInteractionSessionStatus,
+    pub state: AppInteractionSessionState,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppInteractionSessionStatus {
+    Idle,
+    Running,
+    Completed,
+    Aborted,
+    Failed,
+    Paused,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInteractionSessionState {
+    #[serde(default)]
+    pub messages: Vec<AppMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppMessage {
+    pub id: String,
+    pub role: String,
+    #[serde(default)]
+    pub content: Vec<AppContentBlock>,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AppContentBlock {
+    Text {
+        text: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
 pub trait AppInteractionClient {
     fn initialize(
         &self,
         request: InteractionInitializeRequest,
     ) -> impl Future<Output = Result<InteractionInitializeResult, AppInteractionError>> + Send + '_;
+
+    fn list_sessions(
+        &self,
+    ) -> impl Future<Output = Result<Vec<AppInteractionSessionDescriptor>, AppInteractionError>>
+    + Send
+    + '_ {
+        async {
+            Err(AppInteractionError::Protocol(
+                "session/list is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
+    fn get_session<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + 'a
+    {
+        async move {
+            let _ = session_id;
+            Err(AppInteractionError::Protocol(
+                "session/get is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
+    fn create_session(
+        &self,
+        request: AppSessionCreateRequest,
+    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
+    {
+        async move {
+            let _ = request;
+            Err(AppInteractionError::Protocol(
+                "session/create is not implemented for this interaction client".into(),
+            ))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -126,6 +236,7 @@ pub struct AppInteractionHttpClient {
     client: reqwest::Client,
     http_url: String,
     bearer_token: Option<String>,
+    request_id: Arc<AtomicU64>,
 }
 
 impl AppInteractionHttpClient {
@@ -134,7 +245,36 @@ impl AppInteractionHttpClient {
             client: reqwest::Client::new(),
             http_url: interaction_http_url(&endpoint.ws_url)?,
             bearer_token: endpoint.bearer_token.clone(),
+            request_id: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    async fn call<P, R>(&self, method: &'static str, params: P) -> Result<R, AppInteractionError>
+    where
+        P: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let mut http_request = self.client.post(&self.http_url);
+        if let Some(token) = &self.bearer_token {
+            http_request = http_request.bearer_auth(token);
+        }
+        let id = self.request_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let response = http_request
+            .json(&JsonRpcRequest {
+                jsonrpc: "2.0",
+                id,
+                method,
+                params,
+            })
+            .send()
+            .await
+            .map_err(|error| AppInteractionError::Transport(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| AppInteractionError::Transport(error.to_string()))?
+            .json::<JsonRpcResponse<R>>()
+            .await
+            .map_err(|error| AppInteractionError::Protocol(error.to_string()))?;
+        response.into_result()
     }
 }
 
@@ -143,26 +283,33 @@ impl AppInteractionClient for AppInteractionHttpClient {
         &self,
         request: InteractionInitializeRequest,
     ) -> Result<InteractionInitializeResult, AppInteractionError> {
-        let mut http_request = self.client.post(&self.http_url);
-        if let Some(token) = &self.bearer_token {
-            http_request = http_request.bearer_auth(token);
-        }
-        let response = http_request
-            .json(&JsonRpcRequest {
-                jsonrpc: "2.0",
-                id: 1,
-                method: "initialize",
-                params: request,
-            })
-            .send()
-            .await
-            .map_err(|error| AppInteractionError::Transport(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| AppInteractionError::Transport(error.to_string()))?
-            .json::<JsonRpcResponse<InteractionInitializeResult>>()
-            .await
-            .map_err(|error| AppInteractionError::Protocol(error.to_string()))?;
-        response.into_result()
+        self.call("initialize", request).await
+    }
+
+    async fn list_sessions(
+        &self,
+    ) -> Result<Vec<AppInteractionSessionDescriptor>, AppInteractionError> {
+        self.call("session/list", serde_json::json!({})).await
+    }
+
+    async fn get_session(
+        &self,
+        session_id: &str,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.call(
+            "session/get",
+            AppSessionRequest {
+                session_id: session_id.into(),
+            },
+        )
+        .await
+    }
+
+    async fn create_session(
+        &self,
+        request: AppSessionCreateRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.call("session/create", request).await
     }
 }
 

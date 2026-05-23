@@ -505,7 +505,7 @@ impl NoloongAppView {
         }
 
         let content = match self.model.route {
-            AppRoute::Chat => self.render_chat().into_any_element(),
+            AppRoute::Chat => self.render_chat(cx).into_any_element(),
             AppRoute::Tools => self
                 .render_placeholder(AppTextKey::ToolsPlaceholder)
                 .into_any_element(),

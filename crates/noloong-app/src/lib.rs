@@ -1,4 +1,5 @@
 mod actions;
+mod chat;
 mod i18n;
 pub mod interaction;
 #[cfg(target_os = "macos")]

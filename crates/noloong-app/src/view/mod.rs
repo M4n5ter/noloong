@@ -1,6 +1,7 @@
+use crate::interaction::AppInteractionClient as _;
 use crate::{
-    APP_KEY_CONTEXT, AppI18nCatalog, AppRoute, AppStatus, AppTextKey, AppViewModel, SaveSettings,
-    ToggleJsoncEditor, ValidateSettings,
+    APP_KEY_CONTEXT, AppI18nCatalog, AppInteractionHttpClient, AppInteractionStatus, AppRoute,
+    AppStatus, AppTextKey, AppViewModel, SaveSettings, ToggleJsoncEditor, ValidateSettings,
 };
 use gpui::{
     Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div, img,
@@ -77,6 +78,7 @@ pub(crate) struct NoloongAppView {
     toasts: Vec<ToastMessage>,
     next_toast_id: u64,
     last_toast_promotion_at: Option<Instant>,
+    chat_refresh_task: Task<()>,
     toast_task: Task<()>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -603,7 +605,7 @@ impl NoloongAppView {
             }),
         ];
 
-        Self {
+        let mut this = Self {
             model,
             catalog,
             settings_section: SettingsSection::General,
@@ -637,9 +639,41 @@ impl NoloongAppView {
             toasts: Vec::new(),
             next_toast_id: 0,
             last_toast_promotion_at: None,
+            chat_refresh_task: Task::ready(()),
             toast_task: Task::ready(()),
             _subscriptions,
-        }
+        };
+        this.start_initial_chat_session_refresh(cx);
+        this
+    }
+
+    fn start_initial_chat_session_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(endpoint) = self.model.interaction_endpoint.clone() else {
+            return;
+        };
+        let client = match AppInteractionHttpClient::from_endpoint(&endpoint) {
+            Ok(client) => client,
+            Err(error) => {
+                self.model.interaction_status = AppInteractionStatus::Failed(error.to_string());
+                return;
+            }
+        };
+        self.chat_refresh_task = cx.spawn(async move |this, cx| {
+            let result = client.list_sessions().await;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(sessions) => this.model.apply_chat_session_descriptors(sessions),
+                    Err(error) => {
+                        this.model.interaction_status =
+                            AppInteractionStatus::Failed(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        });
     }
 }
 

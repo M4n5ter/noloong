@@ -9,14 +9,17 @@ use noloong_config::{
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::chat::ChatSessionStore;
 use crate::interaction::{AppInteractionEndpoint, AppInteractionStatus};
 
+mod chat_runtime;
 mod helpers;
 mod integrations;
 #[cfg(test)]
 mod tests;
 mod types;
 
+pub use chat_runtime::ChatEmptyState;
 use helpers::*;
 pub use types::*;
 
@@ -46,14 +49,6 @@ pub enum AppStatus {
     SaveFailed(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChatEmptyState {
-    MissingConfig,
-    Connecting,
-    ConnectionFailed(String),
-    NoSession,
-}
-
 #[derive(Clone, Debug)]
 pub struct AppViewModel {
     pub config_path: PathBuf,
@@ -63,6 +58,7 @@ pub struct AppViewModel {
     pub locale: Locale,
     pub interaction_endpoint: Option<AppInteractionEndpoint>,
     pub interaction_status: AppInteractionStatus,
+    pub chat: ChatSessionStore,
     pub route: AppRoute,
     pub jsonc_open: bool,
     pub jsonc_text: String,
@@ -104,6 +100,7 @@ impl AppViewModel {
             locale: options.locale.unwrap_or_else(Locale::detect),
             interaction_endpoint,
             interaction_status,
+            chat: ChatSessionStore::default(),
             route: AppRoute::Chat,
             jsonc_open: false,
             jsonc_text,
@@ -342,15 +339,6 @@ impl AppViewModel {
 
     pub fn has_interaction_endpoint(&self) -> bool {
         self.interaction_endpoint.is_some()
-    }
-
-    pub fn chat_empty_state(&self) -> ChatEmptyState {
-        match &self.interaction_status {
-            AppInteractionStatus::Ready { .. } => ChatEmptyState::NoSession,
-            AppInteractionStatus::Pending => ChatEmptyState::Connecting,
-            AppInteractionStatus::Failed(error) => ChatEmptyState::ConnectionFailed(error.clone()),
-            AppInteractionStatus::Unavailable => ChatEmptyState::MissingConfig,
-        }
     }
 
     pub fn set_display_name(&mut self, value: String) {
@@ -862,4 +850,6 @@ pub enum AppError {
     MissingHome,
     #[error("JSONC is invalid: {0}")]
     InvalidJsonc(String),
+    #[error("interaction failed: {0}")]
+    Interaction(String),
 }
