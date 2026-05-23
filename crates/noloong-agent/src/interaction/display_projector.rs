@@ -60,9 +60,8 @@ impl DisplayProjector {
             }
             AgentEventKind::RunAborted => {
                 let mut events = self.complete_thought(&event.run_id);
-                events.push(DisplayEvent::RunFailed {
+                events.push(DisplayEvent::RunAborted {
                     run_id: event.run_id,
-                    error: "run aborted".into(),
                 });
                 events
             }
@@ -230,4 +229,71 @@ fn display_message_id(run_id: &str) -> String {
 
 fn display_thought_id(run_id: &str) -> String {
     format!("{run_id}:thought")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DisplayEvent, DisplayProjector};
+    use crate::interaction::{InteractionUxCapabilities, jsonrpc::jsonrpc_outbound_channel};
+    use noloong_agent_core::{AgentEvent, AgentEventKind, ModelStreamEvent, ThinkingDelta};
+
+    #[test]
+    fn aborted_run_completes_active_thought_then_emits_run_aborted() {
+        let (_sender, _receiver, notifier) = jsonrpc_outbound_channel(8);
+        let mut projector = DisplayProjector::new(
+            "session-1".into(),
+            "subscription-1".into(),
+            InteractionUxCapabilities {
+                display_events: true,
+                stream_text: true,
+                edit_message: true,
+                markdown: true,
+                max_message_bytes: None,
+                raw_events: false,
+            },
+            notifier,
+        );
+
+        let thinking = projector.project(event(
+            "run-1",
+            AgentEventKind::ModelStreamEvent {
+                provider: "test".into(),
+                event: ModelStreamEvent::ThinkingDelta {
+                    delta: ThinkingDelta::from_summary("summary"),
+                },
+            },
+        ));
+        assert!(matches!(
+            thinking.as_slice(),
+            [
+                DisplayEvent::ThoughtStarted { .. },
+                DisplayEvent::ThoughtDelta { .. }
+            ]
+        ));
+
+        let aborted = projector.project(event("run-1", AgentEventKind::RunAborted));
+
+        assert!(matches!(
+            aborted.as_slice(),
+            [
+                DisplayEvent::ThoughtCompleted { .. },
+                DisplayEvent::RunAborted { .. }
+            ]
+        ));
+        assert!(
+            aborted
+                .iter()
+                .all(|event| !matches!(event, DisplayEvent::RunFailed { .. }))
+        );
+    }
+
+    fn event(run_id: &str, kind: AgentEventKind) -> AgentEvent {
+        AgentEvent {
+            sequence: 1,
+            run_id: run_id.into(),
+            turn_id: None,
+            phase: None,
+            kind,
+        }
+    }
 }

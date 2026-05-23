@@ -229,6 +229,17 @@ pub async fn deliver_display_event_with_reply(
             )
             .await?;
         }
+        DisplayEvent::RunAborted { run_id } => {
+            cleanup.extend(clear_tool_status_messages(state));
+            finish_run_card(
+                state,
+                delivery,
+                target,
+                &run_id,
+                catalog.run_aborted(&run_id),
+            )
+            .await?;
+        }
         DisplayEvent::RunStarted { .. } => {
             send_chat_action_best_effort(
                 state,

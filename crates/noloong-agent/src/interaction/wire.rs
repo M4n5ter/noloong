@@ -293,6 +293,9 @@ pub enum DisplayEvent {
     RunCompleted {
         run_id: String,
     },
+    RunAborted {
+        run_id: String,
+    },
     RunFailed {
         run_id: String,
         error: String,

@@ -944,7 +944,9 @@ impl TelegramBridge {
                 .run_reply_targets
                 .get(&TelegramRunReplyKey::new(key, run_id))
                 .copied(),
-            DisplayEvent::RunCompleted { run_id } | DisplayEvent::RunFailed { run_id, .. } => {
+            DisplayEvent::RunCompleted { run_id }
+            | DisplayEvent::RunAborted { run_id }
+            | DisplayEvent::RunFailed { run_id, .. } => {
                 state
                     .run_reply_targets
                     .remove(&TelegramRunReplyKey::new(key, run_id));

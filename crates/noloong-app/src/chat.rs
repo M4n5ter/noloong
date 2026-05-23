@@ -16,6 +16,8 @@ pub struct ChatSessionStore {
     sessions: Vec<ChatSessionSummary>,
     current_session_id: Option<String>,
     transcript: Vec<ChatTranscriptItem>,
+    current_run: Option<ChatRunState>,
+    connection_error: Option<String>,
 }
 
 impl ChatSessionStore {
@@ -32,6 +34,7 @@ impl ChatSessionStore {
                 .map(|session| session.session_id.clone());
         }
         self.recover_current_transcript(&descriptors);
+        self.recover_current_run(&descriptors);
         self.descriptors = descriptors;
     }
 
@@ -46,6 +49,7 @@ impl ChatSessionStore {
         self.current_session_id = Some(session_id.into());
         let descriptors = self.descriptors.clone();
         self.recover_current_transcript(&descriptors);
+        self.recover_current_run(&descriptors);
         true
     }
 
@@ -68,6 +72,7 @@ impl ChatSessionStore {
         self.current_session_id = Some(session_id);
         let descriptors = self.descriptors.clone();
         self.recover_current_transcript(&descriptors);
+        self.recover_current_run(&descriptors);
     }
 
     pub fn sessions(&self) -> &[ChatSessionSummary] {
@@ -82,12 +87,82 @@ impl ChatSessionStore {
         &self.transcript
     }
 
+    pub fn current_run(&self) -> Option<&ChatRunState> {
+        self.current_run.as_ref()
+    }
+
+    pub fn connection_error(&self) -> Option<&str> {
+        self.connection_error.as_deref()
+    }
+
+    pub fn set_connection_error(&mut self, error: String) {
+        self.connection_error = Some(error);
+    }
+
+    pub fn can_send_current_message(&self) -> bool {
+        !matches!(
+            self.current_run.as_ref().map(|run| run.status),
+            Some(ChatRunStatus::Running | ChatRunStatus::Paused)
+        )
+    }
+
     pub fn apply_display_event(&mut self, event: AppDisplayEvent) {
         self.apply_display_event_at(event, now_ms());
     }
 
     pub fn apply_display_event_at(&mut self, event: AppDisplayEvent, now_ms: u64) {
         match event {
+            AppDisplayEvent::RunStarted { run_id } => {
+                self.connection_error = None;
+                self.set_current_run(
+                    ChatRunState {
+                        run_id: Some(run_id),
+                        status: ChatRunStatus::Running,
+                        error: None,
+                    },
+                    AppInteractionSessionStatus::Running,
+                );
+            }
+            AppDisplayEvent::RunCompleted { run_id } => {
+                self.set_current_run(
+                    ChatRunState {
+                        run_id: Some(run_id),
+                        status: ChatRunStatus::Completed,
+                        error: None,
+                    },
+                    AppInteractionSessionStatus::Completed,
+                );
+            }
+            AppDisplayEvent::RunAborted { run_id } => {
+                self.set_current_run(
+                    ChatRunState {
+                        run_id: Some(run_id),
+                        status: ChatRunStatus::Aborted,
+                        error: None,
+                    },
+                    AppInteractionSessionStatus::Aborted,
+                );
+            }
+            AppDisplayEvent::RunFailed { run_id, error } => {
+                self.set_current_run(
+                    ChatRunState {
+                        run_id: Some(run_id),
+                        status: ChatRunStatus::Failed,
+                        error: Some(error),
+                    },
+                    AppInteractionSessionStatus::Failed,
+                );
+            }
+            AppDisplayEvent::RunPaused { run_id, .. } => {
+                self.set_current_run(
+                    ChatRunState {
+                        run_id: Some(run_id),
+                        status: ChatRunStatus::Paused,
+                        error: None,
+                    },
+                    AppInteractionSessionStatus::Paused,
+                );
+            }
             AppDisplayEvent::AssistantMessageDelta {
                 display_message_id,
                 text,
@@ -169,10 +244,6 @@ impl ChatSessionStore {
                     item.text = thought.completed_text();
                 }
             }
-            AppDisplayEvent::RunStarted { .. }
-            | AppDisplayEvent::RunCompleted { .. }
-            | AppDisplayEvent::RunFailed { .. }
-            | AppDisplayEvent::RunPaused { .. } => {}
         }
     }
 
@@ -211,9 +282,31 @@ impl ChatSessionStore {
             .expect("thought item was just inserted")
     }
 
+    fn set_current_run(&mut self, run: ChatRunState, session_status: AppInteractionSessionStatus) {
+        self.current_run = Some(run);
+        let Some(current_session_id) = self.current_session_id.as_deref() else {
+            return;
+        };
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.session_id == current_session_id)
+        {
+            session.status = session_status;
+        }
+        if let Some(descriptor) = self
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.session_id == current_session_id)
+        {
+            descriptor.status = session_status;
+        }
+    }
+
     fn recover_current_transcript(&mut self, descriptors: &[AppInteractionSessionDescriptor]) {
         let Some(current_session_id) = self.current_session_id.as_deref() else {
             self.transcript.clear();
+            self.current_run = None;
             return;
         };
         let Some(descriptor) = descriptors
@@ -221,6 +314,7 @@ impl ChatSessionStore {
             .find(|descriptor| descriptor.session_id == current_session_id)
         else {
             self.transcript.clear();
+            self.current_run = None;
             return;
         };
         self.transcript = descriptor
@@ -243,6 +337,21 @@ impl ChatSessionStore {
                 })
             })
             .collect();
+    }
+
+    fn recover_current_run(&mut self, descriptors: &[AppInteractionSessionDescriptor]) {
+        let Some(current_session_id) = self.current_session_id.as_deref() else {
+            self.current_run = None;
+            return;
+        };
+        let Some(descriptor) = descriptors
+            .iter()
+            .find(|descriptor| descriptor.session_id == current_session_id)
+        else {
+            self.current_run = None;
+            return;
+        };
+        self.current_run = ChatRunState::from_session_status(descriptor.status);
     }
 }
 
@@ -286,6 +395,40 @@ pub enum ChatTranscriptRole {
     User,
     Assistant,
     Thought,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatRunState {
+    pub run_id: Option<String>,
+    pub status: ChatRunStatus,
+    pub error: Option<String>,
+}
+
+impl ChatRunState {
+    fn from_session_status(status: AppInteractionSessionStatus) -> Option<Self> {
+        let status = match status {
+            AppInteractionSessionStatus::Idle => return None,
+            AppInteractionSessionStatus::Running => ChatRunStatus::Running,
+            AppInteractionSessionStatus::Completed => ChatRunStatus::Completed,
+            AppInteractionSessionStatus::Aborted => ChatRunStatus::Aborted,
+            AppInteractionSessionStatus::Failed => ChatRunStatus::Failed,
+            AppInteractionSessionStatus::Paused => ChatRunStatus::Paused,
+        };
+        Some(Self {
+            run_id: None,
+            status,
+            error: None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatRunStatus {
+    Running,
+    Completed,
+    Aborted,
+    Failed,
+    Paused,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -353,7 +496,8 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatComposer, ChatComposerAction, ChatSessionStore, ChatTranscriptRole, StreamingText,
+        ChatComposer, ChatComposerAction, ChatRunStatus, ChatSessionStore, ChatTranscriptRole,
+        StreamingText,
     };
     use crate::interaction::{
         AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor,
@@ -486,6 +630,113 @@ mod tests {
 
         assert!(store.toggle_thought_expanded("run-1:thought"));
         assert!(store.transcript()[0].thought.as_ref().unwrap().expanded);
+    }
+
+    #[test]
+    fn run_lifecycle_updates_current_status_and_composer_availability() {
+        let mut store = ChatSessionStore::default();
+        store.refresh(vec![session_descriptor(
+            "session-1",
+            AppInteractionSessionStatus::Idle,
+            Vec::new(),
+        )]);
+
+        store.apply_display_event(AppDisplayEvent::RunStarted {
+            run_id: "run-1".into(),
+        });
+        assert_eq!(
+            store.current_run().map(|run| run.status),
+            Some(ChatRunStatus::Running)
+        );
+        assert_eq!(
+            store.sessions()[0].status,
+            AppInteractionSessionStatus::Running
+        );
+        assert!(!store.can_send_current_message());
+
+        store.apply_display_event(AppDisplayEvent::RunPaused {
+            run_id: "run-1".into(),
+            reason: serde_json::json!({"type": "approval_required"}),
+        });
+        assert_eq!(
+            store.current_run().map(|run| run.status),
+            Some(ChatRunStatus::Paused)
+        );
+        assert_eq!(
+            store.sessions()[0].status,
+            AppInteractionSessionStatus::Paused
+        );
+        assert!(!store.can_send_current_message());
+
+        store.apply_display_event(AppDisplayEvent::RunAborted {
+            run_id: "run-1".into(),
+        });
+        assert_eq!(
+            store.current_run().map(|run| run.status),
+            Some(ChatRunStatus::Aborted)
+        );
+        assert_eq!(
+            store.sessions()[0].status,
+            AppInteractionSessionStatus::Aborted
+        );
+        assert!(store.can_send_current_message());
+    }
+
+    #[test]
+    fn run_failure_keeps_error_visible_until_next_run_starts() {
+        let mut store = ChatSessionStore::default();
+        store.refresh(vec![session_descriptor(
+            "session-1",
+            AppInteractionSessionStatus::Running,
+            Vec::new(),
+        )]);
+
+        store.apply_display_event(AppDisplayEvent::RunFailed {
+            run_id: "run-1".into(),
+            error: "provider 400".into(),
+        });
+
+        assert_eq!(
+            store.current_run().map(|run| run.status),
+            Some(ChatRunStatus::Failed)
+        );
+        assert_eq!(
+            store.current_run().and_then(|run| run.error.as_deref()),
+            Some("provider 400")
+        );
+        assert!(store.can_send_current_message());
+
+        store.apply_display_event(AppDisplayEvent::RunStarted {
+            run_id: "run-2".into(),
+        });
+        assert_eq!(
+            store.current_run().map(|run| run.status),
+            Some(ChatRunStatus::Running)
+        );
+        assert_eq!(
+            store.current_run().and_then(|run| run.error.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn connection_error_is_visible_until_next_run_starts() {
+        let mut store = ChatSessionStore::default();
+        store.refresh(vec![session_descriptor(
+            "session-1",
+            AppInteractionSessionStatus::Running,
+            Vec::new(),
+        )]);
+
+        store.set_connection_error("websocket closed".into());
+
+        assert_eq!(store.connection_error(), Some("websocket closed"));
+
+        store.apply_display_event(AppDisplayEvent::RunStarted {
+            run_id: "run-2".into(),
+        });
+
+        assert_eq!(store.connection_error(), None);
     }
 
     fn session_descriptor(

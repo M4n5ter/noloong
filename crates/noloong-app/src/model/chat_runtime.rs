@@ -1,10 +1,11 @@
 #[cfg(test)]
 use super::AppError;
 use super::AppViewModel;
-use crate::chat::{ChatSessionSummary, ChatTranscriptItem};
+use crate::chat::{ChatRunState, ChatRunStatus, ChatSessionSummary, ChatTranscriptItem};
 #[cfg(test)]
 use crate::interaction::{
     AppInteractionClient, AppPromptInput, AppPromptRequest, AppSessionCreateRequest,
+    AppSessionRequest,
 };
 use crate::interaction::{
     AppInteractionDisplayNotification, AppInteractionSessionDescriptor, AppInteractionStatus,
@@ -129,6 +130,46 @@ impl AppViewModel {
             .map_err(|error| AppError::Interaction(error.to_string()))?;
         self.chat.upsert_and_select(descriptor);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn abort_current_chat_run(
+        &mut self,
+        client: &impl AppInteractionClient,
+    ) -> Result<(), AppError> {
+        let Some(session_id) = self.current_chat_session_id().map(str::to_string) else {
+            return Ok(());
+        };
+        let descriptor = client
+            .abort(AppSessionRequest { session_id })
+            .await
+            .map_err(|error| AppError::Interaction(error.to_string()))?;
+        self.chat.upsert_and_select(descriptor);
+        Ok(())
+    }
+
+    pub fn current_chat_run(&self) -> Option<&ChatRunState> {
+        self.chat.current_run()
+    }
+
+    pub fn chat_connection_error(&self) -> Option<&str> {
+        self.chat.connection_error()
+    }
+
+    pub fn record_chat_connection_error(&mut self, error: String) {
+        self.chat.set_connection_error(error.clone());
+        self.interaction_status = AppInteractionStatus::Failed(error);
+    }
+
+    pub fn can_send_chat_message(&self) -> bool {
+        self.chat.can_send_current_message()
+    }
+
+    pub fn can_abort_current_chat_run(&self) -> bool {
+        matches!(
+            self.chat.current_run().map(|run| run.status),
+            Some(ChatRunStatus::Running | ChatRunStatus::Paused)
+        )
     }
 
     pub fn chat_sessions(&self) -> &[ChatSessionSummary] {

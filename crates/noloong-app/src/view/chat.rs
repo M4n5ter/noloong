@@ -1,11 +1,13 @@
 use super::NoloongAppView;
-use crate::chat::{ChatComposer, ChatComposerAction, ChatTranscriptItem, ChatTranscriptRole};
+use crate::chat::{
+    ChatComposer, ChatComposerAction, ChatRunStatus, ChatTranscriptItem, ChatTranscriptRole,
+};
 use crate::{
     AppInteractionStatus, AppTextKey, ChatEmptyState,
     interaction::{
         AppDisplaySubscribeRequest, AppInteractionClient as _, AppInteractionDisplayNotification,
         AppInteractionSessionDescriptor, AppInteractionSessionStatus, AppPromptInput,
-        AppPromptRequest, AppSessionCreateRequest, InteractionUxCapabilities,
+        AppPromptRequest, AppSessionCreateRequest, AppSessionRequest, InteractionUxCapabilities,
     },
 };
 use gpui::{
@@ -399,7 +401,10 @@ impl NoloongAppView {
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut composer = ChatComposer::default();
         composer.set_text(self.chat_input.read(cx).value().to_string());
-        let can_send = self.model.has_interaction_endpoint() && composer.can_send();
+        let can_abort = self.model.can_abort_current_chat_run();
+        let can_send = self.model.has_interaction_endpoint()
+            && self.model.can_send_chat_message()
+            && composer.can_send();
         div()
             .min_h(px(128.0))
             .rounded_xl()
@@ -412,7 +417,9 @@ impl NoloongAppView {
             .gap_3()
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "enter" && !event.keystroke.modifiers.shift {
-                    this.submit_chat_input(window, cx);
+                    if !this.model.can_abort_current_chat_run() {
+                        this.submit_chat_input(window, cx);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -444,23 +451,35 @@ impl NoloongAppView {
                             .rounded_full()
                             .px_4()
                             .py_2()
-                            .bg(if can_send {
+                            .bg(if can_abort {
+                                rgb(0x66323a)
+                            } else if can_send {
                                 rgb(0x2d5f9f)
                             } else {
                                 rgb(0x263a61)
                             })
-                            .text_color(if can_send {
+                            .text_color(if can_abort || can_send {
                                 rgb(0xf1f6fb)
                             } else {
                                 rgb(0x9aa7bb)
                             })
-                            .opacity(if can_send { 1.0 } else { 0.55 })
-                            .when(can_send, |this| {
-                                this.cursor_pointer().hover(|style| style.bg(rgb(0x386fb8)))
+                            .opacity(if can_abort || can_send { 1.0 } else { 0.55 })
+                            .when(can_abort || can_send, |this| {
+                                this.cursor_pointer().hover(|style| {
+                                    if can_abort {
+                                        style.bg(rgb(0x7a3d47))
+                                    } else {
+                                        style.bg(rgb(0x386fb8))
+                                    }
+                                })
                             })
-                            .child("↑")
+                            .child(if can_abort { "■" } else { "↑" })
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_chat_input(window, cx);
+                                if this.model.can_abort_current_chat_run() {
+                                    this.start_abort_chat_run(cx);
+                                } else {
+                                    this.submit_chat_input(window, cx);
+                                }
                             })),
                     ),
             )
@@ -473,10 +492,36 @@ impl NoloongAppView {
         let ChatComposerAction::Submit(text) = composer.press_enter(false) else {
             return;
         };
+        if !self.model.has_interaction_endpoint() || !self.model.can_send_chat_message() {
+            return;
+        }
         self.chat_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.start_submit_chat_message(text, cx);
         cx.notify();
+    }
+
+    fn start_abort_chat_run(&mut self, cx: &mut Context<Self>) {
+        let Some(endpoint) = self.model.interaction_endpoint.clone() else {
+            return;
+        };
+        let Some(session_id) = self.model.current_chat_session_id().map(str::to_string) else {
+            return;
+        };
+        self.chat_abort_task = cx.spawn(async move |this, cx| {
+            let client = match crate::interaction::AppInteractionWsClient::connect(&endpoint).await
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    update_chat_error(this, cx, error.to_string());
+                    return;
+                }
+            };
+            match client.abort(AppSessionRequest { session_id }).await {
+                Ok(session) => update_chat_session(this, cx, session),
+                Err(error) => update_chat_error(this, cx, error.to_string()),
+            }
+        });
     }
 
     fn start_submit_chat_message(&mut self, text: String, cx: &mut Context<Self>) {
@@ -602,6 +647,24 @@ impl NoloongAppView {
     }
 
     fn chat_connection_status_text(&self) -> String {
+        if let Some(error) = self.model.chat_connection_error() {
+            return error.to_string();
+        }
+        if let Some(run) = self.model.current_chat_run() {
+            return match run.status {
+                ChatRunStatus::Running => self.catalog.text(AppTextKey::ChatRunRunning).into(),
+                ChatRunStatus::Paused => self.catalog.text(AppTextKey::ChatRunPaused).into(),
+                ChatRunStatus::Completed => self.catalog.text(AppTextKey::ChatRunCompleted).into(),
+                ChatRunStatus::Aborted => self.catalog.text(AppTextKey::ChatRunStopped).into(),
+                ChatRunStatus::Failed => run
+                    .error
+                    .as_ref()
+                    .map(|error| {
+                        format!("{} · {error}", self.catalog.text(AppTextKey::ChatRunFailed))
+                    })
+                    .unwrap_or_else(|| self.catalog.text(AppTextKey::ChatRunFailed).into()),
+            };
+        }
         match &self.model.interaction_status {
             AppInteractionStatus::Unavailable => {
                 self.catalog.text(AppTextKey::ChatDisabled).to_string()
@@ -702,7 +765,7 @@ fn update_chat_error(this: WeakEntity<NoloongAppView>, cx: &mut AsyncApp, error:
         return;
     };
     this.update(cx, |this, cx| {
-        this.model.interaction_status = AppInteractionStatus::Failed(error);
+        this.model.record_chat_connection_error(error);
         cx.notify();
     });
 }

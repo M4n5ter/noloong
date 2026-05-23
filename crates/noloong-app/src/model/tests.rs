@@ -4,9 +4,9 @@ use crate::interaction::{
     AppContentBlock, AppDisplayEvent, AppInteractionClient, AppInteractionDisplayNotification,
     AppInteractionEndpoint, AppInteractionError, AppInteractionSessionDescriptor,
     AppInteractionSessionState, AppInteractionSessionStatus, AppInteractionStatus, AppMessage,
-    AppPromptInput, AppPromptRequest, AppSessionCreateRequest, InteractionInitializeRequest,
-    InteractionInitializeResult, InteractionProfileDescriptor, InteractionServerInfo,
-    initialize_interaction_status,
+    AppPromptInput, AppPromptRequest, AppSessionCreateRequest, AppSessionRequest,
+    InteractionInitializeRequest, InteractionInitializeResult, InteractionProfileDescriptor,
+    InteractionServerInfo, initialize_interaction_status,
 };
 use crate::test_support::{remove_temp_dir, temp_dir};
 use noloong_config::Locale;
@@ -306,6 +306,50 @@ async fn first_chat_send_creates_session_then_submits_prompt() {
                 text: "hello".into()
             }
         ))
+    );
+    remove_temp_dir(dir);
+}
+
+#[tokio::test]
+async fn abort_current_chat_run_calls_agent_abort_for_current_session_only() {
+    let dir = temp_dir("app-chat-abort-current-run");
+    let path = dir.join("profile-config.jsonc");
+    let mut model = AppViewModel::load(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(Locale::Zh),
+        interaction_endpoint: Some(AppInteractionEndpoint {
+            ws_url: "ws://127.0.0.1:8787/jsonrpc/ws".into(),
+            bearer_token: Some("secret".into()),
+        }),
+        interaction_status: Some(AppInteractionStatus::Ready {
+            server_name: "noloong-agent".into(),
+            protocol_version: "2026-05-05".into(),
+            profiles: Vec::new(),
+        }),
+    })
+    .unwrap();
+    model.apply_chat_session_descriptors(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Running,
+        vec![message("user-1", "user", "long task")],
+    )]);
+    let client = FakeInteractionClient::ok().with_abort_session(session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Aborted,
+        vec![message("user-1", "user", "long task")],
+    ));
+
+    model.abort_current_chat_run(&client).await.unwrap();
+
+    assert_eq!(
+        client
+            .last_abort_request()
+            .map(|request| request.session_id),
+        Some("session-1".into())
+    );
+    assert_eq!(
+        model.chat_sessions()[0].status,
+        AppInteractionSessionStatus::Aborted
     );
     remove_temp_dir(dir);
 }
@@ -778,10 +822,12 @@ struct FakeInteractionClient {
     sessions: Vec<AppInteractionSessionDescriptor>,
     create_session: Option<AppInteractionSessionDescriptor>,
     prompt_session: Option<AppInteractionSessionDescriptor>,
+    abort_session: Option<AppInteractionSessionDescriptor>,
     current_session: Option<AppInteractionSessionDescriptor>,
     last_request: std::sync::Mutex<Option<InteractionInitializeRequest>>,
     last_create_request: std::sync::Mutex<Option<AppSessionCreateRequest>>,
     last_prompt_request: std::sync::Mutex<Option<AppPromptRequest>>,
+    last_abort_request: std::sync::Mutex<Option<AppSessionRequest>>,
     last_get_session_id: std::sync::Mutex<Option<String>>,
 }
 
@@ -804,10 +850,12 @@ impl FakeInteractionClient {
             sessions: Vec::new(),
             create_session: None,
             prompt_session: None,
+            abort_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
             last_prompt_request: Default::default(),
+            last_abort_request: Default::default(),
             last_get_session_id: Default::default(),
         }
     }
@@ -818,10 +866,12 @@ impl FakeInteractionClient {
             sessions: Vec::new(),
             create_session: None,
             prompt_session: None,
+            abort_session: None,
             current_session: None,
             last_request: Default::default(),
             last_create_request: Default::default(),
             last_prompt_request: Default::default(),
+            last_abort_request: Default::default(),
             last_get_session_id: Default::default(),
         }
     }
@@ -846,6 +896,11 @@ impl FakeInteractionClient {
         self
     }
 
+    fn with_abort_session(mut self, descriptor: AppInteractionSessionDescriptor) -> Self {
+        self.abort_session = Some(descriptor);
+        self
+    }
+
     fn last_request(&self) -> Option<InteractionInitializeRequest> {
         self.last_request
             .lock()
@@ -862,6 +917,13 @@ impl FakeInteractionClient {
 
     fn last_prompt_request(&self) -> Option<AppPromptRequest> {
         self.last_prompt_request
+            .lock()
+            .expect("fake interaction lock")
+            .clone()
+    }
+
+    fn last_abort_request(&self) -> Option<AppSessionRequest> {
+        self.last_abort_request
             .lock()
             .expect("fake interaction lock")
             .clone()
@@ -914,6 +976,19 @@ impl AppInteractionClient for FakeInteractionClient {
         self.prompt_session
             .clone()
             .ok_or_else(|| AppInteractionError::Protocol("missing fake prompt session".into()))
+    }
+
+    async fn abort(
+        &self,
+        request: AppSessionRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        *self
+            .last_abort_request
+            .lock()
+            .expect("fake interaction lock") = Some(request);
+        self.abort_session
+            .clone()
+            .ok_or_else(|| AppInteractionError::Protocol("missing fake abort session".into()))
     }
 
     async fn get_session(

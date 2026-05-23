@@ -213,6 +213,13 @@ impl AppInteractionClient for AppInteractionWsClient {
         self.request_as("agent/prompt", request).await
     }
 
+    async fn abort(
+        &self,
+        request: AppSessionRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.request_as("agent/abort", request).await
+    }
+
     async fn subscribe_display(
         &self,
         request: AppDisplaySubscribeRequest,

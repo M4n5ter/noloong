@@ -72,6 +72,12 @@ pub async fn deliver_display_event(
                 .send_text(peer_id, &render_run_failed(error, locale))
                 .await?;
         }
+        DisplayEvent::RunAborted { .. } => {
+            clear_typing(delivery, peer_id);
+            delivery
+                .send_text(peer_id, &render_run_aborted(locale))
+                .await?;
+        }
         DisplayEvent::RunPaused { reason, .. } => {
             clear_typing(delivery, peer_id);
             if state.approvals().is_empty() {
@@ -129,6 +135,13 @@ fn render_run_failed(error: &str, locale: Locale) -> String {
     match locale {
         Locale::Zh => format!("任务失败：{}", normalize_weixin_markdown(error)),
         _ => format!("Task failed: {}", normalize_weixin_markdown(error)),
+    }
+}
+
+fn render_run_aborted(locale: Locale) -> String {
+    match locale {
+        Locale::Zh => "任务已停止。".into(),
+        _ => "Task stopped.".into(),
     }
 }
 

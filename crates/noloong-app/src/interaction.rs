@@ -221,6 +221,9 @@ pub enum AppDisplayEvent {
     RunCompleted {
         run_id: String,
     },
+    RunAborted {
+        run_id: String,
+    },
     RunFailed {
         run_id: String,
         error: String,
@@ -337,6 +340,19 @@ pub trait AppInteractionClient {
         }
     }
 
+    fn abort(
+        &self,
+        request: AppSessionRequest,
+    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
+    {
+        async move {
+            let _ = request;
+            Err(AppInteractionError::Protocol(
+                "agent/abort is not implemented for this interaction client".into(),
+            ))
+        }
+    }
+
     fn subscribe_display(
         &self,
         request: AppDisplaySubscribeRequest,
@@ -436,6 +452,13 @@ impl AppInteractionClient for AppInteractionHttpClient {
         request: AppPromptRequest,
     ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
         self.call("agent/prompt", request).await
+    }
+
+    async fn abort(
+        &self,
+        request: AppSessionRequest,
+    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
+        self.call("agent/abort", request).await
     }
 
     async fn subscribe_display(
@@ -619,6 +642,26 @@ mod tests {
                 thought_id: "run-1:thought".into(),
                 kind: "summary".into(),
                 text: "summary".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn display_notification_decodes_run_aborted() {
+        let notification = serde_json::from_value::<AppInteractionDisplayNotification>(json!({
+            "sessionId": "session-1",
+            "subscriptionId": "subscription-1",
+            "event": {
+                "type": "run_aborted",
+                "runId": "run-1"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            notification.event,
+            AppDisplayEvent::RunAborted {
+                run_id: "run-1".into(),
             }
         );
     }

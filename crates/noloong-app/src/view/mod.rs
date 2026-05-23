@@ -81,6 +81,7 @@ pub(crate) struct NoloongAppView {
     last_toast_promotion_at: Option<Instant>,
     chat_refresh_task: Task<()>,
     chat_run_task: Task<()>,
+    chat_abort_task: Task<()>,
     toast_task: Task<()>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -656,6 +657,7 @@ impl NoloongAppView {
             last_toast_promotion_at: None,
             chat_refresh_task: Task::ready(()),
             chat_run_task: Task::ready(()),
+            chat_abort_task: Task::ready(()),
             toast_task: Task::ready(()),
             _subscriptions,
         };

@@ -958,6 +958,7 @@ fn display_event_is_terminal(event: &noloong_agent::interaction::DisplayEvent) -
     matches!(
         event,
         noloong_agent::interaction::DisplayEvent::RunCompleted { .. }
+            | noloong_agent::interaction::DisplayEvent::RunAborted { .. }
             | noloong_agent::interaction::DisplayEvent::RunFailed { .. }
     )
 }

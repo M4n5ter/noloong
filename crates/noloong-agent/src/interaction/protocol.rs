@@ -455,6 +455,23 @@ mod tests {
     }
 
     #[test]
+    fn display_run_aborted_round_trips_separately_from_failed() {
+        let event = serde_json::from_value::<DisplayEvent>(json!({
+            "type": "run_aborted",
+            "runId": "run-1"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "run_aborted",
+                "runId": "run-1"
+            })
+        );
+    }
+
+    #[test]
     fn initialize_result_round_trips() {
         let result = InteractionInitializeResult {
             server: InteractionServerInfo {
