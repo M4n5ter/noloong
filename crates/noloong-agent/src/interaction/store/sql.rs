@@ -81,6 +81,11 @@ impl SqlAgentSessionRegistryStore {
             config.migrate_on_connect,
             config.table_name_prefix.as_deref(),
         )?;
+        prepare_schema_for_migration(
+            &location,
+            config.migrate_on_connect,
+            config.table_name_prefix.as_deref(),
+        )?;
         let db = location
             .build_db(config.table_name_prefix.as_deref())
             .await?;
@@ -672,6 +677,29 @@ fn validate_schema_state(
     }
 }
 
+fn prepare_schema_for_migration(
+    location: &SqlStoreLocation,
+    migrate_on_connect: bool,
+    table_name_prefix: Option<&str>,
+) -> Result<(), InteractionError> {
+    #[cfg(not(feature = "registry-store-sqlite"))]
+    let _ = table_name_prefix;
+    if !migrate_on_connect {
+        return Ok(());
+    }
+
+    match location {
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteFile(path) => {
+            reconcile_sqlite_registry_schema(path, table_name_prefix)
+        }
+        #[cfg(feature = "registry-store-sqlite")]
+        SqlStoreLocation::SqliteInMemory => Ok(()),
+        #[cfg(feature = "registry-store-postgres")]
+        SqlStoreLocation::Postgres(_) => Ok(()),
+    }
+}
+
 fn should_push_schema(
     location: &SqlStoreLocation,
     migrate_on_connect: bool,
@@ -696,17 +724,47 @@ fn should_push_schema(
 }
 
 #[cfg(feature = "registry-store-sqlite")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteRegistrySchemaState {
+    Missing,
+    Partial,
+    Complete,
+}
+
+#[cfg(feature = "registry-store-sqlite")]
 fn sqlite_registry_schema_exists(
     path: &Path,
     table_name_prefix: Option<&str>,
 ) -> Result<bool, InteractionError> {
+    Ok(sqlite_registry_schema_state(path, table_name_prefix)?
+        == SqliteRegistrySchemaState::Complete)
+}
+
+#[cfg(feature = "registry-store-sqlite")]
+fn reconcile_sqlite_registry_schema(
+    path: &Path,
+    table_name_prefix: Option<&str>,
+) -> Result<(), InteractionError> {
+    if sqlite_registry_schema_state(path, table_name_prefix)? == SqliteRegistrySchemaState::Partial
+    {
+        drop_sqlite_registry_tables(path, table_name_prefix)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "registry-store-sqlite")]
+fn sqlite_registry_schema_state(
+    path: &Path,
+    table_name_prefix: Option<&str>,
+) -> Result<SqliteRegistrySchemaState, InteractionError> {
     if !path.exists() {
-        return Ok(false);
+        return Ok(SqliteRegistrySchemaState::Missing);
     }
 
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(to_store_error)?;
+    let mut existing_tables = 0;
     for table in SQLITE_REGISTRY_TABLES {
         let table_name = registry_table_name(table_name_prefix, table);
         let count: i64 = connection
@@ -716,11 +774,35 @@ fn sqlite_registry_schema_exists(
                 |row| row.get(0),
             )
             .map_err(to_store_error)?;
-        if count == 0 {
-            return Ok(false);
+        if count > 0 {
+            existing_tables += 1;
         }
     }
-    Ok(true)
+    match existing_tables {
+        0 => Ok(SqliteRegistrySchemaState::Missing),
+        count if count == SQLITE_REGISTRY_TABLES.len() => Ok(SqliteRegistrySchemaState::Complete),
+        _ => Ok(SqliteRegistrySchemaState::Partial),
+    }
+}
+
+#[cfg(feature = "registry-store-sqlite")]
+fn drop_sqlite_registry_tables(
+    path: &Path,
+    table_name_prefix: Option<&str>,
+) -> Result<(), InteractionError> {
+    let connection = rusqlite::Connection::open(path).map_err(to_store_error)?;
+    for table in SQLITE_REGISTRY_TABLES.iter().rev() {
+        let table_name = sqlite_identifier(&registry_table_name(table_name_prefix, table));
+        connection
+            .execute(&format!("DROP TABLE IF EXISTS {table_name}"), [])
+            .map_err(to_store_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "registry-store-sqlite")]
+fn sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 #[cfg(feature = "registry-store-sqlite")]

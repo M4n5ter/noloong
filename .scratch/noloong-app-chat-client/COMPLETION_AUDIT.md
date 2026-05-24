@@ -1,6 +1,6 @@
 # Noloong app Chat client completion audit
 
-Status: implementation-covered; visual Computer Use verification still unproven.
+Status: implementation-covered; Computer Use visual smoke passed for the latest chat hardening.
 
 Date: 2026-05-24
 
@@ -8,6 +8,7 @@ Date: 2026-05-24
 
 - `noloong app` defaults to the Chat route in `AppViewModel::load`.
 - Embedded mode starts a loopback interaction runtime from the root CLI and passes the endpoint into the macOS app bundle launch options.
+- The macOS bundle uses the real `Noloong` binary as `CFBundleExecutable`; launch options are read by Rust in the bundle child instead of a shell wrapper, so Launch Services, the bundle id and the GPUI process use the same executable identity.
 - External runtime mode uses the same typed interaction client path.
 - `noloong-app` depends on `noloong-config`, GPUI, gpui-component and transport crates; `cargo tree -p noloong-app --edges normal --depth 2` shows no direct `noloong-agent` or `noloong-agent-core` dependency.
 - Chat state is driven by typed interaction DTOs and display notifications, not by a direct registry handle.
@@ -16,6 +17,10 @@ Date: 2026-05-24
 - Attachment draft handling converts local files into real media blocks with file URI, media kind, file name and MIME type. Drag/drop and picker both feed the same attachment path ingestion path in `view/chat.rs`.
 - Display events in `noloong-agent` include run lifecycle, assistant delta/final, thought, tool started/updated/completed and approval events.
 - `RunPaused` display projection now redacts internal `ToolApprovalContinuation` state to `{"type":"tool_approval"}` so GUI clients do not receive system prompts, model request bodies or tool manifests inside display data.
+- SQLite registry store startup is resilient to a partially-created registry schema in the shared state database. With `migrate_on_connect=true`, a partial registry table set is treated as an internal dev schema reset: registry tables are dropped and recreated, while unrelated state tables such as `stored_agent_events` are preserved.
+- Chat composer layout is fixed to a non-shrinking footer inside the chat workspace. The chat page no longer uses the outer settings-page scrollbar; only the transcript scrolls.
+- Composer hit area covers the full composer panel, typed text is visible in the field, and local user messages are appended optimistically before the final session descriptor arrives.
+- Transcript tail-following is driven by a tracked `ScrollHandle`; when the user is already near the bottom, new user/assistant/display events keep the transcript pinned to the latest content.
 - README, `CONTEXT.md` and ADR-0001 describe `noloong app` as the primary interaction client, with Settings as a configuration entry and GUI communication through interaction protocol/display events.
 
 ## Verification commands that passed
@@ -23,8 +28,10 @@ Date: 2026-05-24
 ```bash
 cargo fmt --all --check
 cargo test -p noloong-agent --test interaction_control
+cargo test -p noloong-agent --features registry-store-sqlite --test interaction_registry_store_sqlite
 cargo test -p noloong-app
 cargo test -p noloong
+cargo clippy -p noloong-agent --features registry-store-sqlite --all-targets -- -D warnings
 cargo clippy -p noloong-agent -p noloong-agent-telegram -p noloong-app -p noloong --all-targets -- -D warnings
 ```
 
@@ -51,33 +58,30 @@ Observed final session state:
 
 This proves the app-owned embedded runtime is live and can run the real ChatGPT subscription profile through the public interaction protocol.
 
-## Remaining verification gap
+## Latest Computer Use visual smoke
 
-Computer Use can list the running bundle:
-
-```text
-Noloong — /Users/m4n5ter/Library/Application Support/Noloong/Noloong.app/ — dev.noloong.Noloong [running]
-```
-
-But `get_app_state` currently returns:
+After the bundle identity and native window fixes, Computer Use can inspect the running app:
 
 ```text
-Computer Use server error -10005: cgWindowNotFound
+App=/Users/m4n5ter/Library/Application Support/Noloong/Noloong.app/
+bundleID dev.noloong.Noloong
+Window: "Noloong", App: Noloong
 ```
 
-System Events also reports zero accessibility windows for the GPUI process:
+The live app was launched with:
 
-```text
-false, 0,
+```bash
+cargo run -p noloong -- app --locale zh \
+  --profile-config examples/profile-configs/chatgpt-codex-subscription.json
 ```
 
-`CGWindowList` does show the onscreen Noloong window, so the app exists at the CoreGraphics layer. The same Computer Use failure is reproducible against Zed Preview, which is also GPUI-based. Current evidence therefore does not prove the PRD requirement “use Computer Use to verify default Chat, session list, composer, streaming bubble, floating toolbar and Settings switching.”
+Observed in the real GPUI window:
 
-Do not mark the goal complete until one of these is true:
-
-- Computer Use can inspect/click the GPUI window and the required GUI smoke is rerun.
-- A human explicitly accepts manual visual verification as the substitute for Computer Use for this GPUI limitation.
-- The app is changed so its GPUI window exposes the accessibility/window state Computer Use needs, and the GUI smoke passes.
+- Chat opens against the embedded interaction runtime and shows the active session list.
+- Composer is fully visible: input row, status/workdir row and send button are all inside the composer panel.
+- The full composer panel can focus the input; typed numeric content is visible.
+- Sending `1111111111` appends the user bubble immediately before the final assistant descriptor arrives.
+- The assistant reply streams/settles at the bottom, and the transcript remains tail-followed without needing a manual outer-page scroll.
 
 ## Strict code-quality review notes
 
@@ -85,3 +89,4 @@ Do not mark the goal complete until one of these is true:
 - `crates/noloong-app/src/model/tests.rs` is a large test module. It is test-only and predates the latest hardening commit, but it should be split into focused test modules if the chat/settings model grows further.
 - The latest hardening change avoided adding another GUI-side special case by fixing display projection at the canonical interaction layer.
 - The macOS bundle fix keeps launch option serialization local to `macos_bundle.rs`; it does not leak endpoint propagation into view/model code.
+- The SQLite registry fix lives in the store layer, where schema ownership already exists, and avoids scattering state-reset handling into app/CLI startup paths.

@@ -86,14 +86,18 @@ impl AppInteractionWsClient {
             notifications.clone(),
         ));
 
-        Ok(Self {
+        let client = Self {
             inner: Arc::new(AppInteractionWsClientInner {
                 sender,
                 pending,
                 notifications,
                 next_id: AtomicU64::new(1),
             }),
-        })
+        };
+        client
+            .initialize(InteractionInitializeRequest::noloong_app())
+            .await?;
+        Ok(client)
     }
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<AppInteractionWsNotification> {

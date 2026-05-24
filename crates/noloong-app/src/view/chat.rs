@@ -13,8 +13,8 @@ use crate::{
 };
 use gpui::{
     AnyElement, AsyncApp, Context, ExternalPaths, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, PathPromptOptions, Styled, WeakEntity, div, prelude::*, px,
-    rgb,
+    ParentElement as _, PathPromptOptions, StatefulInteractiveElement as _, Styled, WeakEntity,
+    div, prelude::*, px, rgb,
 };
 use gpui_component::{StyledExt as _, input::Input};
 use std::{
@@ -36,6 +36,7 @@ impl NoloongAppView {
             .flex_col()
             .justify_between()
             .size_full()
+            .min_h_0()
             .max_w(px(1040.0))
             .child(
                 div().flex().flex_col().gap_5().pt_20().child(
@@ -84,46 +85,7 @@ impl NoloongAppView {
                         ),
                 ),
             )
-            .child(
-                div()
-                    .h(px(150.0))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(rgb(0x3a4552))
-                    .bg(rgb(0x101820))
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .justify_between()
-                    .child(div().text_color(rgb(0x7d8793)).child(
-                        if self.model.has_interaction_endpoint() {
-                            self.catalog.text(AppTextKey::ChatComposerPlaceholder)
-                        } else {
-                            self.catalog.text(AppTextKey::ChatDisabled)
-                        },
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0x7d8793))
-                                    .child(self.chat_connection_status_text()),
-                            )
-                            .child(
-                                div()
-                                    .rounded_full()
-                                    .px_4()
-                                    .py_2()
-                                    .bg(rgb(0x263a61))
-                                    .text_color(rgb(0x9aa7bb))
-                                    .child(self.catalog.text(AppTextKey::ChatDisabled)),
-                            ),
-                    ),
-            )
+            .child(self.render_composer(cx))
             .into_any_element()
     }
 
@@ -180,15 +142,19 @@ impl NoloongAppView {
             .flex()
             .gap_6()
             .size_full()
+            .min_h_0()
             .max_w(px(1120.0))
+            .overflow_hidden()
             .child(self.render_session_list(cx))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .flex_col()
-                    .justify_between()
                     .gap_5()
+                    .min_w(px(0.0))
+                    .min_h_0()
+                    .overflow_hidden()
                     .child(self.render_transcript(cx))
                     .child(self.render_composer(cx)),
             )
@@ -198,11 +164,15 @@ impl NoloongAppView {
     fn render_transcript(&self, cx: &mut Context<Self>) -> AnyElement {
         let now_ms = current_time_ms();
         div()
+            .id("chat-transcript-scroll")
             .flex()
             .flex_1()
             .flex_col()
             .gap_4()
-            .overflow_hidden()
+            .min_h(px(0.0))
+            .pr(px(92.0))
+            .overflow_y_scroll()
+            .track_scroll(&self.chat_transcript_scroll)
             .children(
                 self.model
                     .chat_transcript()
@@ -222,7 +192,9 @@ impl NoloongAppView {
             && self.model.can_send_chat_message()
             && composer.can_send();
         div()
+            .id("chat-composer")
             .min_h(px(128.0))
+            .flex_none()
             .rounded_xl()
             .border_1()
             .border_color(rgb(0x3a4552))
@@ -231,13 +203,10 @@ impl NoloongAppView {
             .flex()
             .flex_col()
             .gap_3()
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "enter" && !event.keystroke.modifiers.shift {
-                    if !this.model.can_abort_current_chat_run() {
-                        this.submit_chat_input(window, cx);
-                    }
-                    cx.stop_propagation();
-                }
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.chat_input.update(cx, |input, cx| {
+                    input.focus(window, cx);
+                });
             }))
             .when(attachments_supported, |this| {
                 this.can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
@@ -249,15 +218,21 @@ impl NoloongAppView {
                 this.child(self.render_chat_attachment_chips(cx))
             })
             .child(
-                div().flex_1().child(
-                    Input::new(&self.chat_input)
-                        .w_full()
-                        .h_full()
-                        .rounded_lg()
-                        .border_0()
-                        .bg(rgb(0x101820))
-                        .text_color(rgb(0xe6edf3)),
-                ),
+                div()
+                    .id("chat-composer-input")
+                    .flex()
+                    .h(px(44.0))
+                    .w_full()
+                    .items_center()
+                    .rounded_lg()
+                    .bg(rgb(0x101820))
+                    .text_color(rgb(0xe6edf3))
+                    .child(
+                        Input::new(&self.chat_input)
+                            .w_full()
+                            .appearance(false)
+                            .text_color(rgb(0xe6edf3)),
+                    ),
             )
             .child(
                 div()
@@ -457,7 +432,7 @@ impl NoloongAppView {
         cx.notify();
     }
 
-    fn submit_chat_input(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(super) fn submit_chat_input(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let mut composer = ChatComposer::default();
         composer.set_text(self.chat_input.read(cx).value().to_string());
         composer.set_attachments(self.chat_attachments.clone());
@@ -547,12 +522,21 @@ impl NoloongAppView {
         let Some(endpoint) = self.model.interaction_endpoint.clone() else {
             return;
         };
-        let input = submission.into_prompt_input(format!("app-user-{}", current_time_ms()));
+        let local_user_message_id = format!("app-user-{}", current_time_ms());
+        let input = submission.into_prompt_input(local_user_message_id.clone());
         if matches!(&input, AppPromptInput::Text { text } if text.trim().is_empty()) {
             return;
         }
         let create_metadata = self.model.chat_session_metadata_for_prompt(&input);
         let current_session_id = self.model.current_chat_session_id().map(str::to_string);
+        if current_session_id.is_some()
+            && self
+                .model
+                .append_local_chat_user_message(local_user_message_id.clone(), &input)
+        {
+            self.scroll_chat_transcript_to_tail();
+            cx.notify();
+        }
         let profile_id = self.model.selected_profile_id.clone();
         self.chat_run_task = cx.spawn(async move |this, cx| {
             let client = match crate::interaction::AppInteractionWsClient::connect(&endpoint).await
@@ -577,6 +561,12 @@ impl NoloongAppView {
                     Ok(session) => {
                         let session_id = session.session_id.clone();
                         update_chat_session(this.clone(), cx, session);
+                        append_local_chat_user_message(
+                            this.clone(),
+                            cx,
+                            local_user_message_id.clone(),
+                            input.clone(),
+                        );
                         session_id
                     }
                     Err(error) => {
@@ -716,6 +706,26 @@ fn current_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn append_local_chat_user_message(
+    this: WeakEntity<NoloongAppView>,
+    cx: &mut AsyncApp,
+    message_id: String,
+    input: AppPromptInput,
+) {
+    let Some(this) = this.upgrade() else {
+        return;
+    };
+    this.update(cx, |this, cx| {
+        if this
+            .model
+            .append_local_chat_user_message(message_id, &input)
+        {
+            this.scroll_chat_transcript_to_tail();
+            cx.notify();
+        }
+    });
+}
+
 fn update_chat_session(
     this: WeakEntity<NoloongAppView>,
     cx: &mut AsyncApp,
@@ -725,7 +735,11 @@ fn update_chat_session(
         return;
     };
     this.update(cx, |this, cx| {
+        let follow_tail = this.should_follow_chat_transcript_tail();
         this.model.apply_chat_session_descriptor(session);
+        if follow_tail {
+            this.scroll_chat_transcript_to_tail();
+        }
         cx.notify();
     });
 }
@@ -739,7 +753,11 @@ fn update_chat_display(
         return;
     };
     this.update(cx, |this, cx| {
+        let follow_tail = this.should_follow_chat_transcript_tail();
         this.model.apply_display_notification(display);
+        if follow_tail {
+            this.scroll_chat_transcript_to_tail();
+        }
         cx.notify();
     });
 }
@@ -749,7 +767,23 @@ fn update_chat_error(this: WeakEntity<NoloongAppView>, cx: &mut AsyncApp, error:
         return;
     };
     this.update(cx, |this, cx| {
+        let follow_tail = this.should_follow_chat_transcript_tail();
         this.model.record_chat_connection_error(error);
+        if follow_tail {
+            this.scroll_chat_transcript_to_tail();
+        }
         cx.notify();
     });
+}
+
+impl NoloongAppView {
+    fn should_follow_chat_transcript_tail(&self) -> bool {
+        let offset = self.chat_transcript_scroll.offset();
+        let max_offset = self.chat_transcript_scroll.max_offset();
+        offset.y + max_offset.y <= px(super::CHAT_TAIL_FOLLOW_TOLERANCE_PX)
+    }
+
+    fn scroll_chat_transcript_to_tail(&self) {
+        self.chat_transcript_scroll.scroll_to_bottom();
+    }
 }

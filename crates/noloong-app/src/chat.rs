@@ -1,6 +1,6 @@
 use crate::interaction::{
     AppContentBlock, AppDisplayEvent, AppInteractionSessionDescriptor, AppInteractionSessionStatus,
-    AppMessage, AppToolApprovalRequest, AppToolOutput,
+    AppMessage, AppPromptInput, AppToolApprovalRequest, AppToolOutput,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -106,6 +106,27 @@ impl ChatSessionStore {
 
     pub fn transcript(&self) -> &[ChatTranscriptItem] {
         &self.transcript
+    }
+
+    pub fn append_local_user_message(
+        &mut self,
+        message_id: impl Into<String>,
+        input: &AppPromptInput,
+    ) -> bool {
+        let Some(text) = text_from_prompt_input(input) else {
+            return false;
+        };
+        let message_id = message_id.into();
+        if self
+            .transcript
+            .iter()
+            .any(|item| item.message_id == message_id)
+        {
+            return false;
+        }
+        self.transcript
+            .push(ChatTranscriptItem::user(message_id, text));
+        true
     }
 
     pub fn current_run(&self) -> Option<&ChatRunState> {
@@ -568,6 +589,16 @@ pub enum ChatRunStatus {
 fn text_from_message(message: &AppMessage) -> Option<String> {
     let text = text_from_content_blocks(&message.content);
     if text.is_empty() { None } else { Some(text) }
+}
+
+fn text_from_prompt_input(input: &AppPromptInput) -> Option<String> {
+    match input {
+        AppPromptInput::Text { text } => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        AppPromptInput::Message { message } => text_from_message(message),
+    }
 }
 
 fn text_from_content_blocks(blocks: &[AppContentBlock]) -> String {

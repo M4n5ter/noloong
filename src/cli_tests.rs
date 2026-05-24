@@ -1,4 +1,7 @@
-use super::{AppOptions, Cli, CliCommand, CliError, prepare_app_launch, validate_interaction_bind};
+use super::{
+    AppOptions, Cli, CliCommand, CliError, prepare_app_launch, prepare_direct_app_launch_options,
+    start_embedded_interaction, validate_interaction_bind,
+};
 use crate::build_info_cli::{BuildInfoSourceSubcommand, BuildInfoSubcommand};
 use crate::cli::profile_locale;
 use crate::config::HostProfileConfig;
@@ -10,7 +13,8 @@ use crate::test_support::{remove_temp_file, write_temp_file};
 use crate::weixin_cli::{WeixinBridgeOptions, WeixinSubcommand, weixin_config_from_values};
 use clap::Parser;
 use noloong_agent::Locale;
-use noloong_app::AppInteractionStatus;
+use noloong_app::{AppInteractionStatus, AppLaunchOptions};
+use noloong_config::Locale as ConfigLocale;
 use serde_json::json;
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
@@ -190,6 +194,34 @@ async fn cli_app_prepares_embedded_loopback_interaction_when_config_exists() {
     assert!(prepared.has_embedded_server());
 
     prepared.shutdown().await;
+    remove_temp_file(path);
+}
+
+#[tokio::test]
+async fn cli_direct_bundle_app_launch_initializes_interaction_status() {
+    let config = app_embedded_test_config().to_canonical_json().unwrap();
+    let path = write_temp_file("app-bundle-profile-config", "jsonc", &config);
+    let embedded = start_embedded_interaction(Some(path.display().to_string()))
+        .await
+        .unwrap();
+    let server = embedded.start_server().await.unwrap();
+    let endpoint = server.endpoint();
+
+    let options = prepare_direct_app_launch_options(AppLaunchOptions {
+        profile_config_path: Some(path.display().to_string()),
+        locale: Some(ConfigLocale::Zh),
+        interaction_endpoint: Some(endpoint),
+        interaction_status: None,
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        options.interaction_status,
+        Some(AppInteractionStatus::Ready { .. })
+    ));
+
+    server.shutdown().await;
     remove_temp_file(path);
 }
 

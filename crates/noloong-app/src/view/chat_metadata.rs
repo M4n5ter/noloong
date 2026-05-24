@@ -19,6 +19,8 @@ impl NoloongAppView {
     pub(super) fn render_session_list(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .w(px(240.0))
+            .flex_none()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_2()

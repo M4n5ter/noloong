@@ -32,6 +32,13 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
+    if args.is_empty()
+        && let Some(options) = noloong_app::take_bundle_launch_options()?
+    {
+        let options = prepare_direct_app_launch_options(options).await?;
+        return noloong_app::run_app(options).map_err(Into::into);
+    }
+
     let cli = Cli::try_parse_from(std::iter::once("noloong".to_owned()).chain(args))
         .map_err(|error| CliError::Usage(error.to_string()))?;
     match cli.command {
@@ -295,6 +302,16 @@ async fn run_app_command(options: AppOptions) -> Result<(), CliError> {
     let result = noloong_app::run_app(prepared.launch_options.clone()).map_err(Into::into);
     prepared.shutdown().await;
     result
+}
+
+pub(crate) async fn prepare_direct_app_launch_options(
+    mut options: AppLaunchOptions,
+) -> Result<AppLaunchOptions, CliError> {
+    if options.interaction_endpoint.is_some() && options.interaction_status.is_none() {
+        options.interaction_status =
+            initialize_app_interaction(options.interaction_endpoint.as_ref()).await;
+    }
+    Ok(options)
 }
 
 pub(crate) async fn prepare_app_launch(options: AppOptions) -> Result<PreparedAppLaunch, CliError> {

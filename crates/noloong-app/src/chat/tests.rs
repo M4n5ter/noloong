@@ -397,6 +397,49 @@ fn final_session_descriptor_preserves_live_tool_activity() {
 }
 
 #[test]
+fn local_user_message_is_visible_until_final_descriptor_reconciles_it() {
+    let mut store = ChatSessionStore::default();
+    store.refresh(vec![session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Idle,
+        Vec::new(),
+    )]);
+
+    assert!(store.append_local_user_message(
+        "local-user-1",
+        &AppPromptInput::Text {
+            text: "hello".into(),
+        },
+    ));
+
+    assert_eq!(store.transcript().len(), 1);
+    assert_eq!(store.transcript()[0].message_id, "local-user-1");
+    assert_eq!(store.transcript()[0].role(), ChatTranscriptRole::User);
+    assert_eq!(store.transcript()[0].text(), "hello");
+
+    store.upsert_and_select(session_descriptor(
+        "session-1",
+        AppInteractionSessionStatus::Completed,
+        vec![
+            message("user-1", "user", "hello"),
+            message("assistant-1", "assistant", "done"),
+        ],
+    ));
+
+    assert_eq!(
+        store
+            .transcript()
+            .iter()
+            .map(|item| (item.role(), item.message_id.as_str(), item.text()))
+            .collect::<Vec<_>>(),
+        vec![
+            (ChatTranscriptRole::User, "user-1", "hello".into()),
+            (ChatTranscriptRole::Assistant, "assistant-1", "done".into()),
+        ]
+    );
+}
+
+#[test]
 fn long_tool_output_keeps_full_text_but_exposes_bounded_preview() {
     let mut store = ChatSessionStore::default();
     store.refresh(vec![session_descriptor(

@@ -323,6 +323,14 @@ impl AppViewModel {
         self.chat.transcript()
     }
 
+    pub fn append_local_chat_user_message(
+        &mut self,
+        message_id: String,
+        input: &crate::interaction::AppPromptInput,
+    ) -> bool {
+        self.chat.append_local_user_message(message_id, input)
+    }
+
     pub fn toggle_thought_expanded(&mut self, thought_id: &str) -> bool {
         self.chat.toggle_thought_expanded(thought_id)
     }

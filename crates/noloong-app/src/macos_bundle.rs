@@ -1,18 +1,24 @@
-use crate::{AppError, AppLaunchOptions};
+use crate::{APP_ID, APP_NAME, AppError, AppInteractionEndpoint, AppLaunchOptions};
+use noloong_config::Locale;
 use std::{
     env, fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
 
-const CHILD_ENV: &str = "NOLOONG_APP_BUNDLE_CHILD";
-const BUNDLE_IDENTIFIER: &str = "dev.noloong.Noloong";
 const APP_ICON_FILE: &str = "noloong-logo.icns";
 const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/noloong-logo.icns");
 
 pub(crate) fn should_relaunch_in_bundle() -> bool {
-    env::var_os(CHILD_ENV).is_none()
+    !is_running_from_bundle()
+}
+
+pub fn take_bundle_launch_options() -> Result<Option<AppLaunchOptions>, AppError> {
+    if !is_running_from_bundle() {
+        return Ok(None);
+    }
+    read_launch_options().map(|options| Some(options.unwrap_or_default()))
 }
 
 pub(crate) fn launch_in_bundle(options: AppLaunchOptions) -> Result<(), AppError> {
@@ -44,15 +50,13 @@ fn ensure_bundle(executable: &Path) -> Result<PathBuf, AppError> {
     fs::write(contents.join("Info.plist"), info_plist())?;
     fs::write(resources.join(APP_ICON_FILE), APP_ICON_BYTES)?;
 
-    let launcher = macos.join("noloong-app");
-    fs::write(&launcher, launcher_script())?;
-    let mut permissions = fs::metadata(&launcher)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&launcher, permissions)?;
-
     let linked_binary = macos.join("Noloong");
     remove_existing_path(&linked_binary)?;
-    symlink(executable, linked_binary)?;
+    fs::copy(executable, &linked_binary)?;
+    let mut permissions = fs::metadata(&linked_binary)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&linked_binary, permissions)?;
+    remove_existing_path(&macos.join("noloong-app"))?;
     remove_existing_path(&macos.join("noloong-bin"))?;
     Ok(bundle)
 }
@@ -157,15 +161,15 @@ fn info_plist() -> String {
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>noloong-app</string>
+  <string>{APP_NAME}</string>
   <key>CFBundleIdentifier</key>
-  <string>{BUNDLE_IDENTIFIER}</string>
+  <string>{APP_ID}</string>
   <key>CFBundleIconFile</key>
   <string>{APP_ICON_FILE}</string>
   <key>CFBundleName</key>
-  <string>Noloong</string>
+  <string>{APP_NAME}</string>
   <key>CFBundleDisplayName</key>
-  <string>Noloong</string>
+  <string>{APP_NAME}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -186,43 +190,38 @@ fn info_plist() -> String {
     )
 }
 
-fn launcher_script() -> &'static str {
-    r#"#!/bin/sh
-set -eu
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-export NOLOONG_APP_BUNDLE_CHILD=1
-launch_options="${HOME:-}/Library/Application Support/Noloong/launch-options.txt"
-if [ -n "${HOME:-}" ] && [ -f "$launch_options" ]; then
-  profile_config=$(sed -n '1p' "$launch_options")
-  locale=$(sed -n '2p' "$launch_options")
-  interaction_ws_url=$(sed -n '3p' "$launch_options")
-  interaction_token=$(sed -n '4p' "$launch_options")
-  rm -f "$launch_options"
-  if [ -n "$profile_config" ]; then
-    set -- --profile-config "$profile_config" "$@"
-  fi
-  if [ -n "$locale" ]; then
-    set -- "$@" --locale "$locale"
-  fi
-  if [ -n "$interaction_ws_url" ]; then
-    set -- "$@" --interaction-ws-url "$interaction_ws_url"
-  fi
-  if [ -n "$interaction_token" ]; then
-    set -- "$@" --interaction-token "$interaction_token"
-  fi
-fi
-exec "$script_dir/Noloong" app "$@"
-"#
-}
-
 fn is_bundle_running(bundle: &Path) -> bool {
-    let executable = bundle_executable(bundle).display().to_string();
-    let pattern = format!("^{} app( |$)", regex_escape_literal(&executable));
+    let pattern = bundle_process_pattern(bundle);
     Command::new("pgrep")
         .args(["-f", pattern.as_str()])
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn bundle_process_pattern(bundle: &Path) -> String {
+    let executable = bundle_executable(bundle).display().to_string();
+    format!("^{}( app)?( |$)", regex_escape_literal(&executable))
+}
+
+fn is_running_from_bundle() -> bool {
+    env::current_exe()
+        .ok()
+        .as_deref()
+        .is_some_and(is_path_inside_app_bundle)
+        || env::args_os()
+            .next()
+            .map(PathBuf::from)
+            .as_deref()
+            .is_some_and(is_path_inside_app_bundle)
+}
+
+fn is_path_inside_app_bundle(path: &Path) -> bool {
+    path.ancestors().any(|ancestor| {
+        ancestor
+            .extension()
+            .is_some_and(|extension| extension == "app")
+    })
 }
 
 fn regex_escape_literal(value: &str) -> String {
@@ -238,8 +237,42 @@ fn regex_escape_literal(value: &str) -> String {
         .collect()
 }
 
+fn read_launch_options() -> Result<Option<AppLaunchOptions>, AppError> {
+    let path = launch_options_path()?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let _ = fs::remove_file(path);
+    Ok(Some(parse_launch_options_text(&text)))
+}
+
+fn parse_launch_options_text(text: &str) -> AppLaunchOptions {
+    let mut lines = text.lines();
+    let profile_config_path = non_empty_line(lines.next());
+    let locale = non_empty_line(lines.next()).and_then(|value| Locale::parse(&value));
+    let interaction_ws_url = non_empty_line(lines.next());
+    let interaction_token = non_empty_line(lines.next());
+    AppLaunchOptions {
+        profile_config_path,
+        locale,
+        interaction_endpoint: interaction_ws_url.map(|ws_url| AppInteractionEndpoint {
+            ws_url,
+            bearer_token: interaction_token,
+        }),
+        interaction_status: None,
+    }
+}
+
+fn non_empty_line(line: Option<&str>) -> Option<String> {
+    line.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn activate_bundle() -> Result<(), AppError> {
-    let script = format!("tell application id \"{BUNDLE_IDENTIFIER}\" to activate");
+    let script = format!("tell application id \"{APP_ID}\" to activate");
     let status = Command::new("osascript")
         .args(["-e", script.as_str()])
         .status()?;
@@ -247,14 +280,17 @@ fn activate_bundle() -> Result<(), AppError> {
         Ok(())
     } else {
         Err(AppError::Launch(format!(
-            "failed to activate {BUNDLE_IDENTIFIER}: {status}"
+            "failed to activate {APP_ID}: {status}"
         )))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_profile_config_arg, launch_options_text};
+    use super::{
+        absolute_profile_config_arg, bundle_process_pattern, info_plist, launch_options_text,
+        parse_launch_options_text,
+    };
     use crate::{AppInteractionEndpoint, AppLaunchOptions};
     use noloong_config::Locale;
     use std::path::Path;
@@ -272,6 +308,24 @@ mod tests {
     }
 
     #[test]
+    fn bundle_plist_uses_the_real_app_binary_as_executable() {
+        let plist = info_plist();
+
+        assert!(plist.contains("<key>CFBundleExecutable</key>\n  <string>Noloong</string>"));
+        assert!(!plist.contains("<string>noloong-app</string>"));
+    }
+
+    #[test]
+    fn bundle_process_pattern_accepts_direct_bundle_binary() {
+        let pattern = bundle_process_pattern(Path::new(
+            "/Users/example/Library/Application Support/Noloong/Noloong.app",
+        ));
+
+        assert!(pattern.contains("Contents/MacOS/Noloong"));
+        assert!(pattern.contains("( app)?"));
+    }
+
+    #[test]
     fn launch_options_preserve_interaction_endpoint() {
         let text = launch_options_text(&AppLaunchOptions {
             profile_config_path: Some("/tmp/profile.jsonc".to_string()),
@@ -286,6 +340,33 @@ mod tests {
         assert_eq!(
             text,
             "/tmp/profile.jsonc\nen\nws://127.0.0.1:9876/jsonrpc/ws\nsecret token\n"
+        );
+    }
+
+    #[test]
+    fn launch_options_parse_back_into_app_options() {
+        let options = parse_launch_options_text(
+            "/tmp/profile.jsonc\nzh\nws://127.0.0.1:9876/jsonrpc/ws\nsecret token\n",
+        );
+
+        assert_eq!(
+            options.profile_config_path.as_deref(),
+            Some("/tmp/profile.jsonc")
+        );
+        assert_eq!(options.locale, Some(Locale::Zh));
+        assert_eq!(
+            options
+                .interaction_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.ws_url.as_str()),
+            Some("ws://127.0.0.1:9876/jsonrpc/ws")
+        );
+        assert_eq!(
+            options
+                .interaction_endpoint
+                .as_ref()
+                .and_then(|endpoint| endpoint.bearer_token.as_deref()),
+            Some("secret token")
         );
     }
 

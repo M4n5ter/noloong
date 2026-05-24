@@ -508,23 +508,36 @@ impl NoloongAppView {
                 .into_any_element();
         }
 
-        let content = match self.model.route {
-            AppRoute::Chat => self.render_chat(cx).into_any_element(),
-            AppRoute::Tools => self
-                .render_placeholder(AppTextKey::ToolsPlaceholder)
+        match self.model.route {
+            AppRoute::Chat => div()
+                .relative()
+                .flex()
+                .justify_center()
+                .size_full()
+                .min_h_0()
+                .overflow_hidden()
+                .p_8()
+                .child(self.render_chat(cx))
                 .into_any_element(),
-            AppRoute::Settings => self.render_settings(cx).into_any_element(),
-        };
-
-        div()
-            .relative()
-            .flex()
-            .justify_center()
-            .size_full()
-            .p_10()
-            .overflow_y_scrollbar()
-            .child(content)
-            .into_any_element()
+            AppRoute::Tools => div()
+                .relative()
+                .flex()
+                .justify_center()
+                .size_full()
+                .p_10()
+                .overflow_y_scrollbar()
+                .child(self.render_placeholder(AppTextKey::ToolsPlaceholder))
+                .into_any_element(),
+            AppRoute::Settings => div()
+                .relative()
+                .flex()
+                .justify_center()
+                .size_full()
+                .p_10()
+                .overflow_y_scrollbar()
+                .child(self.render_settings(cx))
+                .into_any_element(),
+        }
     }
 
     pub(super) fn on_toggle_jsonc_editor(

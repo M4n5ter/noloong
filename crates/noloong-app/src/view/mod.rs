@@ -5,8 +5,8 @@ use crate::{
     AppStatus, AppTextKey, AppViewModel, SaveSettings, ToggleJsoncEditor, ValidateSettings,
 };
 use gpui::{
-    Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div, img,
-    prelude::*, px, rgb,
+    Context, Entity, IntoElement, ParentElement as _, Render, ScrollHandle, Styled as _, Task,
+    Window, div, img, prelude::*, px, rgb,
 };
 use gpui_component::{
     input::{InputEvent, InputState},
@@ -46,6 +46,7 @@ const TOAST_REORDER_FOR: Duration = Duration::from_millis(220);
 const TOAST_PROMOTE_COOLDOWN: Duration = Duration::from_millis(280);
 const TOAST_TICK: Duration = Duration::from_millis(16);
 const MAX_TOASTS: usize = 4;
+const CHAT_TAIL_FOLLOW_TOLERANCE_PX: f32 = 72.0;
 
 pub(crate) struct NoloongAppView {
     model: AppViewModel,
@@ -79,6 +80,7 @@ pub(crate) struct NoloongAppView {
     mcp_timeout_input: Entity<InputState>,
     jsonc_input: Entity<InputState>,
     chat_input: Entity<InputState>,
+    chat_transcript_scroll: ScrollHandle,
     chat_rename_input: Entity<InputState>,
     chat_renaming_session_id: Option<String>,
     chat_attachments: Vec<ChatAttachmentDraft>,
@@ -322,17 +324,23 @@ impl NoloongAppView {
         });
         let chat_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .auto_grow(1, 6)
                 .placeholder(catalog.text(AppTextKey::ChatComposerPlaceholder))
         });
+        let chat_transcript_scroll = ScrollHandle::new();
         let chat_rename_input = cx.new(|cx| InputState::new(window, cx));
 
         let _subscriptions = vec![
             cx.subscribe_in(&chat_input, window, {
-                move |_: &mut Self, _, event: &InputEvent, _window, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        cx.notify();
+                move |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter { secondary: false } => {
+                        if !this.model.can_abort_current_chat_run() {
+                            this.submit_chat_input(window, cx);
+                        }
                     }
+                    InputEvent::PressEnter { secondary: true }
+                    | InputEvent::Focus
+                    | InputEvent::Blur => {}
                 }
             }),
             cx.subscribe_in(&display_name_input, window, {
@@ -662,6 +670,7 @@ impl NoloongAppView {
             mcp_timeout_input,
             jsonc_input,
             chat_input,
+            chat_transcript_scroll,
             chat_rename_input,
             chat_renaming_session_id: None,
             chat_attachments: Vec::new(),

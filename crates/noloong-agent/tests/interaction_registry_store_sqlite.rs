@@ -242,6 +242,29 @@ async fn sqlite_store_recovers_session_across_instances() {
     assert!(third_store.get("root").await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn sqlite_store_rebuilds_partial_registry_schema_on_migrate() {
+    let db = TempSqliteDb::new("partial-schema");
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        connection
+            .execute(
+                r#"CREATE TABLE stored_agent_sessions (
+                    session_id TEXT PRIMARY KEY
+                )"#,
+                [],
+            )
+            .unwrap();
+    }
+
+    let store = SqlAgentSessionRegistryStore::connect(db.config())
+        .await
+        .unwrap();
+    store.insert(record("root")).await.unwrap();
+
+    assert!(store.get("root").await.unwrap().is_some());
+}
+
 fn record(session_id: &str) -> AgentSessionRecord {
     AgentSessionRecord {
         schema_version: AGENT_SESSION_RECORD_SCHEMA_VERSION,
