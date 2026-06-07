@@ -1,3 +1,4 @@
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -63,13 +64,32 @@ impl<'de> Deserialize<'de> for AppMediaKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+impl JsonSchema for AppMediaKind {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AppMediaKind".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::AppMediaKind").into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        serde_json::json!({
+            "type": "string",
+            "description": "Media kind. Known values are file, image, audio, and video; custom string values are accepted.",
+        })
+        .try_into()
+        .expect("app media kind schema is valid")
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppMediaSource {
     Uri { uri: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppMediaBlock {
     pub kind: AppMediaKind,

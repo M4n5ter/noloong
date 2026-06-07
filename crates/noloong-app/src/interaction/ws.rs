@@ -1,8 +1,9 @@
 use super::{
     AppApprovalResolveRequest, AppDisplaySubscribeRequest, AppInteractionClient,
     AppInteractionDisplayNotification, AppInteractionEndpoint, AppInteractionError,
-    AppInteractionSessionDescriptor, AppPromptRequest, AppSessionCreateRequest, AppSessionRequest,
-    AppSubscriptionResult, InteractionInitializeRequest, InteractionInitializeResult,
+    AppInteractionSessionDescriptor, AppPromptRequest, AppSessionCreateRequest,
+    AppSessionListRequest, AppSessionRequest, AppSubscriptionResult, InteractionInitializeRequest,
+    InteractionInitializeResult,
 };
 use futures_util::{
     SinkExt, StreamExt,
@@ -27,9 +28,10 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
 };
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const OUTBOUND_BUFFER: usize = 128;
-const NOTIFICATION_BUFFER: usize = 1024;
+const NOTIFICATION_BUFFER: usize = 8192;
 
 type ClientWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type PendingRequests =
@@ -71,8 +73,13 @@ impl AppInteractionWsClient {
                     .map_err(|error| AppInteractionError::Transport(error.to_string()))?,
             );
         }
-        let (websocket, _) = connect_async(request)
+        let (websocket, _) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
             .await
+            .map_err(|_| {
+                AppInteractionError::Transport(format!(
+                    "interaction websocket connect timed out after {CONNECT_TIMEOUT:?}"
+                ))
+            })?
             .map_err(|error| AppInteractionError::Transport(error.to_string()))?;
         let (writer, reader) = websocket.split();
         let (sender, receiver) = mpsc::channel(OUTBOUND_BUFFER);
@@ -186,8 +193,9 @@ impl AppInteractionClient for AppInteractionWsClient {
 
     async fn list_sessions(
         &self,
+        request: AppSessionListRequest,
     ) -> Result<Vec<AppInteractionSessionDescriptor>, AppInteractionError> {
-        self.request_as("session/list", serde_json::json!({})).await
+        self.request_as("session/list", request).await
     }
 
     async fn get_session(

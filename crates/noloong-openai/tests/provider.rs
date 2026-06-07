@@ -6,8 +6,9 @@ use noloong_openai::auth::{
     ChatGptAuthManager, ChatGptEphemeralTokenStorage, ChatGptTokenData, ChatGptTokenStore,
 };
 use noloong_openai::provider::{
-    CHATGPT_CODEX_FALLBACK_INSTRUCTIONS, CHATGPT_CODEX_RESPONSES_BASE_URL,
-    chatgpt_responses_provider, chatgpt_responses_provider_config,
+    CHATGPT_CODEX_FALLBACK_INSTRUCTIONS, CHATGPT_CODEX_REQUEST_TIMEOUT_SECS,
+    CHATGPT_CODEX_RESPONSES_BASE_URL, chatgpt_responses_provider,
+    chatgpt_responses_provider_config,
 };
 use std::sync::Arc;
 
@@ -30,6 +31,10 @@ fn provider_config_builds_chatgpt_responses_config_without_model_lock_in()
     assert_eq!(
         config.auth_provider.as_ref().map(|provider| provider.id()),
         Some("openai.chatgpt")
+    );
+    assert_eq!(
+        config.request_timeout,
+        std::time::Duration::from_secs(CHATGPT_CODEX_REQUEST_TIMEOUT_SECS)
     );
     Ok(())
 }

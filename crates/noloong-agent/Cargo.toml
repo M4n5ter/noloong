@@ -9,7 +9,7 @@ workspace = true
 [features]
 default = []
 interaction-client = ["dep:futures-util", "dep:tokio-tungstenite"]
-interaction-http = ["dep:axum", "dep:futures-util"]
+interaction-http = ["dep:axum", "dep:futures-util", "dep:tower-http", "dep:url"]
 client-state-sqlite = ["dep:rusqlite"]
 json-schema = ["dep:schemars", "noloong-agent-core/json-schema"]
 mcp = ["dep:reqwest", "dep:rmcp"]
@@ -42,7 +42,9 @@ toasty = { workspace = true, optional = true }
 toasty-driver-postgresql = { workspace = true, optional = true }
 toasty-driver-sqlite = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 uuid.workspace = true
+tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [dev-dependencies]
 axum.workspace = true
@@ -50,3 +52,4 @@ env_logger.workspace = true
 log.workspace = true
 reqwest.workspace = true
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
+tokio-tungstenite.workspace = true

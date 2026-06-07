@@ -20,7 +20,9 @@ use super::{
     store::missing_session_error,
 };
 use crate::tools::final_assistant_output;
-use noloong_agent_core::{AgentMessage, QueueMode, QueuedAgentMessage, ToolApprovalResolution};
+use noloong_agent_core::{
+    Agent, AgentCoreError, AgentMessage, QueueMode, QueuedAgentMessage, ToolApprovalResolution,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -49,8 +51,20 @@ struct InteractionControlClientState {
 }
 
 struct InteractionSubscription {
-    session_id: String,
+    agent: Agent,
     listener_id: u64,
+}
+
+impl Drop for InteractionControlClientState {
+    fn drop(&mut self) {
+        let subscriptions = self
+            .subscriptions
+            .get_mut()
+            .expect("interaction subscription lock poisoned");
+        for subscription in std::mem::take(subscriptions).into_values() {
+            subscription.agent.unsubscribe(subscription.listener_id);
+        }
+    }
 }
 
 impl InteractionControlHandler {
@@ -601,14 +615,17 @@ impl InteractionControlHandler {
             let session_id = session_id.clone();
             let subscription_id = notification_subscription_id.clone();
             async move {
-                let _ = notifier.notify(
-                    notification::RAW_EVENT,
-                    &RawEventNotification {
-                        session_id,
-                        subscription_id,
-                        event,
-                    },
-                );
+                notifier
+                    .notify(
+                        notification::RAW_EVENT,
+                        &RawEventNotification {
+                            session_id,
+                            subscription_id,
+                            event,
+                        },
+                    )
+                    .await
+                    .map_err(interaction_event_sink_error)?;
                 Ok(())
             }
         });
@@ -619,7 +636,7 @@ impl InteractionControlHandler {
             .insert(
                 subscription_id.clone(),
                 InteractionSubscription {
-                    session_id: registered.record().session_id.clone(),
+                    agent: registered.agent().clone(),
                     listener_id,
                 },
             );
@@ -638,16 +655,23 @@ impl InteractionControlHandler {
             session_id,
             subscription_id.clone(),
             ux,
-            notifier,
         )));
         let listener_projector = Arc::clone(&projector);
+        let display_notifier = notifier.clone();
         let listener_id = registered.agent().subscribe(move |event| {
             let listener_projector = Arc::clone(&listener_projector);
+            let display_notifier = display_notifier.clone();
             async move {
-                listener_projector
+                let notifications = listener_projector
                     .lock()
                     .expect("display projector lock poisoned")
                     .handle(event);
+                for notification_payload in notifications {
+                    display_notifier
+                        .notify(notification::DISPLAY_EVENT, &notification_payload)
+                        .await
+                        .map_err(interaction_event_sink_error)?;
+                }
                 Ok(())
             }
         });
@@ -658,7 +682,7 @@ impl InteractionControlHandler {
             .insert(
                 subscription_id.clone(),
                 InteractionSubscription {
-                    session_id: registered.record().session_id.clone(),
+                    agent: registered.agent().clone(),
                     listener_id,
                 },
             );
@@ -678,9 +702,7 @@ impl InteractionControlHandler {
             .ok_or_else(|| {
                 InteractionError::not_found(format!("subscription not found: {subscription_id}"))
             })?;
-        if let Some(session) = self.inner.registry.get(&subscription.session_id).await? {
-            session.agent().unsubscribe(subscription.listener_id);
-        }
+        subscription.agent.unsubscribe(subscription.listener_id);
         Ok(UnsubscribeResult { unsubscribed: true })
     }
 
@@ -721,6 +743,10 @@ impl InteractionControlHandler {
             .await;
         });
     }
+}
+
+fn interaction_event_sink_error(error: InteractionError) -> AgentCoreError {
+    AgentCoreError::JsonRpc(error.to_string())
 }
 
 async fn observe_control_plane_subagent_result(

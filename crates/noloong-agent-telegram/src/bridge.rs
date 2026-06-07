@@ -960,6 +960,8 @@ impl TelegramBridge {
             | DisplayEvent::ToolUpdated { .. }
             | DisplayEvent::ToolCompleted { .. }
             | DisplayEvent::ApprovalRequested { .. }
+            | DisplayEvent::ApprovalResolved { .. }
+            | DisplayEvent::ApprovalExpired { .. }
             | DisplayEvent::RawEvent { .. } => None,
         }
     }

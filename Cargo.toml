@@ -37,7 +37,6 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 jsonc-parser = { version = "0.32", features = ["serde", "serde_json"] }
 jsonschema = { version = "0.46", default-features = false }
-lsp-types = "0.97"
 env_logger = "0.11"
 human-panic = "2.0"
 log = "0.4"
@@ -54,18 +53,18 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 tar = "0.4"
+tauri = "2.11"
+tauri-build = "2.6"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = "0.29"
 toasty = { version = "0.6", default-features = false }
 toasty-driver-postgresql = "0.6"
 toasty-driver-sqlite = "0.6"
+tower-http = "0.6"
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -77,16 +76,11 @@ incremental = true
 
 [profile.dev.package]
 clap_derive = { opt-level = 3 }
-enum-iterator-derive = { opt-level = 3 }
-gpui-component-macros = { opt-level = 3 }
-gpui_macros = { opt-level = 3 }
-paste = { opt-level = 3 }
 proc-macro2 = { opt-level = 3 }
 quote = { opt-level = 3 }
 schemars_derive = { opt-level = 3 }
 serde_derive = { opt-level = 3 }
 serde_repr = { opt-level = 3 }
-strum_macros = { opt-level = 3 }
 syn = { opt-level = 3 }
 thiserror-impl = { opt-level = 3 }
 toasty-macros = { opt-level = 3 }

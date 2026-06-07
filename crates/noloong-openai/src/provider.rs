@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 pub const CHATGPT_CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const CHATGPT_CODEX_FALLBACK_INSTRUCTIONS: &str = "You are a helpful assistant.";
+pub const CHATGPT_CODEX_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 pub fn chatgpt_responses_provider_config(
     id: impl Into<String>,
@@ -18,6 +19,9 @@ pub fn chatgpt_responses_provider_config(
         .without_api_key()
         .auth_provider(auth_provider)
         .fallback_instructions(CHATGPT_CODEX_FALLBACK_INSTRUCTIONS)
+        .request_timeout(std::time::Duration::from_secs(
+            CHATGPT_CODEX_REQUEST_TIMEOUT_SECS,
+        ))
 }
 
 pub fn chatgpt_responses_provider(

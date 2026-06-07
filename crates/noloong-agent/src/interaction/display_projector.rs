@@ -1,7 +1,4 @@
-use super::{
-    DisplayEvent, InteractionNotifier, InteractionUxCapabilities,
-    protocol::{InteractionDisplayNotification, notification},
-};
+use super::{DisplayEvent, InteractionUxCapabilities, protocol::InteractionDisplayNotification};
 use crate::text;
 use noloong_agent_core::{
     AgentEvent, AgentEventKind, AgentMessage, ContentBlock, ModelStreamEvent, RunPauseReason,
@@ -13,7 +10,6 @@ pub(super) struct DisplayProjector {
     session_id: String,
     subscription_id: String,
     ux: InteractionUxCapabilities,
-    notifier: InteractionNotifier,
     thought_started_at: BTreeMap<String, Instant>,
 }
 
@@ -22,28 +18,24 @@ impl DisplayProjector {
         session_id: String,
         subscription_id: String,
         ux: InteractionUxCapabilities,
-        notifier: InteractionNotifier,
     ) -> Self {
         Self {
             session_id,
             subscription_id,
             ux,
-            notifier,
             thought_started_at: BTreeMap::new(),
         }
     }
 
-    pub(super) fn handle(&mut self, event: AgentEvent) {
-        for display_event in self.project(event) {
-            let _ = self.notifier.notify(
-                notification::DISPLAY_EVENT,
-                &InteractionDisplayNotification {
-                    session_id: self.session_id.clone(),
-                    subscription_id: self.subscription_id.clone(),
-                    event: display_event,
-                },
-            );
-        }
+    pub(super) fn handle(&mut self, event: AgentEvent) -> Vec<InteractionDisplayNotification> {
+        self.project(event)
+            .into_iter()
+            .map(|event| InteractionDisplayNotification {
+                session_id: self.session_id.clone(),
+                subscription_id: self.subscription_id.clone(),
+                event,
+            })
+            .collect()
     }
 
     fn project(&mut self, event: AgentEvent) -> Vec<DisplayEvent> {
@@ -146,6 +138,20 @@ impl DisplayProjector {
             AgentEventKind::ToolApprovalRequested { approval } => {
                 vec![DisplayEvent::ApprovalRequested { approval }]
             }
+            AgentEventKind::ToolApprovalResolved {
+                approval_id,
+                decision,
+            } => vec![DisplayEvent::ApprovalResolved {
+                approval_id,
+                decision,
+            }],
+            AgentEventKind::ToolApprovalExpired {
+                approval_id,
+                decision,
+            } => vec![DisplayEvent::ApprovalExpired {
+                approval_id,
+                decision,
+            }],
             _ => Vec::new(),
         }
     }
@@ -240,12 +246,11 @@ fn display_thought_id(run_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{DisplayEvent, DisplayProjector};
-    use crate::interaction::{InteractionUxCapabilities, jsonrpc::jsonrpc_outbound_channel};
+    use crate::interaction::InteractionUxCapabilities;
     use noloong_agent_core::{AgentEvent, AgentEventKind, ModelStreamEvent, ThinkingDelta};
 
     #[test]
     fn aborted_run_completes_active_thought_then_emits_run_aborted() {
-        let (_sender, _receiver, notifier) = jsonrpc_outbound_channel(8);
         let mut projector = DisplayProjector::new(
             "session-1".into(),
             "subscription-1".into(),
@@ -257,7 +262,6 @@ mod tests {
                 max_message_bytes: None,
                 raw_events: false,
             },
-            notifier,
         );
 
         let thinking = projector.project(event(

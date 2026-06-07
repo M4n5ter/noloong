@@ -482,6 +482,46 @@ mod tests {
     }
 
     #[test]
+    fn display_approval_lifecycle_events_round_trip() {
+        let resolved = serde_json::from_value::<DisplayEvent>(json!({
+            "type": "approval_resolved",
+            "approvalId": "approval-1",
+            "decision": {
+                "outcome": "allow",
+                "approver": "noloong-app"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(resolved).unwrap(),
+            json!({
+                "type": "approval_resolved",
+                "approvalId": "approval-1",
+                "decision": {
+                    "outcome": "allow",
+                    "approver": "noloong-app",
+                    "reason": null,
+                    "metadata": null
+                }
+            })
+        );
+
+        let expired = serde_json::from_value::<DisplayEvent>(json!({
+            "type": "approval_expired",
+            "approvalId": "approval-1",
+            "decision": {
+                "outcome": "deny",
+                "approver": "timeout"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(expired).unwrap()["type"],
+            json!("approval_expired")
+        );
+    }
+
+    #[test]
     fn initialize_result_round_trips() {
         let result = InteractionInitializeResult {
             server: InteractionServerInfo {

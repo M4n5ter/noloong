@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Noloong",
+  "version": "0.1.0",
+  "identifier": "com.noloong.desktop",
+  "build": {
+    "beforeDevCommand": "bun --cwd ../apps/desktop dev",
+    "beforeBuildCommand": "bun --cwd ../apps/desktop build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../../apps/desktop/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Noloong",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 760,
+        "minHeight": 520,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 19
+        },
+        "closable": true,
+        "minimizable": true,
+        "maximizable": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "assets/noloong-logo.png",
+      "assets/noloong-logo.icns"
+    ]
+  }
+}

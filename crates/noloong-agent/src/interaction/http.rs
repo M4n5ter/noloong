@@ -12,8 +12,8 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{
-        HeaderMap, StatusCode,
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        HeaderMap, Method, StatusCode, Uri,
+        header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
     },
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -21,6 +21,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use std::fmt::{Debug, Formatter};
 use tokio::{net::TcpListener, sync::mpsc};
+use tower_http::cors::{Any, CorsLayer};
 
 const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -99,8 +100,16 @@ where
     Router::new()
         .route("/jsonrpc", post(http_jsonrpc::<H>))
         .route("/jsonrpc/ws", get(websocket_jsonrpc::<H>))
+        .layer(interaction_cors_layer())
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .with_state(InteractionHttpState { handler, config })
+}
+
+fn interaction_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
 }
 
 pub async fn serve_interaction_http<H>(
@@ -132,7 +141,7 @@ async fn http_jsonrpc<H>(
 where
     H: JsonRpcHandler + Clone + Send + Sync + 'static,
 {
-    if !is_authorized(&headers, &state.config.auth) {
+    if !is_authorized(&headers, None, &state.config.auth) {
         return unauthorized_response();
     }
     let request = match parse_jsonrpc_request(&body) {
@@ -157,13 +166,14 @@ where
 
 async fn websocket_jsonrpc<H>(
     State(state): State<InteractionHttpState<H>>,
+    uri: Uri,
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
 ) -> Response
 where
     H: JsonRpcHandler + Clone + Send + Sync + 'static,
 {
-    if !is_authorized(&headers, &state.config.auth) {
+    if !is_authorized(&headers, uri.query(), &state.config.auth) {
         return unauthorized_response();
     }
     websocket
@@ -192,26 +202,34 @@ where
                 let request = match parse_jsonrpc_request(text.as_bytes()) {
                     Ok(request) => request,
                     Err(response) => {
-                        if send_response(&outbound_sender, *response).is_err() {
+                        if send_response(&outbound_sender, *response).await.is_err() {
                             break;
                         }
                         continue;
                     }
                 };
-                let output = dispatch_jsonrpc_request(&handler, request, notifier.clone()).await;
-                if send_response(&outbound_sender, output.response).is_err() {
-                    break;
-                }
-                if output.shutdown {
-                    let _ = send_close(&outbound_sender);
-                    break;
-                }
+                let request_handler = handler.clone();
+                let request_notifier = notifier.clone();
+                let request_outbound_sender = outbound_sender.clone();
+                tokio::spawn(async move {
+                    let output =
+                        dispatch_jsonrpc_request(&request_handler, request, request_notifier).await;
+                    if send_response(&request_outbound_sender, output.response)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if output.shutdown {
+                        let _ = send_close(&request_outbound_sender).await;
+                    }
+                });
             }
             Message::Binary(_) => {
                 let response = JsonRpcResponse::parse_error(InteractionError::invalid_params(
                     "binary websocket messages are not supported",
                 ));
-                if send_response(&outbound_sender, response).is_err() {
+                if send_response(&outbound_sender, response).await.is_err() {
                     break;
                 }
             }
@@ -220,7 +238,7 @@ where
         }
     }
 
-    let _ = send_close(&outbound_sender);
+    let _ = send_close(&outbound_sender).await;
     let _ = writer.await;
 }
 
@@ -268,17 +286,29 @@ where
         .map_err(|_| ())
 }
 
-fn is_authorized(headers: &HeaderMap, auth: &InteractionTransportAuth) -> bool {
+fn is_authorized(
+    headers: &HeaderMap,
+    query: Option<&str>,
+    auth: &InteractionTransportAuth,
+) -> bool {
     match auth {
         InteractionTransportAuth::None => true,
         InteractionTransportAuth::BearerToken(token) => {
-            headers
+            let header_matches = headers
                 .get(AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "))
-                == Some(token.as_str())
+                == Some(token.as_str());
+            header_matches || query_access_token_matches(query, token)
         }
     }
+}
+
+fn query_access_token_matches(query: Option<&str>, token: &str) -> bool {
+    query
+        .into_iter()
+        .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+        .any(|(key, value)| key == "access_token" && value == token)
 }
 
 fn unauthorized_response() -> Response {

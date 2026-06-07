@@ -105,7 +105,7 @@ impl JsonRpcHandler for TestHandler {
                 "fail" => Err(InteractionError::invalid_params("bad request")
                     .with_data(json!({"field": "message"}))),
                 "notify" => {
-                    notifier.notify("display/event", &params)?;
+                    notifier.notify("display/event", &params).await?;
                     Ok(JsonRpcHandlerOutput::result(params))
                 }
                 "ignore" => std::future::pending().await,

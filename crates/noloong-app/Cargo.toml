@@ -10,18 +10,19 @@ workspace = true
 noloong-config.workspace = true
 anyhow.workspace = true
 futures-util.workspace = true
-gpui.workspace = true
-gpui_platform.workspace = true
-gpui-component.workspace = true
-lsp-types.workspace = true
-mime_guess.workspace = true
 reqwest.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tauri.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 url.workspace = true
 
+[build-dependencies]
+tauri-build.workspace = true
+
 [dev-dependencies]
+image.workspace = true
 tokio = { workspace = true, features = ["macros"] }

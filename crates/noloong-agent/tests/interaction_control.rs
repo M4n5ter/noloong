@@ -560,6 +560,9 @@ async fn interaction_control_subagent_spawn_observes_result_for_parent() {
     .await;
     let spawn_response = read_message(&mut lines).await;
     assert_eq!(spawn_response["result"]["status"], "completed");
+    let child_session_id = spawn_response["result"]["sessionId"]
+        .as_str()
+        .expect("spawn response contains child session id");
 
     for request_id in 4..24 {
         write_rpc(
@@ -581,7 +584,7 @@ async fn interaction_control_subagent_spawn_observes_result_for_parent() {
                 .as_str()
                 .expect("observation has text");
             assert!(text.contains("<subagent_result>"));
-            assert!(text.contains("session_id: session-1"));
+            assert!(text.contains(&format!("session_id: {child_session_id}")));
             assert!(text.contains("status: completed"));
             assert!(text.contains("final_text:\nok"));
             write_rpc(&mut client_writer, rpc(24, "shutdown", json!({}))).await;

@@ -202,6 +202,21 @@ pub async fn deliver_display_event_with_reply(
                 .approvals
                 .insert_target(&buttons, notification.session_id, &approval, sent);
         }
+        DisplayEvent::ApprovalResolved {
+            approval_id,
+            decision,
+        }
+        | DisplayEvent::ApprovalExpired {
+            approval_id,
+            decision,
+        } => {
+            if let Some(selection) = state
+                .approvals
+                .resolve_approval_id(&approval_id, decision.outcome)
+            {
+                cleanup.push(selection.target.message);
+            }
+        }
         DisplayEvent::ToolStarted {
             tool_call_id,
             tool_name,
@@ -451,7 +466,8 @@ mod tests {
     };
     use noloong_agent_core::{
         AgentMessage, ContentBlock, MediaBlock, MediaKind, ToolApprovalRequest,
-        ToolApprovalRequestSpec, ToolCall, ToolOutput,
+        ToolApprovalRequestSpec, ToolCall, ToolOutput, ToolPermissionDecision,
+        ToolPermissionOutcome,
     };
     use serde_json::{Map, Value, json};
     use std::{
@@ -949,6 +965,74 @@ mod tests {
             api.sent_texts()
                 .into_iter()
                 .any(|text| text.contains("需要审批工具"))
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_lifecycle_event_removes_pending_approval_card() {
+        let api = Arc::new(FakeTelegramApi::default());
+        let delivery = TelegramDelivery::new(api.clone(), 3900);
+        let mut state = TelegramDisplayState::default();
+
+        deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::ApprovalRequested {
+                approval: ToolApprovalRequest {
+                    approval_id: "approval-1".into(),
+                    tool_call: ToolCall {
+                        id: "tool-1".into(),
+                        name: "host_exec".into(),
+                        arguments: json!({"cmd": "ls"}),
+                    },
+                    permissions: Vec::new(),
+                    hook_id: None,
+                    request: ToolApprovalRequestSpec {
+                        prompt: Some("Run command?".into()),
+                        reason: None,
+                        expires_at_ms: None,
+                        metadata: Value::Object(Map::new()),
+                    },
+                },
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::Zh),
+        )
+        .await
+        .unwrap();
+        assert!(
+            state
+                .lookup_approval_id("approval-1", ToolPermissionOutcome::Allow)
+                .is_some()
+        );
+
+        let cleanup = deliver_display_event(
+            &mut state,
+            &delivery,
+            target(),
+            notification(DisplayEvent::ApprovalResolved {
+                approval_id: "approval-1".into(),
+                decision: ToolPermissionDecision {
+                    outcome: ToolPermissionOutcome::Allow,
+                    reason: None,
+                    approver: None,
+                    metadata: Value::Object(Map::new()),
+                },
+            }),
+            true,
+            Duration::ZERO,
+            TelegramUiCatalog::new(Locale::Zh),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cleanup.len(), 1);
+        assert!(
+            state
+                .lookup_approval_id("approval-1", ToolPermissionOutcome::Allow)
+                .is_none()
         );
     }
 

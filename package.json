@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "desktop:dev": "bun --cwd apps/desktop dev",
+    "desktop:build": "bun --cwd apps/desktop build",
+    "desktop:typecheck": "bun --cwd apps/desktop typecheck",
+    "app:dev": "cd crates/noloong-app && ../../node_modules/.bin/tauri dev",
+    "app:bundle": "cd crates/noloong-app && ../../node_modules/.bin/tauri build --bundles app --no-sign"
+  },
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2"
+  }
+}

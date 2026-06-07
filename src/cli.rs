@@ -23,22 +23,24 @@ use noloong_agent::{
 };
 use noloong_agent_telegram::{polling::TelegramPollingError, telegram_api::TelegramApiError};
 use noloong_app::{
-    AppInteractionEndpoint, AppInteractionHttpClient, AppLaunchOptions,
+    APP_LAUNCH_OPTIONS_ENV, AppInteractionEndpoint, AppInteractionHttpClient, AppLaunchOptions,
     initialize_interaction_status,
 };
-use std::{env, future::Future, net::SocketAddr};
+use std::{
+    env,
+    future::Future,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::ExitStatus,
+};
 use thiserror::Error;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, process::Command, task::JoinHandle};
+
+const APP_BUNDLE_EXECUTABLE_ENV: &str = "NOLOONG_APP_BUNDLE_EXECUTABLE";
+const MACOS_APP_EXECUTABLE: &str =
+    "target/release/bundle/macos/Noloong.app/Contents/MacOS/noloong-app";
 
 pub(crate) async fn run_cli(args: Vec<String>) -> Result<(), CliError> {
-    if args.is_empty()
-        && let Some(options) = noloong_app::take_bundle_launch_options()?
-    {
-        let options = prepare_direct_app_launch_options(options).await?;
-        return noloong_app::run_app(options).map_err(Into::into);
-    }
-
     let cli = Cli::try_parse_from(std::iter::once("noloong".to_owned()).chain(args))
         .map_err(|error| CliError::Usage(error.to_string()))?;
     match cli.command {
@@ -173,6 +175,17 @@ pub(crate) enum CliError {
     WeixinState(#[from] noloong_agent_weixin::state::WeixinStateError),
     #[error("App failed: {0}")]
     App(#[from] noloong_app::AppError),
+    #[error(
+        "app bundle executable is missing; run `bun run app:bundle` first, or use `bun run app:dev` for Tauri development"
+    )]
+    AppBundleMissing,
+    #[error("app bundle exited unsuccessfully: {executable} ({status})")]
+    AppBundleExited {
+        executable: String,
+        status: ExitStatus,
+    },
+    #[error("failed to serialize app launch options: {0}")]
+    AppLaunchOptions(String),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("background task failed: {0}")]
@@ -299,11 +312,15 @@ impl PreparedAppLaunch {
 
 async fn run_app_command(options: AppOptions) -> Result<(), CliError> {
     let prepared = prepare_app_launch(options).await?;
-    let result = noloong_app::run_app(prepared.launch_options.clone()).map_err(Into::into);
+    let result = match resolve_app_bundle_executable() {
+        Some(executable) => run_app_bundle(executable, &prepared.launch_options).await,
+        None => Err(CliError::AppBundleMissing),
+    };
     prepared.shutdown().await;
     result
 }
 
+#[cfg(test)]
 pub(crate) async fn prepare_direct_app_launch_options(
     mut options: AppLaunchOptions,
 ) -> Result<AppLaunchOptions, CliError> {
@@ -323,6 +340,7 @@ pub(crate) async fn prepare_app_launch(options: AppOptions) -> Result<PreparedAp
         let interaction_status = initialize_app_interaction(interaction_endpoint.as_ref()).await;
         return Ok(PreparedAppLaunch {
             launch_options: AppLaunchOptions {
+                app_version: AppLaunchOptions::current_app_version(),
                 profile_config_path,
                 locale,
                 interaction_endpoint,
@@ -336,6 +354,7 @@ pub(crate) async fn prepare_app_launch(options: AppOptions) -> Result<PreparedAp
     if !resolved_profile_config.exists() {
         return Ok(PreparedAppLaunch {
             launch_options: AppLaunchOptions {
+                app_version: AppLaunchOptions::current_app_version(),
                 profile_config_path,
                 locale,
                 interaction_endpoint: None,
@@ -351,6 +370,7 @@ pub(crate) async fn prepare_app_launch(options: AppOptions) -> Result<PreparedAp
     let interaction_status = initialize_app_interaction(Some(&interaction_endpoint)).await;
     Ok(PreparedAppLaunch {
         launch_options: AppLaunchOptions {
+            app_version: AppLaunchOptions::current_app_version(),
             profile_config_path,
             locale,
             interaction_endpoint: Some(interaction_endpoint),
@@ -366,9 +386,63 @@ async fn initialize_app_interaction(
     let endpoint = endpoint?;
     let status = match AppInteractionHttpClient::from_endpoint(endpoint) {
         Ok(client) => initialize_interaction_status(&client).await,
-        Err(error) => noloong_app::AppInteractionStatus::Failed(error.to_string()),
+        Err(error) => noloong_app::AppInteractionStatus::Failed {
+            error: error.to_string(),
+        },
     };
     Some(status)
+}
+
+async fn run_app_bundle(
+    executable: PathBuf,
+    launch_options: &AppLaunchOptions,
+) -> Result<(), CliError> {
+    let launch_options_json = serde_json::to_string(launch_options)
+        .map_err(|error| CliError::AppLaunchOptions(error.to_string()))?;
+    let status = Command::new(&executable)
+        .env(APP_LAUNCH_OPTIONS_ENV, launch_options_json)
+        .status()
+        .await?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(CliError::AppBundleExited {
+        executable: executable.display().to_string(),
+        status,
+    })
+}
+
+fn resolve_app_bundle_executable() -> Option<PathBuf> {
+    env::var_os(APP_BUNDLE_EXECUTABLE_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            app_bundle_executable_candidates()
+                .into_iter()
+                .find(|path| path.is_file())
+        })
+}
+
+pub(crate) fn app_bundle_executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(current_dir) = env::current_dir() {
+        candidates.push(current_dir.join(MACOS_APP_EXECUTABLE));
+    }
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(candidate) = app_bundle_executable_from_current_exe(&current_exe)
+    {
+        candidates.push(candidate);
+    }
+    candidates
+}
+
+pub(crate) fn app_bundle_executable_from_current_exe(current_exe: &Path) -> Option<PathBuf> {
+    current_exe
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "target"))
+        .map(|target_dir| {
+            target_dir.join("release/bundle/macos/Noloong.app/Contents/MacOS/noloong-app")
+        })
 }
 
 async fn run_with_embedded_interaction(

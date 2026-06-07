@@ -39,7 +39,11 @@ enum InteractionNotifierSink {
 }
 
 impl InteractionNotifier {
-    pub fn notify<T>(&self, method: impl Into<String>, params: &T) -> Result<(), InteractionError>
+    pub async fn notify<T>(
+        &self,
+        method: impl Into<String>,
+        params: &T,
+    ) -> Result<(), InteractionError>
     where
         T: Serialize,
     {
@@ -48,9 +52,10 @@ impl InteractionNotifier {
         })?;
         match &self.sink {
             InteractionNotifierSink::Outbound(sender) => sender
-                .try_send(JsonRpcOutbound::Notification(JsonRpcNotification::new(
+                .send(JsonRpcOutbound::Notification(JsonRpcNotification::new(
                     method, params,
                 )))
+                .await
                 .map_err(|error| {
                     InteractionError::internal(format!(
                         "json-rpc notification writer is unavailable: {error}"
@@ -105,18 +110,18 @@ where
         let request = match parse_jsonrpc_request(line.as_bytes()) {
             Ok(request) => request,
             Err(response) => {
-                send_response(&outbound_sender, *response)?;
+                send_response(&outbound_sender, *response).await?;
                 continue;
             }
         };
         let output = dispatch_jsonrpc_request(&handler, request, notifier.clone()).await;
-        send_response(&outbound_sender, output.response)?;
+        send_response(&outbound_sender, output.response).await?;
         if output.shutdown {
-            send_close(&outbound_sender)?;
+            send_close(&outbound_sender).await?;
             return await_writer(writer_task).await;
         }
     }
-    send_close(&outbound_sender)?;
+    send_close(&outbound_sender).await?;
     await_writer(writer_task).await
 }
 
@@ -216,19 +221,22 @@ where
     Ok(())
 }
 
-pub(crate) fn send_response(
+pub(crate) async fn send_response(
     sender: &mpsc::Sender<JsonRpcOutbound>,
     response: JsonRpcResponse,
 ) -> Result<(), InteractionError> {
     sender
-        .try_send(JsonRpcOutbound::Response(response))
+        .send(JsonRpcOutbound::Response(response))
+        .await
         .map_err(|error| {
             InteractionError::internal(format!("json-rpc response writer is unavailable: {error}"))
         })
 }
 
-pub(crate) fn send_close(sender: &mpsc::Sender<JsonRpcOutbound>) -> Result<(), InteractionError> {
-    sender.try_send(JsonRpcOutbound::Close).map_err(|error| {
+pub(crate) async fn send_close(
+    sender: &mpsc::Sender<JsonRpcOutbound>,
+) -> Result<(), InteractionError> {
+    sender.send(JsonRpcOutbound::Close).await.map_err(|error| {
         InteractionError::internal(format!("json-rpc response writer is unavailable: {error}"))
     })
 }

@@ -1,6 +1,7 @@
 use super::{
-    AppOptions, Cli, CliCommand, CliError, prepare_app_launch, prepare_direct_app_launch_options,
-    start_embedded_interaction, validate_interaction_bind,
+    AppOptions, Cli, CliCommand, CliError, app_bundle_executable_from_current_exe,
+    prepare_app_launch, prepare_direct_app_launch_options, start_embedded_interaction,
+    validate_interaction_bind,
 };
 use crate::build_info_cli::{BuildInfoSourceSubcommand, BuildInfoSubcommand};
 use crate::cli::profile_locale;
@@ -112,6 +113,18 @@ fn cli_app_command_parses_profile_config_and_locale() {
     assert_eq!(options.interaction_token.as_deref(), Some("secret"));
 }
 
+#[test]
+fn cli_app_bundle_executable_is_derived_from_target_directory() {
+    let current_exe = PathBuf::from("/repo/target/debug/noloong");
+
+    let executable = app_bundle_executable_from_current_exe(&current_exe).unwrap();
+
+    assert_eq!(
+        executable,
+        PathBuf::from("/repo/target/release/bundle/macos/Noloong.app/Contents/MacOS/noloong-app")
+    );
+}
+
 #[tokio::test]
 async fn cli_app_prepares_external_interaction_endpoint_without_embedded_server() {
     let prepared = prepare_app_launch(AppOptions {
@@ -155,7 +168,7 @@ async fn cli_app_records_external_interaction_initialize_failure() {
 
     assert!(matches!(
         prepared.launch_options.interaction_status,
-        Some(AppInteractionStatus::Failed(_))
+        Some(AppInteractionStatus::Failed { .. })
     ));
     assert!(!prepared.has_embedded_server());
 }
@@ -208,6 +221,7 @@ async fn cli_direct_bundle_app_launch_initializes_interaction_status() {
     let endpoint = server.endpoint();
 
     let options = prepare_direct_app_launch_options(AppLaunchOptions {
+        app_version: AppLaunchOptions::current_app_version(),
         profile_config_path: Some(path.display().to_string()),
         locale: Some(ConfigLocale::Zh),
         interaction_endpoint: Some(endpoint),

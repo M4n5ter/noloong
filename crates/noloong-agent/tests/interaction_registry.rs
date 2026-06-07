@@ -11,7 +11,8 @@ use noloong_agent::{
         AgentSessionRecord, AgentSessionRegistry, AgentSessionRegistryStore,
         INTERACTION_ERROR_BUSY, INTERACTION_ERROR_NOT_FOUND, InMemoryAgentSessionRegistryStore,
         InteractionError, InteractionFuture, InteractionProfileDescriptor,
-        InteractionSessionStatus, SubagentSpawnRequest, protocol::SESSION_WORKDIR_METADATA_KEY,
+        InteractionSessionDescriptor, InteractionSessionStatus, SubagentSpawnRequest,
+        protocol::SESSION_WORKDIR_METADATA_KEY,
     },
 };
 use noloong_agent_core::{
@@ -1241,11 +1242,7 @@ async fn interaction_registry_subagent_tools_spawn_wait_and_read_final_output() 
         .await
         .unwrap();
 
-    let child = registry
-        .get_descriptor("session-1")
-        .await
-        .unwrap()
-        .expect("child should exist");
+    let child = direct_child_descriptor(&registry, "parent").await;
     assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
     assert_eq!(child.role.as_deref(), Some("reviewer"));
     assert_eq!(child.status, InteractionSessionStatus::Completed);
@@ -1268,6 +1265,28 @@ async fn interaction_registry_subagent_tools_spawn_wait_and_read_final_output() 
             text: "parent done".into()
         }
     );
+}
+
+async fn direct_child_descriptor(
+    registry: &AgentSessionRegistry,
+    parent_session_id: &str,
+) -> InteractionSessionDescriptor {
+    let children = registry
+        .list(AgentSessionListFilter {
+            parent_session_id: Some(parent_session_id.into()),
+            ..AgentSessionListFilter::default()
+        })
+        .await
+        .expect("child sessions should list");
+    assert_eq!(
+        children.len(),
+        1,
+        "expected exactly one direct child for {parent_session_id}"
+    );
+    children
+        .into_iter()
+        .next()
+        .expect("one direct child was asserted")
 }
 
 #[tokio::test]
@@ -1303,11 +1322,7 @@ async fn interaction_registry_subagent_spawn_drops_transient_prompt_additions() 
         .await
         .unwrap();
 
-    let child = registry
-        .get_descriptor("session-1")
-        .await
-        .unwrap()
-        .expect("child should exist");
+    let child = direct_child_descriptor(&registry, "parent").await;
     let addition_ids = child
         .manifest
         .system_prompt
@@ -2554,6 +2569,29 @@ struct SubagentWorkflowModel {
     parent_calls: AtomicU64,
 }
 
+fn spawned_subagent_session_id(request: &ModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_name, content, ..
+            } if tool_name == BuiltInToolName::SubagentSpawn.as_str() => {
+                content.iter().find_map(|block| match block {
+                    ContentBlock::Json { value } => value
+                        .get("sessionId")
+                        .and_then(|session_id| session_id.as_str())
+                        .map(str::to_owned),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("subagent spawn result should contain sessionId")
+}
+
 impl ModelProvider for SubagentWorkflowModel {
     fn id(&self) -> &str {
         "subagent-workflow"
@@ -2603,24 +2641,27 @@ impl ModelProvider for SubagentWorkflowModel {
                             stop_reason: StopReason::ToolUse,
                         },
                     ],
-                    1 => vec![
-                        ModelStreamEvent::Started {
-                            stream_id: "subagent-parent-wait-stream".into(),
-                        },
-                        ModelStreamEvent::ToolCall {
-                            tool_call: ToolCall {
-                                id: "subagent-wait-test".into(),
-                                name: BuiltInToolName::SubagentWait.as_str().into(),
-                                arguments: json!({
-                                    "sessionIds": ["session-1"],
-                                    "timeoutMs": 1000
-                                }),
+                    1 => {
+                        let child_session_id = spawned_subagent_session_id(&request);
+                        vec![
+                            ModelStreamEvent::Started {
+                                stream_id: "subagent-parent-wait-stream".into(),
                             },
-                        },
-                        ModelStreamEvent::Finished {
-                            stop_reason: StopReason::ToolUse,
-                        },
-                    ],
+                            ModelStreamEvent::ToolCall {
+                                tool_call: ToolCall {
+                                    id: "subagent-wait-test".into(),
+                                    name: BuiltInToolName::SubagentWait.as_str().into(),
+                                    arguments: json!({
+                                        "sessionIds": [child_session_id],
+                                        "timeoutMs": 1000
+                                    }),
+                                },
+                            },
+                            ModelStreamEvent::Finished {
+                                stop_reason: StopReason::ToolUse,
+                            },
+                        ]
+                    }
                     _ => vec![
                         ModelStreamEvent::Started {
                             stream_id: "subagent-parent-final-stream".into(),

@@ -66,6 +66,10 @@ pub async fn deliver_display_event(
                 .send_text(peer_id, &render_approval_request(index, approval, locale))
                 .await?;
         }
+        DisplayEvent::ApprovalResolved { approval_id, .. }
+        | DisplayEvent::ApprovalExpired { approval_id, .. } => {
+            state.remove_approval(approval_id);
+        }
         DisplayEvent::RunFailed { error, .. } => {
             clear_typing(delivery, peer_id);
             delivery
@@ -187,14 +191,33 @@ pub enum WeixinDisplayError {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_approval_request, render_run_paused};
+    use super::{WeixinDisplayState, render_approval_request, render_run_paused};
     use noloong_agent::Locale;
     use noloong_agent_core::{ToolApprovalRequest, ToolApprovalRequestSpec, ToolCall};
 
     #[test]
+    fn approval_state_removes_resolved_approval() {
+        let mut state = WeixinDisplayState::default();
+        state.remember_approval(approval("a1"));
+
+        state.remove_approval("a1");
+
+        assert!(state.approvals().is_empty());
+        assert_eq!(state.approval_id_by_index(1), None);
+    }
+
+    #[test]
     fn approval_card_uses_numbered_commands() {
-        let approval = ToolApprovalRequest {
-            approval_id: "a1".into(),
+        let approval = approval("a1");
+
+        let rendered = render_approval_request(2, &approval, Locale::Zh);
+        assert!(rendered.contains("/同意 2"));
+        assert!(rendered.contains("/拒绝 2"));
+    }
+
+    fn approval(approval_id: &str) -> ToolApprovalRequest {
+        ToolApprovalRequest {
+            approval_id: approval_id.into(),
             tool_call: ToolCall {
                 id: "t1".into(),
                 name: "host.exec.start".into(),
@@ -208,11 +231,7 @@ mod tests {
                 expires_at_ms: None,
                 metadata: serde_json::Value::Object(serde_json::Map::new()),
             },
-        };
-
-        let rendered = render_approval_request(2, &approval, Locale::Zh);
-        assert!(rendered.contains("/同意 2"));
-        assert!(rendered.contains("/拒绝 2"));
+        }
     }
 
     #[test]

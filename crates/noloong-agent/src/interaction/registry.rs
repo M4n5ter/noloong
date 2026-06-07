@@ -29,10 +29,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::{Notify, RwLock, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
@@ -274,7 +271,6 @@ struct AgentSessionRegistryInner {
     session_changes: Notify,
     automation_changes: Arc<Notify>,
     automation_runner_semaphore: Arc<Semaphore>,
-    counter: AtomicU64,
 }
 
 struct CreateSessionReservation {
@@ -376,7 +372,6 @@ impl AgentSessionRegistry {
                 automation_runner_semaphore: Arc::new(Semaphore::new(
                     options.automation_runner_max_concurrency,
                 )),
-                counter: AtomicU64::new(0),
             }),
         };
         if options.automation_runner_enabled {
@@ -812,13 +807,11 @@ impl AgentSessionRegistry {
     }
 
     fn next_session_id(&self) -> String {
-        let id = self.inner.counter.fetch_add(1, Ordering::SeqCst) + 1;
-        format!("session-{id}")
+        format!("session-{}", Uuid::new_v4().simple())
     }
 
     fn next_automation_id(&self) -> String {
-        let id = self.inner.counter.fetch_add(1, Ordering::SeqCst) + 1;
-        format!("automation-{id}")
+        format!("automation-{}", Uuid::new_v4().simple())
     }
 
     fn spawn_automation_runner_if_possible(&self) {

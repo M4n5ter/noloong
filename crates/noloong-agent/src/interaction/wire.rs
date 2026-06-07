@@ -1,8 +1,8 @@
 use super::InteractionError;
 use crate::{AgentManifest, ManifestPatch};
 use noloong_agent_core::{
-    AgentEvent, AgentMessage, AgentState, RunStatus, ToolApprovalRequest, ToolCallId, ToolOutput,
-    ToolUpdate,
+    AgentEvent, AgentMessage, AgentState, RunStatus, ToolApprovalId, ToolApprovalRequest,
+    ToolCallId, ToolOutput, ToolPermissionDecision, ToolUpdate,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -345,6 +345,14 @@ pub enum DisplayEvent {
     },
     ApprovalRequested {
         approval: ToolApprovalRequest,
+    },
+    ApprovalResolved {
+        approval_id: ToolApprovalId,
+        decision: ToolPermissionDecision,
+    },
+    ApprovalExpired {
+        approval_id: ToolApprovalId,
+        decision: ToolPermissionDecision,
     },
     RawEvent {
         event: AgentEvent,

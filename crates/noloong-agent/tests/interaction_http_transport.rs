@@ -106,6 +106,41 @@ async fn http_auth_is_required() {
 }
 
 #[tokio::test]
+async fn http_cors_preflight_allows_webview_jsonrpc_requests() {
+    let server = spawn_server(TestHandler::default()).await;
+    let response = reqwest::Client::new()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/jsonrpc", server.base_url),
+        )
+        .header("Origin", "http://127.0.0.1:5173")
+        .header("Access-Control-Request-Method", "POST")
+        .header(
+            "Access-Control-Request-Headers",
+            "authorization, content-type",
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    assert!(
+        response
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("authorization") && value.contains("content-type"))
+    );
+}
+
+#[tokio::test]
 async fn http_request_body_limit_is_enforced() {
     let server = spawn_server_with_config(
         TestHandler::default(),
@@ -180,6 +215,82 @@ async fn websocket_jsonrpc_round_trips() {
     let response = next_json(&mut websocket).await;
     assert_eq!(response["id"], 1);
     assert_eq!(response["result"]["hello"], "ws");
+}
+
+#[tokio::test]
+async fn websocket_accepts_query_access_token_for_browser_clients() {
+    let server = spawn_server(TestHandler::default()).await;
+    let mut websocket = connect_websocket_with_query_token(&server).await;
+
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(&rpc(1, "echo", json!({"ok": true})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    let response = next_json(&mut websocket).await;
+    assert_eq!(response["id"], 1);
+    assert_eq!(response["result"]["ok"], true);
+}
+
+#[tokio::test]
+async fn websocket_accepts_form_encoded_query_access_token() {
+    let token = "test token+&=";
+    let server = spawn_server_with_config(
+        TestHandler::default(),
+        InteractionHttpTransportConfig::bearer_token(token),
+    )
+    .await;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("access_token", token)
+        .finish();
+    let mut websocket = connect_async(format!("{}?{query}", server.websocket_url))
+        .await
+        .unwrap()
+        .0;
+
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(&rpc(1, "echo", json!({"ok": true})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    let response = next_json(&mut websocket).await;
+    assert_eq!(response["id"], 1);
+    assert_eq!(response["result"]["ok"], true);
+}
+
+#[tokio::test]
+async fn websocket_dispatches_requests_concurrently() {
+    let server = spawn_server(TestHandler::default()).await;
+    let mut websocket = connect_websocket(&server).await;
+
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(&rpc(1, "slow_echo", json!({"slow": true})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(&rpc(2, "echo", json!({"fast": true})))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    let response = next_json(&mut websocket).await;
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["result"]["fast"], true);
 }
 
 #[tokio::test]
@@ -295,8 +406,12 @@ impl JsonRpcHandler for TestHandler {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match method {
                 "echo" => Ok(JsonRpcHandlerOutput::result(params)),
+                "slow_echo" => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    Ok(JsonRpcHandlerOutput::result(params))
+                }
                 "notify" => {
-                    notifier.notify("test/event", &params)?;
+                    notifier.notify("test/event", &params).await?;
                     Ok(JsonRpcHandlerOutput::result(json!({"notified": true})))
                 }
                 "shutdown" => Ok(JsonRpcHandlerOutput::shutdown(json!({"ok": true}))),
@@ -348,6 +463,15 @@ async fn connect_websocket(
         .headers_mut()
         .insert("authorization", format!("Bearer {TOKEN}").parse().unwrap());
     connect_async(request).await.unwrap().0
+}
+
+async fn connect_websocket_with_query_token(
+    server: &TestServer,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    connect_async(format!("{}?access_token={TOKEN}", server.websocket_url))
+        .await
+        .unwrap()
+        .0
 }
 
 async fn next_json(

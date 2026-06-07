@@ -1,24 +1,34 @@
 use noloong_config::ManifestPatch;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::{collections::BTreeSet, future::Future, sync::Arc};
-use thiserror::Error;
-use url::Url;
+use std::collections::BTreeSet;
 
+mod http_client;
 mod media;
 mod ws;
 
+pub use http_client::{
+    AppInteractionClient, AppInteractionError, AppInteractionHttpClient,
+    initialize_interaction_status, interaction_http_url,
+};
 pub use media::{AppMediaBlock, AppMediaKind, AppMediaSource};
 pub use ws::{AppInteractionWsClient, AppInteractionWsNotification};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AppInteractionEndpoint {
     pub ws_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum AppInteractionStatus {
     Unavailable,
     Pending,
@@ -27,10 +37,12 @@ pub enum AppInteractionStatus {
         protocol_version: String,
         profiles: Vec<InteractionProfileDescriptor>,
     },
-    Failed(String),
+    Failed {
+        error: String,
+    },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionInitializeRequest {
     pub name: String,
@@ -68,7 +80,9 @@ impl InteractionInitializeRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 pub enum InteractionAuthorityCapability {
     #[serde(rename = "agent.run")]
     AgentRun,
@@ -78,7 +92,7 @@ pub enum InteractionAuthorityCapability {
     SessionDelete,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionUxCapabilities {
     #[serde(default)]
@@ -93,7 +107,7 @@ pub struct InteractionUxCapabilities {
     pub max_message_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionInitializeResult {
     pub server: InteractionServerInfo,
@@ -101,14 +115,14 @@ pub struct InteractionInitializeResult {
     pub profiles: Vec<InteractionProfileDescriptor>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionServerInfo {
     pub name: String,
     pub protocol_version: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionProfileDescriptor {
     pub profile_id: String,
@@ -121,7 +135,7 @@ pub struct InteractionProfileDescriptor {
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSessionCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,13 +146,20 @@ pub struct AppSessionCreateRequest {
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSessionListRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSessionRequest {
     pub session_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSessionMetadataUpdateRequest {
     pub session_id: String,
@@ -146,7 +167,7 @@ pub struct AppSessionMetadataUpdateRequest {
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppApprovalResolveRequest {
     pub session_id: String,
@@ -154,14 +175,14 @@ pub struct AppApprovalResolveRequest {
     pub decision: AppToolPermissionDecision,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPromptRequest {
     pub session_id: String,
     pub input: AppPromptInput,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -172,7 +193,7 @@ pub enum AppPromptInput {
     Message { message: AppMessage },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInteractionSessionDescriptor {
     pub session_id: String,
@@ -187,7 +208,7 @@ pub struct AppInteractionSessionDescriptor {
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AppInteractionSessionStatus {
     Idle,
@@ -198,14 +219,14 @@ pub enum AppInteractionSessionStatus {
     Paused,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInteractionSessionState {
     #[serde(default)]
     pub messages: Vec<AppMessage>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppMessage {
     pub id: String,
@@ -216,9 +237,12 @@ pub struct AppMessage {
     pub metadata: Map<String, Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppContentBlock {
+    Thinking {
+        thinking: AppThinkingBlock,
+    },
     Media {
         media: AppMediaBlock,
     },
@@ -229,7 +253,22 @@ pub enum AppContentBlock {
     Other,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppThinkingBlock {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_descriptor: Option<Value>,
+    #[serde(default)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -295,9 +334,17 @@ pub enum AppDisplayEvent {
     ApprovalRequested {
         approval: AppToolApprovalRequest,
     },
+    ApprovalResolved {
+        approval_id: String,
+        decision: AppToolPermissionDecision,
+    },
+    ApprovalExpired {
+        approval_id: String,
+        decision: AppToolPermissionDecision,
+    },
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolUpdate {
     #[serde(default)]
@@ -315,7 +362,7 @@ impl AppToolUpdate {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolOutput {
     #[serde(default)]
@@ -337,9 +384,19 @@ impl AppToolOutput {
             updates: Vec::new(),
         }
     }
+
+    #[cfg(test)]
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![AppContentBlock::Text { text: text.into() }],
+            details: Value::Null,
+            is_error: true,
+            updates: Vec::new(),
+        }
+    }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolCall {
     pub id: String,
@@ -348,7 +405,7 @@ pub struct AppToolCall {
     pub arguments: Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolPermissionRequirement {
     pub capability: String,
@@ -358,7 +415,7 @@ pub struct AppToolPermissionRequirement {
     pub metadata: Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolApprovalRequestSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,7 +428,7 @@ pub struct AppToolApprovalRequestSpec {
     pub metadata: Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolApprovalRequest {
     pub approval_id: String,
@@ -383,14 +440,14 @@ pub struct AppToolApprovalRequest {
     pub request: AppToolApprovalRequestSpec,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AppToolPermissionOutcome {
     Allow,
     Deny,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppToolPermissionDecision {
     pub outcome: AppToolPermissionOutcome,
@@ -413,7 +470,7 @@ impl AppToolPermissionDecision {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppDisplaySubscribeRequest {
     pub session_id: String,
@@ -421,330 +478,18 @@ pub struct AppDisplaySubscribeRequest {
     pub ux: Option<InteractionUxCapabilities>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSubscriptionResult {
     pub subscription_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppInteractionDisplayNotification {
     pub session_id: String,
     pub subscription_id: String,
     pub event: AppDisplayEvent,
-}
-
-pub trait AppInteractionClient {
-    fn initialize(
-        &self,
-        request: InteractionInitializeRequest,
-    ) -> impl Future<Output = Result<InteractionInitializeResult, AppInteractionError>> + Send + '_;
-
-    fn list_sessions(
-        &self,
-    ) -> impl Future<Output = Result<Vec<AppInteractionSessionDescriptor>, AppInteractionError>>
-    + Send
-    + '_ {
-        async {
-            Err(AppInteractionError::Protocol(
-                "session/list is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn get_session<'a>(
-        &'a self,
-        session_id: &'a str,
-    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + 'a
-    {
-        async move {
-            let _ = session_id;
-            Err(AppInteractionError::Protocol(
-                "session/get is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn create_session(
-        &self,
-        request: AppSessionCreateRequest,
-    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
-    {
-        async move {
-            let _ = request;
-            Err(AppInteractionError::Protocol(
-                "session/create is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn update_session_metadata(
-        &self,
-        request: AppSessionMetadataUpdateRequest,
-    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
-    {
-        async move {
-            let _ = request;
-            Err(AppInteractionError::Protocol(
-                "session/update_metadata is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn prompt(
-        &self,
-        request: AppPromptRequest,
-    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
-    {
-        async move {
-            let _ = request;
-            Err(AppInteractionError::Protocol(
-                "agent/prompt is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn abort(
-        &self,
-        request: AppSessionRequest,
-    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
-    {
-        async move {
-            let _ = request;
-            Err(AppInteractionError::Protocol(
-                "agent/abort is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn resolve_approval(
-        &self,
-        request: AppApprovalResolveRequest,
-    ) -> impl Future<Output = Result<AppInteractionSessionDescriptor, AppInteractionError>> + Send + '_
-    {
-        async move {
-            let _ = request;
-            Err(AppInteractionError::Protocol(
-                "approval/resolve is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-
-    fn subscribe_display(
-        &self,
-        request: AppDisplaySubscribeRequest,
-    ) -> impl Future<Output = Result<AppSubscriptionResult, AppInteractionError>> + Send + '_ {
-        async move {
-            let _ = request;
-            Err(AppInteractionError::Protocol(
-                "display/subscribe is not implemented for this interaction client".into(),
-            ))
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct AppInteractionHttpClient {
-    client: reqwest::Client,
-    http_url: String,
-    bearer_token: Option<String>,
-    request_id: Arc<AtomicU64>,
-}
-
-impl AppInteractionHttpClient {
-    pub fn from_endpoint(endpoint: &AppInteractionEndpoint) -> Result<Self, AppInteractionError> {
-        Ok(Self {
-            client: reqwest::Client::new(),
-            http_url: interaction_http_url(&endpoint.ws_url)?,
-            bearer_token: endpoint.bearer_token.clone(),
-            request_id: Arc::new(AtomicU64::new(0)),
-        })
-    }
-
-    async fn call<P, R>(&self, method: &'static str, params: P) -> Result<R, AppInteractionError>
-    where
-        P: Serialize,
-        R: for<'de> Deserialize<'de>,
-    {
-        let mut http_request = self.client.post(&self.http_url);
-        if let Some(token) = &self.bearer_token {
-            http_request = http_request.bearer_auth(token);
-        }
-        let id = self.request_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let response = http_request
-            .json(&JsonRpcRequest {
-                jsonrpc: "2.0",
-                id,
-                method,
-                params,
-            })
-            .send()
-            .await
-            .map_err(|error| AppInteractionError::Transport(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| AppInteractionError::Transport(error.to_string()))?
-            .json::<JsonRpcResponse<R>>()
-            .await
-            .map_err(|error| AppInteractionError::Protocol(error.to_string()))?;
-        response.into_result()
-    }
-}
-
-impl AppInteractionClient for AppInteractionHttpClient {
-    async fn initialize(
-        &self,
-        request: InteractionInitializeRequest,
-    ) -> Result<InteractionInitializeResult, AppInteractionError> {
-        self.call("initialize", request).await
-    }
-
-    async fn list_sessions(
-        &self,
-    ) -> Result<Vec<AppInteractionSessionDescriptor>, AppInteractionError> {
-        self.call("session/list", serde_json::json!({})).await
-    }
-
-    async fn get_session(
-        &self,
-        session_id: &str,
-    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
-        self.call(
-            "session/get",
-            AppSessionRequest {
-                session_id: session_id.into(),
-            },
-        )
-        .await
-    }
-
-    async fn create_session(
-        &self,
-        request: AppSessionCreateRequest,
-    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
-        self.call("session/create", request).await
-    }
-
-    async fn update_session_metadata(
-        &self,
-        request: AppSessionMetadataUpdateRequest,
-    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
-        self.call("session/update_metadata", request).await
-    }
-
-    async fn prompt(
-        &self,
-        request: AppPromptRequest,
-    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
-        self.call("agent/prompt", request).await
-    }
-
-    async fn abort(
-        &self,
-        request: AppSessionRequest,
-    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
-        self.call("agent/abort", request).await
-    }
-
-    async fn resolve_approval(
-        &self,
-        request: AppApprovalResolveRequest,
-    ) -> Result<AppInteractionSessionDescriptor, AppInteractionError> {
-        self.call("approval/resolve", request).await
-    }
-
-    async fn subscribe_display(
-        &self,
-        request: AppDisplaySubscribeRequest,
-    ) -> Result<AppSubscriptionResult, AppInteractionError> {
-        self.call("display/subscribe", request).await
-    }
-}
-
-pub async fn initialize_interaction_status(
-    client: &impl AppInteractionClient,
-) -> AppInteractionStatus {
-    match client
-        .initialize(InteractionInitializeRequest::noloong_app())
-        .await
-    {
-        Ok(result) => AppInteractionStatus::Ready {
-            server_name: result.server.name,
-            protocol_version: result.server.protocol_version,
-            profiles: result.profiles,
-        },
-        Err(error) => AppInteractionStatus::Failed(error.to_string()),
-    }
-}
-
-#[derive(Serialize)]
-struct JsonRpcRequest<P> {
-    jsonrpc: &'static str,
-    id: u64,
-    method: &'static str,
-    params: P,
-}
-
-#[derive(Deserialize)]
-struct JsonRpcResponse<R> {
-    result: Option<R>,
-    error: Option<JsonRpcError>,
-}
-
-impl<R> JsonRpcResponse<R> {
-    fn into_result(self) -> Result<R, AppInteractionError> {
-        if let Some(result) = self.result {
-            return Ok(result);
-        }
-        if let Some(error) = self.error {
-            return Err(AppInteractionError::Protocol(format!(
-                "json-rpc error {}: {}",
-                error.code, error.message
-            )));
-        }
-        Err(AppInteractionError::Protocol(
-            "json-rpc response missing result and error".into(),
-        ))
-    }
-}
-
-#[derive(Deserialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum AppInteractionError {
-    #[error("{0}")]
-    Transport(String),
-    #[error("{0}")]
-    Protocol(String),
-}
-
-pub fn interaction_http_url(ws_url: &str) -> Result<String, AppInteractionError> {
-    let mut url =
-        Url::parse(ws_url).map_err(|error| AppInteractionError::Protocol(error.to_string()))?;
-    let scheme = match url.scheme() {
-        "ws" => "http",
-        "wss" => "https",
-        other => {
-            return Err(AppInteractionError::Protocol(format!(
-                "unsupported interaction websocket scheme: {other}"
-            )));
-        }
-    };
-    url.set_scheme(scheme).map_err(|_| {
-        AppInteractionError::Protocol("failed to set interaction URL scheme".into())
-    })?;
-    let path = url.path().to_string();
-    let http_path = path.strip_suffix("/ws").ok_or_else(|| {
-        AppInteractionError::Protocol(format!(
-            "interaction websocket URL must end with /ws: {ws_url}"
-        ))
-    })?;
-    url.set_path(http_path);
-    Ok(url.to_string())
 }
 
 #[cfg(test)]
