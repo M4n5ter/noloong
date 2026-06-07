@@ -53,7 +53,7 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
 
   return (
     <main className="app-shell">
-      <header className="title-bar" data-tauri-drag-region>
+      <header className="title-bar" data-tauri-drag-region="deep">
         <div className="brand-mark" aria-hidden="true">
           N
         </div>
@@ -61,10 +61,12 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
           <strong>{i18n.t("app.brand")}</strong>
           <span>{headerSubtitle(bootstrap, i18n)}</span>
         </div>
+        <div className="title-drag-spacer" />
         {bootstrap.status === "ready" ? (
-          <nav className="title-actions" data-tauri-drag-region="false">
+          <nav className="title-actions">
             <button
               className={route === "chat" ? "title-action active" : "title-action"}
+              data-tauri-drag-region="false"
               onClick={() => setRoute("chat")}
               type="button"
             >
@@ -72,6 +74,7 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
             </button>
             <button
               className={route === "settings" ? "title-action active" : "title-action"}
+              data-tauri-drag-region="false"
               onClick={() => setRoute("settings")}
               type="button"
             >

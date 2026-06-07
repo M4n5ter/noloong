@@ -5,10 +5,6 @@ export function isNearTranscriptBottom(
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= thresholdPx;
 }
 
-export function scrollTranscriptToEnd(transcript: HTMLDivElement, end: HTMLDivElement): void {
-  if (typeof end.scrollIntoView === "function") {
-    end.scrollIntoView({ block: "end" });
-    return;
-  }
+export function scrollTranscriptToEnd(transcript: HTMLDivElement): void {
   transcript.scrollTop = transcript.scrollHeight;
 }

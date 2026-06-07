@@ -41,6 +41,28 @@ fn tauri_shell_declares_noloong_app_identity() {
 }
 
 #[test]
+fn main_window_capability_allows_native_title_bar_dragging() {
+    let capability = read_json(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("capabilities")
+            .join("main.json"),
+    );
+
+    assert_eq!(capability["identifier"], "main-window");
+    assert_eq!(capability["windows"][0], "main");
+    let permissions = capability["permissions"]
+        .as_array()
+        .expect("main window capability permissions");
+    assert!(permissions.iter().any(|value| value == "core:default"));
+    assert!(
+        permissions
+            .iter()
+            .any(|value| value == "core:window:allow-start-dragging"),
+        "Tauri title bar drag regions require the window start_dragging permission",
+    );
+}
+
+#[test]
 fn bun_workspace_declares_desktop_frontend_entrypoints() {
     let root = repository_root();
     let package = read_json(root.join("package.json"));

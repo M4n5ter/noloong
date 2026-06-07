@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isNearTranscriptBottom } from "./scroll";
+import { isNearTranscriptBottom, scrollTranscriptToEnd } from "./scroll";
 
 describe("chat scroll helpers", () => {
   it("detects whether transcript is close enough to the bottom", () => {
@@ -9,5 +9,13 @@ describe("chat scroll helpers", () => {
     expect(isNearTranscriptBottom({ scrollHeight: 1000, scrollTop: 500, clientHeight: 300 })).toBe(
       false,
     );
+  });
+
+  it("scrolls the transcript container itself to the end", () => {
+    const transcript = { scrollHeight: 1200, scrollTop: 0 } as HTMLDivElement;
+
+    scrollTranscriptToEnd(transcript);
+
+    expect(transcript.scrollTop).toBe(1200);
   });
 });

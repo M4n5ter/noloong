@@ -75,9 +75,14 @@ button {
   white-space: nowrap;
 }
 
+.title-drag-spacer {
+  align-self: stretch;
+  flex: 1;
+}
+
 .title-actions {
   display: flex;
-  margin-left: auto;
+  flex: 0 0 auto;
   gap: 8px;
 }
 
@@ -253,6 +258,10 @@ button {
   padding: 0 6px 12px 0;
 }
 
+.transcript-content {
+  min-height: 100%;
+}
+
 .session-title-row {
   margin-bottom: 24px;
 }
@@ -283,7 +292,7 @@ button {
   text-transform: uppercase;
 }
 
-.message p {
+.message > p {
   margin: 0;
   color: rgba(236, 242, 248, 0.9);
   font-size: 15px;
@@ -301,6 +310,201 @@ button {
 
 .message.user .message-role {
   display: none;
+}
+
+.markdown-body {
+  width: 100%;
+  max-width: 100%;
+  color: rgba(236, 242, 248, 0.9);
+  font-size: 15px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p {
+  margin: 6px 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 20px 0 10px;
+  color: #f3f7fb;
+  font-weight: 750;
+  line-height: 1.28;
+}
+
+.markdown-body h1 {
+  font-size: 24px;
+}
+
+.markdown-body h2 {
+  font-size: 21px;
+}
+
+.markdown-body h3 {
+  font-size: 18px;
+}
+
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-size: 16px;
+}
+
+.markdown-body a {
+  color: #9ec7ff;
+  text-decoration-color: rgba(158, 199, 255, 0.42);
+  text-underline-offset: 3px;
+}
+
+.markdown-body blockquote {
+  margin: 12px 0;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid rgba(113, 160, 255, 0.38);
+  color: rgba(220, 230, 243, 0.72);
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+
+.markdown-body li {
+  margin: 4px 0;
+}
+
+.markdown-body li > p {
+  margin: 0;
+}
+
+.markdown-body code {
+  border: 1px solid rgba(139, 162, 189, 0.16);
+  border-radius: 6px;
+  background: rgba(8, 15, 23, 0.82);
+  color: #dbeafe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.14em 0.34em;
+}
+
+.markdown-body pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-code-block,
+.markdown-code-highlight pre {
+  max-width: 100%;
+  margin: 12px 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid rgba(139, 162, 189, 0.16);
+  border-radius: 14px;
+  background: rgba(5, 11, 18, 0.9) !important;
+  color: rgba(235, 241, 248, 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.62;
+}
+
+.markdown-code-highlight pre {
+  white-space: pre;
+}
+
+.markdown-code-fallback {
+  white-space: pre;
+}
+
+.markdown-body table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 14px 0;
+  overflow: auto;
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 8px 10px;
+  border: 1px solid rgba(139, 162, 189, 0.18);
+}
+
+.markdown-body th {
+  background: rgba(30, 45, 64, 0.76);
+  color: #f3f7fb;
+  font-weight: 700;
+}
+
+.markdown-body tr:nth-child(even) td {
+  background: rgba(13, 23, 33, 0.48);
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 14px;
+}
+
+.markdown-mermaid {
+  display: grid;
+  max-width: 100%;
+  margin: 12px 0;
+  overflow: auto;
+  place-items: center;
+  padding: 14px;
+  border: 1px solid rgba(139, 162, 189, 0.16);
+  border-radius: 14px;
+  background: rgba(5, 11, 18, 0.72);
+}
+
+.markdown-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-html-preview {
+  width: 100%;
+  min-height: 420px;
+  margin: 12px 0;
+  border: 1px solid rgba(139, 162, 189, 0.16);
+  border-radius: 14px;
+  background: #ffffff;
+}
+
+.markdown-stream .stream-char {
+  opacity: 0;
+  animation: markdown-stream-fade 280ms cubic-bezier(0.33, 0, 0.67, 1) forwards;
+}
+
+.markdown-stream .stream-char-revealed {
+  opacity: 1;
+  animation: none;
+}
+
+@keyframes markdown-stream-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .transcript-end {
@@ -482,6 +686,63 @@ button {
 
 .reasoning-card {
   border-color: rgba(113, 160, 255, 0.18);
+}
+
+.reasoning-content,
+.reasoning-raw {
+  margin-top: 8px;
+}
+
+.reasoning-content .markdown-body,
+.reasoning-raw .markdown-body {
+  color: rgba(223, 232, 244, 0.78);
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.reasoning-content .markdown-body p,
+.reasoning-raw .markdown-body p {
+  margin: 5px 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: normal;
+}
+
+.reasoning-content .markdown-body h1,
+.reasoning-content .markdown-body h2,
+.reasoning-content .markdown-body h3,
+.reasoning-content .markdown-body h4,
+.reasoning-content .markdown-body h5,
+.reasoning-content .markdown-body h6,
+.reasoning-raw .markdown-body h1,
+.reasoning-raw .markdown-body h2,
+.reasoning-raw .markdown-body h3,
+.reasoning-raw .markdown-body h4,
+.reasoning-raw .markdown-body h5,
+.reasoning-raw .markdown-body h6 {
+  margin: 8px 0 5px;
+  color: rgba(235, 241, 248, 0.88);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.reasoning-content .markdown-body ul,
+.reasoning-content .markdown-body ol,
+.reasoning-raw .markdown-body ul,
+.reasoning-raw .markdown-body ol {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.reasoning-content .markdown-code-block,
+.reasoning-content .markdown-code-highlight pre,
+.reasoning-raw .markdown-code-block,
+.reasoning-raw .markdown-code-highlight pre {
+  margin: 8px 0;
+  padding: 10px;
+  border-radius: 12px;
+  font-size: 12px;
 }
 
 .tool-card {

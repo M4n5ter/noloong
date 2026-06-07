@@ -13,6 +13,8 @@ import {
 } from "../interaction/conversationState";
 import type { AppI18n } from "../i18n";
 import { CenteredStatus } from "./CenteredStatus";
+import { MarkdownMessage } from "../markdown/MarkdownMessage";
+import { MarkdownRenderer } from "../markdown/MarkdownRenderer";
 import { isNearTranscriptBottom, scrollTranscriptToEnd } from "./scroll";
 import { sessionTitle } from "./sessionHelpers";
 import type { InteractionState } from "./types";
@@ -107,19 +109,67 @@ export function TranscriptView({
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
 }) {
   const transcriptRef = useRef<HTMLDivElement | null>(null);
-  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const transcriptContentRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const pendingScrollFrameRef = useRef(false);
+  const programmaticScrollRef = useRef(false);
+  const programmaticScrollTokenRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
 
-  useEffect(() => {
+  const stickTranscriptToBottom = useCallback(() => {
     const transcript = transcriptRef.current;
-    const end = transcriptEndRef.current;
-    if (!transcript || !end || !shouldStickToBottomRef.current) {
+    if (!transcript || !shouldStickToBottomRef.current) {
       return;
     }
+    if (pendingScrollFrameRef.current) {
+      return;
+    }
+    pendingScrollFrameRef.current = true;
     requestAnimationFrame(() => {
-      scrollTranscriptToEnd(transcript, end);
+      pendingScrollFrameRef.current = false;
+      const currentTranscript = transcriptRef.current;
+      if (!currentTranscript || !shouldStickToBottomRef.current) {
+        return;
+      }
+      const token = programmaticScrollTokenRef.current + 1;
+      programmaticScrollTokenRef.current = token;
+      programmaticScrollRef.current = true;
+      scrollTranscriptToEnd(currentTranscript);
+      lastScrollTopRef.current = currentTranscript.scrollTop;
+      requestAnimationFrame(() => {
+        if (programmaticScrollTokenRef.current === token) {
+          programmaticScrollRef.current = false;
+        }
+      });
     });
-  }, [interaction]);
+  }, []);
+
+  useEffect(() => {
+    stickTranscriptToBottom();
+  }, [interaction, stickTranscriptToBottom]);
+
+  useEffect(() => {
+    const content = transcriptContentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      stickTranscriptToBottom();
+    });
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+    };
+  }, [interaction.status, stickTranscriptToBottom]);
+
+  const submitPrompt = useCallback(
+    async (text: string) => {
+      shouldStickToBottomRef.current = true;
+      await onSubmitPrompt(text);
+    },
+    [onSubmitPrompt],
+  );
 
   if (interaction.status === "loading") {
     return (
@@ -159,42 +209,58 @@ export function TranscriptView({
       <div
         className="transcript"
         onScroll={(event) => {
-          shouldStickToBottomRef.current = isNearTranscriptBottom(event.currentTarget);
+          const transcript = event.currentTarget;
+          const previousScrollTop = lastScrollTopRef.current;
+          const currentScrollTop = transcript.scrollTop;
+          lastScrollTopRef.current = currentScrollTop;
+
+          if (programmaticScrollRef.current) {
+            return;
+          }
+          if (currentScrollTop < previousScrollTop - 1) {
+            shouldStickToBottomRef.current = false;
+            return;
+          }
+          if (isNearTranscriptBottom(transcript)) {
+            shouldStickToBottomRef.current = true;
+          }
         }}
         ref={transcriptRef}
       >
-        <div className="session-title-row">
-          <div>
-            <h1>{title}</h1>
-            <p>{subtitle}</p>
-          </div>
-          <RunStatusPill
-            canAbort={canAbort}
-            conversation={interaction.conversation}
-            i18n={i18n}
-            refreshing={interaction.refreshing}
-            onAbortRun={onAbortRun}
-          />
-        </div>
-        {interaction.conversation.timeline.length === 0 ? (
-          <p className="muted">{i18n.t("transcript.empty")}</p>
-        ) : (
-          interaction.conversation.timeline.map((item) => (
-            <TimelineItemView
+        <div className="transcript-content" ref={transcriptContentRef}>
+          <div className="session-title-row">
+            <div>
+              <h1>{title}</h1>
+              <p>{subtitle}</p>
+            </div>
+            <RunStatusPill
+              canAbort={canAbort}
+              conversation={interaction.conversation}
               i18n={i18n}
-              item={item}
-              key={timelineItemKey(item)}
-              onResolveApproval={onResolveApproval}
-              onToggleReasoning={onToggleReasoning}
+              refreshing={interaction.refreshing}
+              onAbortRun={onAbortRun}
             />
-          ))
-        )}
-        <div aria-hidden="true" className="transcript-end" ref={transcriptEndRef} />
+          </div>
+          {interaction.conversation.timeline.length === 0 ? (
+            <p className="muted">{i18n.t("transcript.empty")}</p>
+          ) : (
+            interaction.conversation.timeline.map((item) => (
+              <TimelineItemView
+                i18n={i18n}
+                item={item}
+                key={timelineItemKey(item)}
+                onResolveApproval={onResolveApproval}
+                onToggleReasoning={onToggleReasoning}
+              />
+            ))
+          )}
+          <div aria-hidden="true" className="transcript-end" />
+        </div>
       </div>
       <PromptComposer
         disabled={!canSubmit}
         i18n={i18n}
-        onSubmit={onSubmitPrompt}
+        onSubmit={submitPrompt}
         placeholder={
           interaction.streamStatus === "ready"
             ? i18n.t("composer.write")
@@ -261,7 +327,7 @@ function MessageCard({ i18n, item }: { i18n: AppI18n; item: MessageTimelineItem 
   return (
     <article className={`message ${item.role}`}>
       <div className="message-role">{item.pending ? i18n.t("message.sending") : item.role}</div>
-      <p>{item.text}</p>
+      <MarkdownMessage role={item.role} streaming={Boolean(item.live)} text={item.text} />
     </article>
   );
 }
@@ -276,12 +342,11 @@ function ReasoningCard({
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
 }) {
   const summary = reasoningVisibleText(thought);
-  const hasDetails = summary.length > 0 || thought.rawText.length > 0;
-  const showDetails = thought.status === "running" || thought.expanded;
+  const rawText = thought.rawText;
+  const hasRawText = rawText.length > 0;
+  const showDetails = thought.status === "running";
   const canToggleDetails =
-    thought.status === "completed"
-      ? hasDetails
-      : thought.rawText.length > 0 && thought.summaryText.length > 0;
+    thought.status === "completed" ? hasRawText : hasRawText && thought.summaryText.length > 0;
   const title =
     thought.status === "completed"
       ? i18n.t("reasoning.thoughtFor", { duration: i18n.duration(thought.elapsedMs) })
@@ -303,12 +368,18 @@ function ReasoningCard({
       </div>
       {showDetails ? (
         summary ? (
-          <p>{summary}</p>
+          <div className="reasoning-content">
+            <MarkdownRenderer streaming={thought.status === "running"}>{summary}</MarkdownRenderer>
+          </div>
         ) : (
           <p className="muted">{i18n.t("reasoning.empty")}</p>
         )
       ) : null}
-      {thought.expanded && thought.rawText ? <pre>{thought.rawText}</pre> : null}
+      {thought.expanded && rawText ? (
+        <div className="reasoning-raw">
+          <MarkdownRenderer>{rawText}</MarkdownRenderer>
+        </div>
+      ) : null}
     </article>
   );
 }
