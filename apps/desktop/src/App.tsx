@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState } from "react";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppLaunchOptions, AppRuntimeRestartResult } from "./generated/contracts";
 import { ChatCanvas } from "./chat/ChatCanvas";
 import type { BootstrapState } from "./chat/types";
@@ -24,12 +24,13 @@ export type AppShellDependencies = {
   connectInteractionDisplayStream?: typeof connectDefaultInteractionDisplayStream;
 };
 
-type AppRoute = "chat" | "settings";
-const OPEN_SETTINGS_EVENT = "noloong-open-settings";
+type AppSurface = "chat" | "settings";
+const MAIN_WINDOW_LABEL = "main";
+const RUNTIME_RESTART_EVENT = "noloong-runtime-restarted";
 
 export function App({ dependencies = {} }: { dependencies?: AppShellDependencies }) {
   const [bootstrap, setBootstrap] = useState<BootstrapState>({ status: "loading" });
-  const [route, setRoute] = useState<AppRoute>("chat");
+  const surface = appSurface();
   const bootstrapApp = dependencies.bootstrap ?? defaultBootstrap;
   const createClient =
     dependencies.createInteractionClient ??
@@ -43,7 +44,7 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
     bootstrap.status === "ready" ? bootstrap.options.locale ?? "en" : null,
   );
   const i18n = useMemo(() => createI18n(locale), [locale]);
-  const applyRuntimeRestart = (result: AppRuntimeRestartResult) => {
+  const applyRuntimeRestart = useCallback((result: AppRuntimeRestartResult) => {
     setBootstrap((current) =>
       current.status === "ready"
         ? {
@@ -56,7 +57,16 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
           }
         : current,
     );
-  };
+  }, []);
+  const handleRuntimeRestart = useCallback(
+    (result: AppRuntimeRestartResult) => {
+      applyRuntimeRestart(result);
+      if (surface === "settings") {
+        notifyMainRuntimeRestart(result);
+      }
+    },
+    [applyRuntimeRestart, surface],
+  );
 
   useEffect(() => {
     let active = true;
@@ -78,17 +88,17 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
     };
   }, [bootstrapApp]);
 
-  useEffect(() => scheduleRenderProbe(), [bootstrap.status, route]);
+  useEffect(() => scheduleRenderProbe(), [bootstrap.status, surface]);
 
   useEffect(() => {
-    if (bootstrap.status !== "ready" || !isTauriRuntime()) {
+    if (!isTauriRuntime()) {
       return;
     }
 
     let active = true;
     let unlisten: (() => void) | null = null;
-    void listen(OPEN_SETTINGS_EVENT, () => {
-      setRoute("settings");
+    void listen<AppRuntimeRestartResult>(RUNTIME_RESTART_EVENT, (event) => {
+      applyRuntimeRestart(event.payload);
     }).then((dispose) => {
       if (!active) {
         dispose();
@@ -101,7 +111,7 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
       active = false;
       unlisten?.();
     };
-  }, [bootstrap.status]);
+  }, [applyRuntimeRestart]);
 
   useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
@@ -110,7 +120,7 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
       }
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault();
-        setRoute("settings");
+        openSettingsSurface();
       }
     }
 
@@ -118,7 +128,7 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [bootstrap.status]);
 
-  const title = bootstrap.status === "ready" ? null : headerTitle(route, bootstrap, i18n);
+  const title = bootstrap.status === "ready" ? null : headerTitle(bootstrap, i18n);
   const subtitle = headerSubtitle(bootstrap, i18n);
 
   return (
@@ -132,12 +142,11 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
         ) : null}
         <div className="title-drag-spacer" />
       </header>
-      {route === "settings" && bootstrap.status === "ready" ? (
+      {surface === "settings" && bootstrap.status === "ready" ? (
         <SettingsView
           i18n={i18n}
           launchOptions={bootstrap.options}
-          onBack={() => setRoute("chat")}
-          onRuntimeRestart={applyRuntimeRestart}
+          onRuntimeRestart={handleRuntimeRestart}
         />
       ) : (
         <ChatCanvas
@@ -145,18 +154,48 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
           connectDisplayStream={connectDisplayStream}
           createInteractionClient={createClient}
           i18n={i18n}
-          onOpenSettings={() => setRoute("settings")}
+          onOpenSettings={openSettingsSurface}
         />
       )}
     </main>
   );
 }
 
-function headerTitle(route: AppRoute, bootstrap: BootstrapState, i18n: AppI18n): string {
+function appSurface(): AppSurface {
+  if (typeof window === "undefined") {
+    return "chat";
+  }
+  return new URLSearchParams(window.location.search).get("surface") === "settings"
+    ? "settings"
+    : "chat";
+}
+
+function openSettingsSurface(): void {
+  if (isTauriRuntime()) {
+    void invoke("app_open_settings_window");
+    return;
+  }
+  window.open(settingsSurfaceUrl(), "noloong-settings", "width=920,height=720");
+}
+
+function settingsSurfaceUrl(): string {
+  const url = new URL(window.location.href);
+  url.searchParams.set("surface", "settings");
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function notifyMainRuntimeRestart(result: AppRuntimeRestartResult): void {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  void emitTo(MAIN_WINDOW_LABEL, RUNTIME_RESTART_EVENT, result).catch(() => undefined);
+}
+
+function headerTitle(bootstrap: BootstrapState, i18n: AppI18n): string {
   if (bootstrap.status !== "ready") {
     return i18n.t("app.brand");
   }
-  return route === "settings" ? i18n.t("settings.title") : i18n.t("nav.chat");
+  return i18n.t("nav.chat");
 }
 
 function headerSubtitle(bootstrap: BootstrapState, i18n: AppI18n): string | null {

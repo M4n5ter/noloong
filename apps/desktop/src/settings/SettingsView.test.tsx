@@ -25,6 +25,7 @@ vi.mock("./api", () => ({
 describe("SettingsView", () => {
   afterEach(() => {
     cleanup();
+    document.title = "";
   });
 
   beforeEach(() => {
@@ -55,7 +56,6 @@ describe("SettingsView", () => {
       <SettingsView
         i18n={createI18n("en")}
         launchOptions={{}}
-        onBack={() => {}}
         onRuntimeRestart={() => {}}
       />,
     );
@@ -86,7 +86,6 @@ describe("SettingsView", () => {
       <SettingsView
         i18n={createI18n("en")}
         launchOptions={{}}
-        onBack={() => {}}
         onRuntimeRestart={() => {}}
       />,
     );
@@ -103,6 +102,26 @@ describe("SettingsView", () => {
     expect(modelField).toHaveValue("gpt-5.4");
   });
 
+  it("uses the active settings pane as the window title", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Provider" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Provider"));
+
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+
+    expect(await screen.findByRole("heading", { name: "Storage" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Storage"));
+  });
+
   it("keeps the profile config path out of visible settings chrome", async () => {
     const user = userEvent.setup();
 
@@ -110,7 +129,6 @@ describe("SettingsView", () => {
       <SettingsView
         i18n={createI18n("en")}
         launchOptions={{ runtimeControlEndpoint: { httpUrl: "http://127.0.0.1:7777" } }}
-        onBack={() => {}}
         onRuntimeRestart={() => {}}
       />,
     );

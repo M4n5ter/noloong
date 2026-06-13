@@ -1,8 +1,8 @@
 use crate::{AppError, AppLaunchOptions};
-use tauri::{Emitter, Manager};
+use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-const OPEN_SETTINGS_EVENT: &str = "noloong-open-settings";
 const OPEN_SETTINGS_MENU_ID: &str = "open-settings";
+const SETTINGS_WINDOW_LABEL: &str = "settings";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -20,6 +20,13 @@ fn app_bootstrap(state: tauri::State<'_, AppState>) -> AppLaunchOptions {
     app_bootstrap_payload(state.inner())
 }
 
+#[tauri::command]
+fn app_open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_settings_window(&app)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn app_bootstrap_payload(state: &AppState) -> AppLaunchOptions {
     state.launch_options.clone()
 }
@@ -30,7 +37,7 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
         .menu(app_menu)
         .on_menu_event(|app, event| {
             if event.id() == OPEN_SETTINGS_MENU_ID {
-                let _ = app.emit_to("main", OPEN_SETTINGS_EVENT, ());
+                let _ = open_settings_window(app);
             }
         })
         .manage(AppState {
@@ -46,6 +53,7 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
         })
         .invoke_handler(tauri::generate_handler![
             app_bootstrap,
+            app_open_settings_window,
             crate::profile_config::app_profile_config_load,
             crate::profile_config::app_profile_config_validate,
             crate::profile_config::app_profile_config_save,
@@ -57,6 +65,31 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
         ])
         .run(tauri::generate_context!())
         .map_err(|error| AppError::Launch(error.to_string()))
+}
+
+fn open_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
+        window.show()?;
+        window.set_focus()?;
+        return Ok(window);
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        SETTINGS_WINDOW_LABEL,
+        WebviewUrl::App("index.html?surface=settings".into()),
+    )
+    .title("Settings")
+    .inner_size(920.0, 720.0)
+    .min_inner_size(760.0, 560.0)
+    .resizable(true)
+    .minimizable(false)
+    .maximizable(false)
+    .focused(true)
+    .build()?;
+    window.show()?;
+    window.set_focus()?;
+    Ok(window)
 }
 
 fn app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {

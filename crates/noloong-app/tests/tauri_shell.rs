@@ -42,7 +42,7 @@ fn tauri_shell_declares_noloong_app_identity() {
 }
 
 #[test]
-fn main_window_capability_allows_native_title_bar_dragging() {
+fn window_capabilities_stay_scoped_to_their_surfaces() {
     let capability = read_json(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("capabilities")
@@ -68,6 +68,41 @@ fn main_window_capability_allows_native_title_bar_dragging() {
     assert!(
         !permissions.iter().any(|value| value == "dialog:default"),
         "File attachments should not grant broader save/message dialog permissions",
+    );
+    assert!(
+        !permissions
+            .iter()
+            .any(|value| value == "core:window:allow-set-title"),
+        "Only the settings window should be able to set its title",
+    );
+
+    let settings_capability = read_json(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("capabilities")
+            .join("settings.json"),
+    );
+    assert_eq!(settings_capability["identifier"], "settings-window");
+    assert_eq!(settings_capability["windows"][0], "settings");
+    let settings_permissions = settings_capability["permissions"]
+        .as_array()
+        .expect("settings window capability permissions");
+    assert!(
+        settings_permissions
+            .iter()
+            .any(|value| value == "core:window:allow-set-title"),
+        "Settings pane changes update the native settings window title",
+    );
+    assert!(
+        settings_permissions
+            .iter()
+            .any(|value| value == "core:event:allow-emit-to"),
+        "Settings save/apply must notify the main chat window about runtime restarts",
+    );
+    assert!(
+        !settings_permissions
+            .iter()
+            .any(|value| value == "dialog:allow-open"),
+        "Settings does not need file attachment dialog permissions",
     );
 }
 

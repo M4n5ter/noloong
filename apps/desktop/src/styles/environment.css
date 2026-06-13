@@ -47,17 +47,6 @@
   white-space: nowrap;
 }
 
-.settings-back-button {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border: 1px solid rgba(243, 239, 228, 0.1);
-  border-radius: 999px;
-  background: rgba(32, 34, 27, 0.42);
-  color: rgba(243, 239, 228, 0.64);
-}
-
 .settings-pane-nav {
   display: grid;
   align-content: start;

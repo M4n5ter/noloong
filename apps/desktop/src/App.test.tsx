@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppRuntimeRestartResult } from "./generated/contracts";
 import { App } from "./App";
 import {
   observeDevInteractionRuntimeForTests,
@@ -20,8 +21,30 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
 
+const tauriEvent = vi.hoisted(() => ({
+  emitTo: vi.fn(),
+  listen: vi.fn(),
+  listeners: new Map<string, (event: { payload: AppRuntimeRestartResult }) => void>(),
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  emitTo: tauriEvent.emitTo,
+  listen: tauriEvent.listen,
+}));
+
 describe("Noloong app chat regression harness", () => {
   beforeEach(() => {
+    window.history.replaceState(null, "", "/");
+    vi.spyOn(window, "open").mockImplementation(() => null);
+    tauriEvent.emitTo.mockReset();
+    tauriEvent.listen.mockReset();
+    tauriEvent.listeners.clear();
+    tauriEvent.listen.mockImplementation(async (event, handler) => {
+      tauriEvent.listeners.set(event, handler);
+      return () => {
+        tauriEvent.listeners.delete(event);
+      };
+    });
     resetDevInteractionRuntimeForTests();
     vi.mocked(open).mockReset();
     let frameTime = 0;
@@ -34,6 +57,7 @@ describe("Noloong app chat regression harness", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -198,7 +222,7 @@ describe("Noloong app chat regression harness", () => {
     expect(document.body).not.toHaveTextContent("default · running");
   });
 
-  it("opens settings with the macOS settings shortcut and returns to chat", async () => {
+  it("opens settings with the macOS settings shortcut without replacing the chat surface", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
     const user = userEvent.setup();
 
@@ -207,10 +231,11 @@ describe("Noloong app chat regression harness", () => {
     await screen.findByRole("heading", { name: "What should Noloong think through?" });
     await user.keyboard("{Meta>},{/Meta}");
 
-    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Back to chat" }));
-
+    expect(window.open).toHaveBeenCalledWith(
+      "/?surface=settings",
+      "noloong-settings",
+      "width=920,height=720",
+    );
     expect(screen.getByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
   });
@@ -224,22 +249,69 @@ describe("Noloong app chat regression harness", () => {
     await screen.findByRole("heading", { name: "What should Noloong think through?" });
     await user.keyboard("{Control>},{/Control}");
 
-    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeInTheDocument();
+    expect(window.open).toHaveBeenCalledWith(
+      "/?surface=settings",
+      "noloong-settings",
+      "width=920,height=720",
+    );
   });
 
-  it("opens an environment pane directly from Provider", async () => {
+  it("renders settings as a dedicated surface without a return-to-chat control", async () => {
+    window.history.replaceState(null, "", "/?surface=settings");
     const runtime = new FakeInteractionRuntime(emptySession());
-    const user = userEvent.setup();
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "What should Noloong think through?" });
-    await user.keyboard("{Meta>},{/Meta}");
-    await screen.findByRole("button", { name: "Back to chat" });
-
-    await user.click(screen.getByRole("button", { name: "Provider" }));
-
     expect(await screen.findByRole("heading", { name: "Provider" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "What should Noloong think through?" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back to chat" })).not.toBeInTheDocument();
+  });
+
+  it("reconnects the main chat runtime after a settings-window restart event", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const createInteractionClient = vi.fn(runtime.createClient);
+    const connectDisplayStream = vi.fn(runtime.connectDisplayStream);
+
+    render(
+      <App
+        dependencies={{
+          ...dependenciesFor(runtime),
+          createInteractionClient,
+          connectInteractionDisplayStream: connectDisplayStream,
+        }}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "What should Noloong think through?" });
+    expect(createInteractionClient).toHaveBeenCalledWith({
+      wsUrl: "ws://127.0.0.1:7777/jsonrpc/ws",
+    });
+
+    const restartListener = tauriEvent.listeners.get("noloong-runtime-restarted");
+    if (!restartListener) {
+      throw new Error("Expected the main window to listen for runtime restart events");
+    }
+
+    act(() => {
+      restartListener({
+        payload: {
+          interactionEndpoint: { wsUrl: "ws://127.0.0.1:8888/jsonrpc/ws" },
+          interactionStatus: {
+            status: "ready",
+            serverName: "restarted-runtime",
+            protocolVersion: "test-2",
+            profiles: [{ profileId: "default", displayName: "Default" }],
+          },
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(createInteractionClient).toHaveBeenCalledWith({
+        wsUrl: "ws://127.0.0.1:8888/jsonrpc/ws",
+      }),
+    );
   });
 
   it("keeps session controls inside the composer capsule with accessible names", async () => {

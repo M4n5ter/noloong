@@ -1,6 +1,6 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Braces,
-  ChevronLeft,
   Copy,
   Database,
   Plug,
@@ -23,6 +23,7 @@ import type {
   ProfileEventStoreConfig,
   RegistryStoreConfig,
 } from "../generated/contracts";
+import { isTauriRuntime } from "../devFallback";
 import type { AppI18n } from "../i18n";
 import {
   completeProfileConfig,
@@ -66,12 +67,10 @@ type SettingsNode =
 export function SettingsView({
   i18n,
   launchOptions,
-  onBack,
   onRuntimeRestart,
 }: {
   i18n: AppI18n;
   launchOptions: AppLaunchOptions;
-  onBack: () => void;
   onRuntimeRestart: (result: AppRuntimeRestartResult) => void;
 }) {
   const [state, setState] = useState<SettingsViewState>({ status: "loading" });
@@ -179,6 +178,16 @@ export function SettingsView({
     return completeProfileConfig(text, byteOffset);
   }, []);
 
+  const readyDraft = state.status === "ready" ? state.draft : null;
+  const readyConfig = readyDraft?.config ?? null;
+  const panelNode = readyConfig ? activeNode : "jsonc";
+  const windowTitle =
+    state.status === "ready" ? settingsNodeLabel(panelNode, i18n) : "Settings";
+
+  useEffect(() => {
+    syncSettingsWindowTitle(windowTitle);
+  }, [windowTitle]);
+
   if (state.status === "loading") {
     return <SettingsStatus title={i18n.t("settings.loadingTitle")} detail={i18n.t("settings.loadingDetail")} />;
   }
@@ -189,7 +198,6 @@ export function SettingsView({
   const draft = state.draft;
   const config = draft.config;
   const profile = selectedProfile(draft);
-  const panelNode = config ? activeNode : "jsonc";
   const showSaveActions = draft.dirty || draft.saving;
   const hasFeedback = state.notice != null || draft.error != null;
 
@@ -197,14 +205,6 @@ export function SettingsView({
     <section className="settings-workbench" data-render-surface="environment">
       <aside className="settings-workbench-sidebar">
         <header className="settings-workbench-heading">
-          <button
-            aria-label={i18n.t("settings.backToChat")}
-            className="settings-back-button"
-            onClick={onBack}
-            type="button"
-          >
-            <ChevronLeft size={16} />
-          </button>
           <div>
             <h1 data-render-heading>{i18n.t("settings.environmentTitle")}</h1>
             <p>{profile?.displayName ?? i18n.t("settings.currentProfile")}</p>
@@ -234,7 +234,7 @@ export function SettingsView({
       <section className="settings-workbench-detail">
         <div className="lens-header">
           <div>
-            <h2>{settingsNodeLabel(panelNode, i18n)}</h2>
+            <h2>{windowTitle}</h2>
           </div>
           {showSaveActions ? (
             <div className="lens-actions">
@@ -713,6 +713,14 @@ function settingsNodeSubtitle(
     case "jsonc":
       return i18n.t("settings.savedState");
   }
+}
+
+function syncSettingsWindowTitle(title: string): void {
+  document.title = title;
+  if (!isTauriRuntime()) {
+    return;
+  }
+  void getCurrentWindow().setTitle(title).catch(() => undefined);
 }
 
 function defaultPlugin(): AgentPluginDeclaration {

@@ -5,7 +5,6 @@ export type UiLocale = "en" | "zh";
 export type I18nKey =
   | "app.brand"
   | "nav.chat"
-  | "nav.settings"
   | "header.starting"
   | "header.failed"
   | "header.starterDraft"
@@ -73,8 +72,6 @@ export type I18nKey =
   | "settings.loadingTitle"
   | "settings.loadingDetail"
   | "settings.failedTitle"
-  | "settings.backToChat"
-  | "settings.title"
   | "settings.save"
   | "settings.saved"
   | "settings.savedAndApplied"
@@ -124,7 +121,6 @@ const messages = {
   en: {
     "app.brand": "Noloong",
     "nav.chat": "Chat",
-    "nav.settings": "Settings",
     "header.starting": "Starting runtime",
     "header.failed": "Bootstrap failed",
     "header.starterDraft": "starter draft",
@@ -193,8 +189,6 @@ const messages = {
     "settings.loadingTitle": "Loading settings",
     "settings.loadingDetail": "Reading profile configuration.",
     "settings.failedTitle": "Settings failed",
-    "settings.backToChat": "Back to chat",
-    "settings.title": "Settings",
     "settings.save": "Save",
     "settings.saved": "Saved",
     "settings.savedAndApplied": "Saved and applied",
@@ -244,7 +238,6 @@ const messages = {
   zh: {
     "app.brand": "Noloong",
     "nav.chat": "聊天",
-    "nav.settings": "设置",
     "header.starting": "正在启动运行时",
     "header.failed": "启动失败",
     "header.starterDraft": "新配置草稿",
@@ -312,8 +305,6 @@ const messages = {
     "settings.loadingTitle": "正在加载设置",
     "settings.loadingDetail": "正在读取配置。",
     "settings.failedTitle": "设置加载失败",
-    "settings.backToChat": "返回聊天",
-    "settings.title": "设置",
     "settings.save": "保存",
     "settings.saved": "已保存",
     "settings.savedAndApplied": "已保存并应用",
