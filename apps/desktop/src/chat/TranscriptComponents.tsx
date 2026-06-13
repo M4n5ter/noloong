@@ -210,11 +210,9 @@ export function TranscriptView({
           ref={transcriptContentRef}
         >
           {timelineEmpty ? (
-            <div className="session-title-row">
-              <div>
-                <h1 data-render-heading>{title}</h1>
-                <p>{subtitle}</p>
-              </div>
+            <div className="empty-session-heading">
+              <h1 data-render-heading>{title}</h1>
+              <p>{subtitle}</p>
             </div>
           ) : null}
           {timelineEmpty ? (

@@ -74,16 +74,6 @@
 }
 
 @media (max-width: 760px) {
-  .session-title-row {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .transcript-content-empty {
-    padding-top: 26px;
-  }
-
   .composer {
     width: calc(100% - 20px);
   }
