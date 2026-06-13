@@ -616,6 +616,7 @@
   z-index: 2;
   height: auto;
   overflow: hidden;
+  isolation: isolate;
   border: 1px solid rgba(243, 239, 228, 0.13);
   border-radius: 24px;
   background: rgba(23, 25, 20, 0.94);
@@ -627,38 +628,39 @@
   position: absolute;
   right: 1px;
   left: 1px;
-  z-index: 1;
-  height: 34px;
+  z-index: 2;
+  height: 42px;
   --composer-edge-radius: 0 0 23px 23px;
   --composer-edge-direction: 0deg;
   pointer-events: none;
   content: "";
   opacity: 0;
   transition: opacity 160ms ease;
-  -webkit-backdrop-filter: blur(7px) saturate(1.08);
-  backdrop-filter: blur(7px) saturate(1.08);
   border-radius: var(--composer-edge-radius);
+  -webkit-backdrop-filter: blur(10px) saturate(1.06);
+  backdrop-filter: blur(10px) saturate(1.06);
   background:
     linear-gradient(
       var(--composer-edge-direction),
-      rgba(243, 239, 228, 0.08),
-      rgba(243, 239, 228, 0) 34%
+      rgba(243, 239, 228, 0.06),
+      rgba(243, 239, 228, 0) 32%
     ),
     linear-gradient(
       var(--composer-edge-direction),
       rgba(23, 25, 20, 0.98),
+      rgba(23, 25, 20, 0.76) 42%,
       rgba(23, 25, 20, 0)
     );
   -webkit-mask-image: linear-gradient(
     var(--composer-edge-direction),
     #000 0%,
-    #000 46%,
+    #000 42%,
     transparent 100%
   );
   mask-image: linear-gradient(
     var(--composer-edge-direction),
     #000 0%,
-    #000 46%,
+    #000 42%,
     transparent 100%
   );
 }
@@ -686,6 +688,12 @@
   .composer-editor-shell.expanded::after {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+    background: linear-gradient(
+      var(--composer-edge-direction),
+      rgba(23, 25, 20, 0.98),
+      rgba(23, 25, 20, 0.9) 46%,
+      rgba(23, 25, 20, 0)
+    );
   }
 }
 
@@ -718,6 +726,8 @@
 
 .composer-editor-shell.expanded .composer-input {
   display: block;
+  position: relative;
+  z-index: 1;
   height: min(224px, 38vh);
   min-height: 128px;
   max-height: min(224px, 38vh);

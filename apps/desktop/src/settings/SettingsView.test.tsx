@@ -68,6 +68,38 @@ describe("SettingsView", () => {
     finishSave(profileDocument());
     await waitFor(() => expect(model).not.toBeDisabled());
   });
+
+  it("presents the selected environment before the editable fields", async () => {
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onBack={() => {}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    const summary = await screen.findByLabelText("Current environment");
+
+    expect(summary).toHaveTextContent("Provider");
+    expect(summary).toHaveTextContent("ChatGPT");
+    expect(summary).toHaveTextContent("Model");
+    expect(summary).toHaveTextContent("gpt-5.4");
+    expect(summary).toHaveTextContent("Reasoning");
+    expect(summary).toHaveTextContent("medium / auto");
+    expect(summary).toHaveTextContent("Context");
+    expect(summary).toHaveTextContent("No plugins");
+
+    const modelField = screen
+      .getAllByLabelText("Model")
+      .find((element): element is HTMLInputElement => element instanceof HTMLInputElement);
+    if (!modelField) {
+      throw new Error("Expected a model input field");
+    }
+    expect(
+      summary.compareDocumentPosition(modelField) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
 });
 
 function profileDocument(): AppProfileConfigDocument {

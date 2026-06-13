@@ -81,6 +81,16 @@ export type I18nKey =
   | "settings.savedExternal"
   | "settings.environmentTitle"
   | "settings.currentProfile"
+  | "settings.environmentSummaryLabel"
+  | "settings.summaryProvider"
+  | "settings.summaryModel"
+  | "settings.summaryReasoning"
+  | "settings.summaryContext"
+  | "settings.summaryReasoningOff"
+  | "settings.summaryReasoningDefault"
+  | "settings.summaryPluginsNone"
+  | "settings.summaryPluginsOne"
+  | "settings.summaryPluginsMany"
   | "settings.discard"
   | "settings.saving"
   | "settings.profile"
@@ -201,6 +211,16 @@ const messages = {
     "settings.savedExternal": "Saved {path}. External runtime must be restarted outside the app.",
     "settings.environmentTitle": "Environment",
     "settings.currentProfile": "Current profile",
+    "settings.environmentSummaryLabel": "Current environment",
+    "settings.summaryProvider": "Provider",
+    "settings.summaryModel": "Model",
+    "settings.summaryReasoning": "Reasoning",
+    "settings.summaryContext": "Context",
+    "settings.summaryReasoningOff": "Off",
+    "settings.summaryReasoningDefault": "Default",
+    "settings.summaryPluginsNone": "No plugins",
+    "settings.summaryPluginsOne": "1 plugin",
+    "settings.summaryPluginsMany": "{count} plugins",
     "settings.discard": "Discard",
     "settings.saving": "Saving",
     "settings.profile": "Profile",
@@ -319,6 +339,16 @@ const messages = {
     "settings.savedExternal": "已保存 {path}。外部运行时需要在应用外重启。",
     "settings.environmentTitle": "环境",
     "settings.currentProfile": "当前配置档",
+    "settings.environmentSummaryLabel": "当前环境",
+    "settings.summaryProvider": "提供商",
+    "settings.summaryModel": "模型",
+    "settings.summaryReasoning": "推理",
+    "settings.summaryContext": "上下文",
+    "settings.summaryReasoningOff": "关闭",
+    "settings.summaryReasoningDefault": "默认",
+    "settings.summaryPluginsNone": "没有插件",
+    "settings.summaryPluginsOne": "1 个插件",
+    "settings.summaryPluginsMany": "{count} 个插件",
     "settings.discard": "放弃",
     "settings.saving": "保存中",
     "settings.profile": "配置档",
