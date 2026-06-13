@@ -1,14 +1,14 @@
 .chat-surface {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
-}
-
-.chat-surface.runtime-ready {
-  grid-template-columns: minmax(0, 1fr) 56px;
-  grid-template-rows: minmax(0, 1fr);
-  column-gap: clamp(16px, 2.8vw, 36px);
-  align-items: stretch;
+  --session-rail-width: 44px;
+  --session-rail-inset: clamp(14px, 2.4vw, 28px);
+  --session-rail-gap: 14px;
+  --session-rail-clearance: calc(
+    var(--session-rail-width) + var(--session-rail-inset) + var(--session-rail-gap)
+  );
 }
 
 .conversation-surface {
@@ -533,26 +533,25 @@
 }
 
 .session-toolbar {
-  position: relative;
+  position: absolute;
   z-index: 4;
+  top: 50%;
+  right: var(--session-rail-inset);
   display: grid;
-  width: 44px;
+  width: var(--session-rail-width);
   gap: 6px;
-  align-self: center;
-  justify-self: end;
   padding: 4px;
-  --session-rail-border: rgba(243, 239, 228, 0.045);
-  --session-rail-bg: rgba(23, 25, 20, 0.16);
-  --session-rail-highlight: rgba(243, 239, 228, 0.018);
-  --session-rail-shadow: rgba(0, 0, 0, 0.08);
-  --session-rail-opacity: 0.72;
+  --session-rail-border: rgba(243, 239, 228, 0.025);
+  --session-rail-bg: rgba(23, 25, 20, 0.08);
+  --session-rail-highlight: rgba(243, 239, 228, 0.01);
+  --session-rail-shadow: rgba(0, 0, 0, 0.04);
   border: 1px solid var(--session-rail-border);
   border-radius: 999px;
   background: var(--session-rail-bg);
   box-shadow:
     inset 0 1px 0 var(--session-rail-highlight),
     0 18px 48px var(--session-rail-shadow);
-  opacity: var(--session-rail-opacity);
+  transform: translateY(-50%);
   transition:
     border-color 160ms ease,
     background 160ms ease,
@@ -566,7 +565,6 @@
   --session-rail-bg: rgba(23, 25, 20, 0.4);
   --session-rail-highlight: rgba(243, 239, 228, 0.035);
   --session-rail-shadow: rgba(0, 0, 0, 0.18);
-  --session-rail-opacity: 1;
 }
 
 .session-tool {
@@ -576,7 +574,7 @@
   height: 36px;
   --session-tool-border: transparent;
   --session-tool-bg: transparent;
-  --session-tool-color: rgba(243, 239, 228, 0.38);
+  --session-tool-color: rgba(243, 239, 228, 0.52);
   align-items: center;
   justify-items: center;
   padding: 0;
@@ -642,6 +640,17 @@
 .session-tool:focus-visible::after {
   opacity: 1;
   transform: translate(0, -50%);
+}
+
+@media (max-width: 1100px) {
+  .conversation-surface.runtime-ready {
+    max-width: none;
+    padding-right: var(--session-rail-clearance);
+  }
+
+  .session-tool::after {
+    display: none;
+  }
 }
 
 .sessions-panel {

@@ -13,23 +13,6 @@
     padding: 72px 14px 18px;
   }
 
-  .chat-surface.runtime-ready {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .conversation-surface.runtime-ready {
-    max-width: none;
-    padding-right: 66px;
-  }
-
-  .session-toolbar {
-    position: absolute;
-    top: 50%;
-    right: 14px;
-    bottom: auto;
-    transform: translateY(-50%);
-  }
-
   .settings-workbench {
     grid-template-columns: minmax(0, 1fr);
     align-content: start;
