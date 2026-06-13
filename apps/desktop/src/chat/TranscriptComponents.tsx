@@ -20,6 +20,7 @@ import { isNearTranscriptBottom, scrollTranscriptToEnd } from "./scroll";
 import { sessionContextLabel, sessionTitle } from "./sessionHelpers";
 import type { InteractionState } from "./types";
 import type { PromptSubmission } from "./attachments";
+import type { ConversationMenuState } from "./conversationCommands";
 import { PromptComposer } from "./PromptComposer";
 
 export function SessionList({
@@ -69,6 +70,7 @@ export function TranscriptView({
   i18n,
   interaction,
   onAbortRun,
+  onConversationMenuStateChange,
   onCreateSession,
   onOpenSettings,
   onOpenSessions,
@@ -79,6 +81,7 @@ export function TranscriptView({
   i18n: AppI18n;
   interaction: InteractionState;
   onAbortRun: () => Promise<void>;
+  onConversationMenuStateChange: (state: ConversationMenuState) => void;
   onCreateSession: () => void;
   onOpenSettings: () => void;
   onOpenSessions: () => void;
@@ -239,6 +242,7 @@ export function TranscriptView({
         disabled={!canSubmit}
         i18n={i18n}
         onAbortRun={canAbort ? onAbortRun : undefined}
+        onCommandAvailabilityChange={onConversationMenuStateChange}
         onCreateSession={onCreateSession}
         onOpenSessions={onOpenSessions}
         onSubmit={submitPrompt}

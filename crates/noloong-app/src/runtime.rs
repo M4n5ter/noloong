@@ -1,8 +1,22 @@
 use crate::{AppError, AppLaunchOptions};
-use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use serde::Deserialize;
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const OPEN_SETTINGS_MENU_ID: &str = "open-settings";
+const FOCUS_COMPOSER_MENU_ID: &str = "focus-composer";
+const SEND_MESSAGE_MENU_ID: &str = "send-message";
+const STOP_RESPONSE_MENU_ID: &str = "stop-response";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
+const MAIN_WINDOW_LABEL: &str = "main";
+const CONVERSATION_MENU_COMMAND_EVENT: &str = "noloong-conversation-menu-command";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversationMenuState {
+    can_focus_composer: bool,
+    can_send_message: bool,
+    can_stop_response: bool,
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -27,6 +41,14 @@ fn app_open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn app_update_conversation_menu_state(
+    app: tauri::AppHandle,
+    state: ConversationMenuState,
+) -> Result<(), String> {
+    update_conversation_menu_state(&app, state).map_err(|error| error.to_string())
+}
+
 fn app_bootstrap_payload(state: &AppState) -> AppLaunchOptions {
     state.launch_options.clone()
 }
@@ -35,10 +57,18 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .menu(app_menu)
-        .on_menu_event(|app, event| {
-            if event.id() == OPEN_SETTINGS_MENU_ID {
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            OPEN_SETTINGS_MENU_ID => {
                 let _ = open_settings_window(app);
             }
+            FOCUS_COMPOSER_MENU_ID | SEND_MESSAGE_MENU_ID | STOP_RESPONSE_MENU_ID => {
+                let _ = app.emit_to(
+                    MAIN_WINDOW_LABEL,
+                    CONVERSATION_MENU_COMMAND_EVENT,
+                    event.id().as_ref(),
+                );
+            }
+            _ => {}
         })
         .manage(AppState {
             launch_options: options.with_current_app_version(),
@@ -61,13 +91,57 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
             crate::profile_config::app_profile_config_completions,
             crate::render_probe::app_render_probe_enabled,
             crate::render_probe::app_render_probe_report,
-            crate::runtime_control::app_runtime_restart_interaction
+            crate::runtime_control::app_runtime_restart_interaction,
+            app_update_conversation_menu_state
         ])
         .run(tauri::generate_context!())
         .map_err(|error| AppError::Launch(error.to_string()))
 }
 
-fn open_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+fn update_conversation_menu_state<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: ConversationMenuState,
+) -> tauri::Result<()> {
+    set_menu_item_enabled(app, FOCUS_COMPOSER_MENU_ID, state.can_focus_composer)?;
+    set_menu_item_enabled(app, SEND_MESSAGE_MENU_ID, state.can_send_message)?;
+    set_menu_item_enabled(app, STOP_RESPONSE_MENU_ID, state.can_stop_response)
+}
+
+fn set_menu_item_enabled<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    id: &str,
+    enabled: bool,
+) -> tauri::Result<()> {
+    if let Some(menu) = app.menu() {
+        set_menu_item_enabled_in_items(menu.items()?, id, enabled)?;
+    }
+    Ok(())
+}
+
+fn set_menu_item_enabled_in_items<R: tauri::Runtime>(
+    items: Vec<tauri::menu::MenuItemKind<R>>,
+    id: &str,
+    enabled: bool,
+) -> tauri::Result<bool> {
+    for item in items {
+        if item.id().as_ref() == id {
+            if let Some(menu_item) = item.as_menuitem() {
+                menu_item.set_enabled(enabled)?;
+                return Ok(true);
+            }
+        }
+        if let tauri::menu::MenuItemKind::Submenu(submenu) = item {
+            if set_menu_item_enabled_in_items(submenu.items()?, id, enabled)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn open_settings_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> tauri::Result<WebviewWindow<R>> {
     if let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
         window.show()?;
         window.set_focus()?;
@@ -92,7 +166,9 @@ fn open_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::
     Ok(window)
 }
 
-fn app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+fn app_menu<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
     #[cfg(target_os = "macos")]
     {
         use tauri::menu::{AboutMetadata, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu};
@@ -103,7 +179,11 @@ fn app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Resul
             name: Some(pkg_info.name.clone()),
             version: Some(pkg_info.version.to_string()),
             copyright: config.bundle.copyright.clone(),
-            authors: config.bundle.publisher.clone().map(|publisher| vec![publisher]),
+            authors: config
+                .bundle
+                .publisher
+                .clone()
+                .map(|publisher| vec![publisher]),
             ..Default::default()
         };
 
@@ -134,6 +214,29 @@ fn app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Resul
             "File",
             true,
             &[&PredefinedMenuItem::close_window(app_handle, None)?],
+        )?;
+
+        let focus_composer_item =
+            MenuItemBuilder::with_id(FOCUS_COMPOSER_MENU_ID, "Focus Composer")
+                .accelerator("CmdOrCtrl+L")
+                .build(app_handle)?;
+        let send_message_item = MenuItemBuilder::with_id(SEND_MESSAGE_MENU_ID, "Send Message")
+            .enabled(false)
+            .accelerator("CmdOrCtrl+Enter")
+            .build(app_handle)?;
+        let stop_response_item = MenuItemBuilder::with_id(STOP_RESPONSE_MENU_ID, "Stop Response")
+            .enabled(false)
+            .accelerator("Esc")
+            .build(app_handle)?;
+        let conversation_submenu = Submenu::with_items(
+            app_handle,
+            "Conversation",
+            true,
+            &[
+                &focus_composer_item,
+                &send_message_item,
+                &stop_response_item,
+            ],
         )?;
 
         let edit_submenu = Submenu::with_items(
@@ -179,6 +282,7 @@ fn app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Resul
                 &file_submenu,
                 &edit_submenu,
                 &view_submenu,
+                &conversation_submenu,
                 &window_submenu,
                 &help_submenu,
             ],

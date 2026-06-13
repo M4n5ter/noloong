@@ -3,6 +3,10 @@ import { emitTo, listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppLaunchOptions, AppRuntimeRestartResult } from "./generated/contracts";
 import { ChatCanvas } from "./chat/ChatCanvas";
+import {
+  conversationCommandFromPayload,
+  dispatchConversationCommand,
+} from "./chat/conversationCommands";
 import type { BootstrapState } from "./chat/types";
 import {
   connectInteractionDisplayStream as connectDefaultInteractionDisplayStream,
@@ -27,6 +31,7 @@ export type AppShellDependencies = {
 type AppSurface = "chat" | "settings";
 const MAIN_WINDOW_LABEL = "main";
 const RUNTIME_RESTART_EVENT = "noloong-runtime-restarted";
+const CONVERSATION_MENU_COMMAND_EVENT = "noloong-conversation-menu-command";
 
 export function App({ dependencies = {} }: { dependencies?: AppShellDependencies }) {
   const [bootstrap, setBootstrap] = useState<BootstrapState>({ status: "loading" });
@@ -114,6 +119,35 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
   }, [applyRuntimeRestart]);
 
   useEffect(() => {
+    if (!isTauriRuntime() || surface !== "chat") {
+      return;
+    }
+
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listen<unknown>(CONVERSATION_MENU_COMMAND_EVENT, (event) => {
+      if (!mainDocumentCanAcceptConversationMenuCommand()) {
+        return;
+      }
+      const command = conversationCommandFromPayload(event.payload);
+      if (command) {
+        dispatchConversationCommand(command);
+      }
+    }).then((dispose) => {
+      if (!active) {
+        dispose();
+        return;
+      }
+      unlisten = dispose;
+    });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [surface]);
+
+  useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
       if (event.defaultPrevented || bootstrap.status !== "ready") {
         return;
@@ -121,12 +155,29 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault();
         openSettingsSurface();
+        return;
+      }
+      if (surface !== "chat") {
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        dispatchConversationCommand("send-message");
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        dispatchConversationCommand("focus-composer");
+        return;
+      }
+      if (event.key === "Escape") {
+        dispatchConversationCommand("stop-response");
       }
     }
 
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [bootstrap.status]);
+  }, [bootstrap.status, surface]);
 
   const title = bootstrap.status === "ready" ? null : headerTitle(bootstrap, i18n);
   const subtitle = headerSubtitle(bootstrap, i18n);
@@ -189,6 +240,10 @@ function notifyMainRuntimeRestart(result: AppRuntimeRestartResult): void {
     return;
   }
   void emitTo(MAIN_WINDOW_LABEL, RUNTIME_RESTART_EVENT, result).catch(() => undefined);
+}
+
+function mainDocumentCanAcceptConversationMenuCommand(): boolean {
+  return document.visibilityState !== "hidden" && document.hasFocus();
 }
 
 function headerTitle(bootstrap: BootstrapState, i18n: AppI18n): string {

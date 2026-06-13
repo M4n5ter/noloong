@@ -27,6 +27,7 @@ export class FakeInteractionRuntime {
     profiles: [{ profileId: "default", displayName: "Default" }],
   };
   promptRequests: AppPromptRequest[] = [];
+  abortRequests: AppSessionRequest[] = [];
   approvalResolveRequests: AppApprovalResolveRequest[] = [];
 
   private readonly sessions = new Map<string, AppInteractionSessionDescriptor>();
@@ -88,6 +89,7 @@ export class FakeInteractionRuntime {
         return this.promptDeferred.promise;
       },
       abort: async (request: AppSessionRequest) => {
+        this.abortRequests.push(request);
         const session = {
           ...this.requireSession(request.sessionId),
           status: "aborted" as const,

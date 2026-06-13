@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createI18n } from "../i18n";
+import { dispatchConversationCommand } from "./conversationCommands";
 import { PromptComposer } from "./PromptComposer";
 
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -47,6 +48,135 @@ describe("PromptComposer", () => {
 
     expect(onAbortRun).toHaveBeenCalledTimes(1);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("reports command availability without knowing about the native menu", async () => {
+    const user = userEvent.setup();
+    const onCommandAvailabilityChange = vi.fn();
+    const onAbortRun = vi.fn().mockResolvedValue(undefined);
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCommandAvailabilityChange={onCommandAvailabilityChange}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onCommandAvailabilityChange).toHaveBeenCalledWith({
+        canFocusComposer: true,
+        canSendMessage: false,
+        canStopResponse: false,
+      }),
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Write a message..." }), "hello");
+    await waitFor(() =>
+      expect(onCommandAvailabilityChange).toHaveBeenCalledWith({
+        canFocusComposer: true,
+        canSendMessage: true,
+        canStopResponse: false,
+      }),
+    );
+
+    rerender(
+      <PromptComposer
+        disabled
+        i18n={createI18n("en")}
+        onAbortRun={onAbortRun}
+        onCommandAvailabilityChange={onCommandAvailabilityChange}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    await waitFor(() =>
+      expect(onCommandAvailabilityChange).toHaveBeenCalledWith({
+        canFocusComposer: false,
+        canSendMessage: false,
+        canStopResponse: true,
+      }),
+    );
+  });
+
+  it("handles conversation commands through one command event path", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    screen.getByRole("button", { name: "Sessions" }).focus();
+    act(() => dispatchConversationCommand("focus-composer"));
+    expect(textarea).toHaveFocus();
+
+    await user.type(textarea, "send through command");
+    act(() => dispatchConversationCommand("send-message"));
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith({
+        text: "send through command",
+        attachments: [],
+      }),
+    );
+
+    const onAbortRun = vi.fn().mockResolvedValue(undefined);
+    rerender(
+      <PromptComposer
+        disabled
+        i18n={createI18n("en")}
+        onAbortRun={onAbortRun}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    act(() => dispatchConversationCommand("stop-response"));
+    await waitFor(() => expect(onAbortRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("routes the composer return shortcut through the command dispatcher", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    await user.type(textarea, "keyboard command");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith({
+        text: "keyboard command",
+        attachments: [],
+      }),
+    );
   });
 
   it("shows scroll edge affordances only where expanded input has clipped content", async () => {

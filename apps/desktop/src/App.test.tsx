@@ -24,7 +24,15 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 const tauriEvent = vi.hoisted(() => ({
   emitTo: vi.fn(),
   listen: vi.fn(),
-  listeners: new Map<string, (event: { payload: AppRuntimeRestartResult }) => void>(),
+  listeners: new Map<string, (event: { payload: unknown }) => void>(),
+}));
+
+const tauriCore = vi.hoisted(() => ({
+  invoke: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: tauriCore.invoke,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -39,6 +47,8 @@ describe("Noloong app chat regression harness", () => {
     tauriEvent.emitTo.mockReset();
     tauriEvent.listen.mockReset();
     tauriEvent.listeners.clear();
+    tauriCore.invoke.mockReset();
+    tauriCore.invoke.mockResolvedValue(undefined);
     tauriEvent.listen.mockImplementation(async (event, handler) => {
       tauriEvent.listeners.set(event, handler);
       return () => {
@@ -57,6 +67,7 @@ describe("Noloong app chat regression harness", () => {
 
   afterEach(() => {
     cleanup();
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -254,6 +265,79 @@ describe("Noloong app chat regression harness", () => {
       "noloong-settings",
       "width=920,height=720",
     );
+  });
+
+  it("supports conversation keyboard commands outside the bottom composer buttons", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Write a message..." });
+    screen.getByRole("button", { name: "Sessions" }).focus();
+
+    await user.keyboard("{Meta>}l{/Meta}");
+    expect(composer).toHaveFocus();
+
+    await user.type(composer, "send from menu path");
+    screen.getByRole("button", { name: "Sessions" }).focus();
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+
+    await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
+    expect(runtime.promptRequests[0]).toMatchObject({
+      input: { type: "text", text: "send from menu path" },
+    });
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "run_started",
+        runId: "run-1",
+      });
+    });
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(runtime.abortRequests).toHaveLength(1));
+    expect(runtime.abortRequests[0]).toMatchObject({ sessionId: "session-1" });
+  });
+
+  it("bridges native conversation menu events into the chat surface", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Write a message..." });
+    const listener = tauriEvent.listeners.get("noloong-conversation-menu-command");
+    if (!listener) {
+      throw new Error("Expected the chat surface to listen for conversation menu commands");
+    }
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+
+    act(() => {
+      listener({ payload: "focus-composer" });
+    });
+    expect(composer).toHaveFocus();
+
+    await user.type(composer, "send from native menu");
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    act(() => {
+      listener({ payload: "send-message" });
+    });
+
+    expect(runtime.promptRequests).toHaveLength(0);
+    expect(composer).toHaveValue("send from native menu");
+
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    act(() => {
+      listener({ payload: "send-message" });
+    });
+
+    await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
+    expect(runtime.promptRequests[0]).toMatchObject({
+      input: { type: "text", text: "send from native menu" },
+    });
   });
 
   it("renders settings as a dedicated surface without a return-to-chat control", async () => {

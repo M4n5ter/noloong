@@ -4,6 +4,12 @@ import { Maximize2, MessageCircle, Minimize2, Paperclip, Plus, Send, Square, X }
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AppI18n } from "../i18n";
 import { pathsToAttachments, type PromptAttachment, type PromptSubmission } from "./attachments";
+import {
+  CONVERSATION_COMMAND_EVENT,
+  dispatchConversationCommand,
+  type ConversationCommand,
+  type ConversationMenuState,
+} from "./conversationCommands";
 
 const COMPACT_TEXT_LIMIT = 96;
 
@@ -13,6 +19,7 @@ export function PromptComposer({
   onCreateSession,
   onOpenSessions,
   onAbortRun,
+  onCommandAvailabilityChange,
   onSubmit,
   placeholder,
 }: {
@@ -21,6 +28,7 @@ export function PromptComposer({
   onCreateSession: () => void;
   onOpenSessions: () => void;
   onAbortRun?: () => Promise<void>;
+  onCommandAvailabilityChange?: (state: ConversationMenuState) => void;
   onSubmit: (submission: PromptSubmission) => Promise<void>;
   placeholder: string;
 }) {
@@ -32,8 +40,8 @@ export function PromptComposer({
   const formRef = useRef<HTMLFormElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const disabledRef = useRef(disabled);
-  const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled;
   const canAbort = Boolean(onAbortRun);
+  const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled && !canAbort;
   const canExpand = expanded || needsExpandedComposer(text);
   const previewingCompactOverflow = canExpand && !expanded;
   const compactPreview = firstPreviewLine(text);
@@ -50,6 +58,14 @@ export function PromptComposer({
       textareaRef.current?.focus();
     }
   }, [expanded]);
+
+  useEffect(() => {
+    onCommandAvailabilityChange?.({
+      canFocusComposer: !disabled,
+      canSendMessage: canSend,
+      canStopResponse: canAbort,
+    });
+  }, [canAbort, canSend, disabled, onCommandAvailabilityChange]);
 
   const updateScrollFades = useCallback(() => {
     const textarea = textareaRef.current;
@@ -75,6 +91,30 @@ export function PromptComposer({
     setExpanded(false);
     await onSubmit({ text: submitted, attachments: submittedAttachments });
   }, [attachments, canSend, onSubmit, text]);
+
+  useEffect(() => {
+    function handleConversationCommand(event: Event) {
+      const command = (event as CustomEvent<ConversationCommand>).detail;
+      switch (command) {
+        case "focus-composer":
+          textareaRef.current?.focus();
+          break;
+        case "send-message":
+          void submit();
+          break;
+        case "stop-response":
+          if (canAbort) {
+            void onAbortRun?.();
+          }
+          break;
+      }
+    }
+
+    window.addEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand);
+    return () => {
+      window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand);
+    };
+  }, [canAbort, onAbortRun, submit]);
 
   const addPaths = useCallback((paths: string[]) => {
     if (disabledRef.current) {
@@ -222,7 +262,7 @@ export function PromptComposer({
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();
-                  void submit();
+                  dispatchConversationCommand("send-message");
                 }
               }}
               onScroll={updateScrollFades}

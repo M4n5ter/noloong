@@ -6,10 +6,16 @@ import { MessageCircle, Plus, Settings } from "lucide-react";
 import type { AppLaunchOptions } from "../generated/contracts";
 import type { AppI18n } from "../i18n";
 import { CenteredStatus } from "./CenteredStatus";
+import {
+  conversationMenuStateForChatSurface,
+  DISABLED_CONVERSATION_MENU_STATE,
+  syncConversationMenuState,
+  type ConversationMenuState,
+} from "./conversationCommands";
 import { SessionList, TranscriptView } from "./TranscriptComponents";
 import type { BootstrapState, InteractionState } from "./types";
 import { useInteractionRuntime } from "./useInteractionRuntime";
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 
 export function ChatCanvas({
   bootstrap,
@@ -71,6 +77,12 @@ function InteractionCanvas({
   const sessionsPanelRef = useRef<HTMLElement | null>(null);
   const sessionsPanelCloseRef = useRef<HTMLButtonElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const [documentMenuTargetAvailable, setDocumentMenuTargetAvailable] = useState(
+    isMainDocumentMenuTargetAvailable,
+  );
+  const [composerMenuState, setComposerMenuState] = useState<ConversationMenuState>(
+    DISABLED_CONVERSATION_MENU_STATE,
+  );
   const ready = runtime.interaction.status === "ready";
   const sessionsPanelVisible = sessionsPanelOpen && ready;
   const surfaceClassName = [
@@ -80,6 +92,43 @@ function InteractionCanvas({
   ]
     .filter(Boolean)
     .join(" ");
+
+  useEffect(() => {
+    function updateMenuTargetAvailability() {
+      setDocumentMenuTargetAvailable(isMainDocumentMenuTargetAvailable());
+    }
+
+    updateMenuTargetAvailability();
+    window.addEventListener("focus", updateMenuTargetAvailability);
+    window.addEventListener("blur", updateMenuTargetAvailability);
+    document.addEventListener("visibilitychange", updateMenuTargetAvailability);
+    return () => {
+      window.removeEventListener("focus", updateMenuTargetAvailability);
+      window.removeEventListener("blur", updateMenuTargetAvailability);
+      document.removeEventListener("visibilitychange", updateMenuTargetAvailability);
+      syncConversationMenuState(DISABLED_CONVERSATION_MENU_STATE);
+    };
+  }, []);
+
+  useEffect(() => {
+    syncConversationMenuState(conversationMenuStateForChatSurface({
+      composerState: composerMenuState,
+      documentTargetAvailable: documentMenuTargetAvailable,
+      ready,
+      sessionsPanelVisible,
+    }));
+  }, [composerMenuState, documentMenuTargetAvailable, ready, sessionsPanelVisible]);
+
+  useEffect(() => {
+    if (ready) {
+      return;
+    }
+    setComposerMenuState(DISABLED_CONVERSATION_MENU_STATE);
+  }, [ready]);
+
+  const updateComposerMenuState = useCallback((state: ConversationMenuState) => {
+    setComposerMenuState(state);
+  }, []);
 
   useEffect(() => {
     if (!sessionsPanelOpen) {
@@ -166,6 +215,7 @@ function InteractionCanvas({
             interaction={runtime.interaction}
             onAbortRun={runtime.abortCurrentRun}
             onCreateSession={() => void runtime.createSession()}
+            onConversationMenuStateChange={updateComposerMenuState}
             onOpenSettings={onOpenSettings}
             onOpenSessions={openSessionsPanel}
             onResolveApproval={runtime.resolveApproval}
@@ -222,6 +272,10 @@ function InteractionCanvas({
       ) : null}
     </section>
   );
+}
+
+function isMainDocumentMenuTargetAvailable(): boolean {
+  return document.visibilityState !== "hidden" && document.hasFocus();
 }
 
 function SurfaceStatus({
