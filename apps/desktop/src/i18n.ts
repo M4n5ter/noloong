@@ -239,7 +239,7 @@ const messages = {
     "settings.noPlugins": "No plugins in this profile.",
     "settings.context": "Context",
     "settings.advancedJsonc": "Advanced JSONC",
-    "settings.providerReasoningTitle": "Provider and reasoning move together",
+    "settings.providerReasoningTitle": "Reasoning",
   },
   zh: {
     "app.brand": "Noloong",
@@ -357,7 +357,7 @@ const messages = {
     "settings.noPlugins": "当前配置档没有插件。",
     "settings.context": "上下文",
     "settings.advancedJsonc": "高级 JSONC",
-    "settings.providerReasoningTitle": "提供商与推理一起调整",
+    "settings.providerReasoningTitle": "推理",
   },
 } satisfies Record<UiLocale, Record<I18nKey, string>>;
 

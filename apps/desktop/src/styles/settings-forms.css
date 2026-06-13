@@ -126,18 +126,17 @@
 
 .subsection {
   display: grid;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(243, 239, 228, 0.075);
-  border-radius: 18px;
-  background: rgba(243, 239, 228, 0.025);
+  gap: 10px;
+  padding: 14px 0 0;
+  border-top: 1px solid rgba(243, 239, 228, 0.07);
 }
 
 .subsection h3 {
   margin: 0;
-  color: rgba(243, 239, 228, 0.74);
+  color: rgba(243, 239, 228, 0.62);
   font-size: 13px;
-  font-weight: 660;
+  font-weight: 620;
+  line-height: 1.2;
 }
 
 .jsonc-pane {
