@@ -61,18 +61,24 @@ describe("SettingsView", () => {
     );
 
     const model = await screen.findByLabelText("Model");
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
     await user.clear(model);
     await user.type(model, "gpt-5.5");
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Save" }));
 
+    expect(screen.getByRole("button", { name: "Saving" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeDisabled();
     expect(model).toBeDisabled();
 
     expect(resolveSave).not.toBeNull();
     const finishSave = resolveSave as unknown as (value: AppProfileConfigDocument) => void;
     finishSave(profileDocument());
     await waitFor(() => expect(model).not.toBeDisabled());
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
   });
 
   it("presents the selected environment before the editable fields", async () => {

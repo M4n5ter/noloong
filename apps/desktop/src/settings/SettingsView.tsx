@@ -192,6 +192,7 @@ export function SettingsView({
   const profile = selectedProfile(draft);
   const panelNode = config ? activeNode : "jsonc";
   const environmentSummary = profile ? environmentSummaryItems(profile, i18n) : [];
+  const showSaveActions = draft.dirty || draft.saving;
 
   return (
     <section className="settings-workbench" data-render-surface="environment">
@@ -236,26 +237,28 @@ export function SettingsView({
           <div>
             <h2>{settingsNodeLabel(panelNode, i18n)}</h2>
           </div>
-          <div className="lens-actions">
-            <button
-              className="text-button subtle icon-text"
-              disabled={!draft.dirty}
-              onClick={() => updateDraft(discardSettingsChanges)}
-              type="button"
-            >
-              <RotateCcw size={15} />
-              <span>{i18n.t("settings.discard")}</span>
-            </button>
-            <button
-              className="text-button primary icon-text"
-              disabled={!canSaveSettings(draft)}
-              onClick={() => void saveCurrentText()}
-              type="button"
-            >
-              <Save size={15} />
-              <span>{draft.saving ? i18n.t("settings.saving") : i18n.t("settings.save")}</span>
-            </button>
-          </div>
+          {showSaveActions ? (
+            <div className="lens-actions">
+              <button
+                className="text-button subtle icon-text"
+                disabled={!draft.dirty || draft.saving}
+                onClick={() => updateDraft(discardSettingsChanges)}
+                type="button"
+              >
+                <RotateCcw size={15} />
+                <span>{i18n.t("settings.discard")}</span>
+              </button>
+              <button
+                className="text-button primary icon-text"
+                disabled={!canSaveSettings(draft)}
+                onClick={() => void saveCurrentText()}
+                type="button"
+              >
+                <Save size={15} />
+                <span>{draft.saving ? i18n.t("settings.saving") : i18n.t("settings.save")}</span>
+              </button>
+            </div>
+          ) : null}
         </div>
         {environmentSummary.length > 0 ? (
           <section className="environment-summary" aria-label={i18n.t("settings.environmentSummaryLabel")}>
