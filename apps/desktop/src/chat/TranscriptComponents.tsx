@@ -379,13 +379,19 @@ function ApprovalCard({
       </header>
       {decision.command ? <p className="approval-command">{decision.command}</p> : null}
       {decision.reason ? <p className="approval-reason">{decision.reason}</p> : null}
-      <dl className="approval-details">
-        {decision.details.map((detail) => (
-          <div key={detail.label}>
-            <dt>{detail.label}</dt>
-            <dd>{detail.value}</dd>
+      <dl className="approval-impact">
+        <div>
+          <dt>{i18n.t("approval.tool")}</dt>
+          <dd>{approval.toolName}</dd>
+        </div>
+        {approval.cwd ? (
+          <div>
+            <dt>{i18n.t("approval.directory")}</dt>
+            <dd>
+              <code>{approval.cwd}</code>
+            </dd>
           </div>
-        ))}
+        ) : null}
         {decision.permissions.length > 0 ? (
           <div>
             <dt>{i18n.t("approval.permissions")}</dt>
@@ -402,18 +408,18 @@ function ApprovalCard({
       {pending ? (
         <div className="approval-actions">
           <button
-            className="approval-allow"
-            onClick={() => void onResolveApproval(approval.approvalId, "allow")}
-            type="button"
-          >
-            {i18n.t("approval.allow")}
-          </button>
-          <button
             className="approval-deny"
             onClick={() => void onResolveApproval(approval.approvalId, "deny")}
             type="button"
           >
             {i18n.t("approval.deny")}
+          </button>
+          <button
+            className="approval-allow"
+            onClick={() => void onResolveApproval(approval.approvalId, "allow")}
+            type="button"
+          >
+            {i18n.t("approval.allow")}
           </button>
         </div>
       ) : null}
@@ -428,10 +434,6 @@ function approvalDecisionViewModel(approval: ApprovalTimelineItem, i18n: AppI18n
     title: approval.command ? i18n.t("approval.commandTitle") : i18n.t("approval.actionTitle"),
     command: approval.command,
     reason,
-    details: [
-      { label: i18n.t("approval.tool"), value: approval.toolName },
-      ...(approval.cwd ? [{ label: i18n.t("approval.directory"), value: approval.cwd }] : []),
-    ],
     permissions: approval.permissionDescriptions,
   };
 }
