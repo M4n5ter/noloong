@@ -42,7 +42,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    expect(await screen.findByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
     expect(screen.getByText("Default environment")).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · idle");
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
@@ -83,7 +83,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Choose an environment" })).not.toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText("Write a message..."), "verify dev preview");
@@ -185,7 +185,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "New session" });
+    await screen.findByRole("heading", { name: "What should Noloong think through?" });
 
     act(() => {
       runtime.emitDisplayEvent({
@@ -204,14 +204,14 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "New session" });
+    await screen.findByRole("heading", { name: "What should Noloong think through?" });
     await user.keyboard("{Meta>},{/Meta}");
 
     expect(await screen.findByRole("button", { name: "Back to chat" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Back to chat" }));
 
-    expect(screen.getByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
   });
 
@@ -221,7 +221,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "New session" });
+    await screen.findByRole("heading", { name: "What should Noloong think through?" });
     await user.keyboard("{Control>},{/Control}");
 
     expect(await screen.findByRole("button", { name: "Back to chat" })).toBeInTheDocument();
@@ -233,7 +233,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "New session" });
+    await screen.findByRole("heading", { name: "What should Noloong think through?" });
     await user.keyboard("{Meta>},{/Meta}");
     await screen.findByRole("button", { name: "Back to chat" });
 
@@ -248,7 +248,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "New session" });
+    await screen.findByRole("heading", { name: "What should Noloong think through?" });
     const toolbar = screen.getByRole("complementary", { name: "Session controls" });
 
     expect(within(toolbar).getByRole("button", { name: "Sessions" })).toBeInTheDocument();
