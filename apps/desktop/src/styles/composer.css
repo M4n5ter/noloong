@@ -35,6 +35,8 @@
 .composer-input-shell {
   grid-area: input;
   display: grid;
+  --composer-editor-surface: rgba(17, 19, 15, 0.985);
+  --composer-editor-surface-solid: #11130f;
   --composer-expand-gap: 16px;
   --composer-expand-inset: 0px;
   --composer-expand-size: 28px;
@@ -42,6 +44,7 @@
   --composer-editor-action-space: calc(
     var(--composer-expand-inset) + var(--composer-expand-size) + var(--composer-expand-gap)
   );
+  --composer-preview-fade: calc(var(--composer-editor-action-space) * 1.7);
   height: 38px;
   min-width: 0;
   align-items: center;
@@ -49,19 +52,44 @@
 
 .composer-preview {
   grid-area: 1 / 1;
-  display: flex;
+  display: block;
   height: 38px;
-  align-items: center;
-  align-self: center;
   min-width: 0;
   overflow: hidden;
-  padding-right: var(--composer-editor-action-space);
+  padding-inline-end: calc(var(--composer-editor-action-space) + var(--composer-preview-fade));
   color: rgba(243, 239, 228, 0.74);
   font-size: 17px;
-  line-height: 22px;
+  line-height: 38px;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0,
+    #000 calc(100% - var(--composer-preview-fade)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0,
+    #000 calc(100% - var(--composer-preview-fade)),
+    transparent 100%
+  );
   pointer-events: none;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
+}
+
+:dir(rtl) .composer-preview {
+  -webkit-mask-image: linear-gradient(
+    270deg,
+    #000 0,
+    #000 calc(100% - var(--composer-preview-fade)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    270deg,
+    #000 0,
+    #000 calc(100% - var(--composer-preview-fade)),
+    transparent 100%
+  );
 }
 
 .composer-editor-shell {
@@ -86,7 +114,9 @@
   isolation: isolate;
   border: 1px solid rgba(243, 239, 228, 0.13);
   border-radius: 24px;
-  background: rgba(23, 25, 20, 0.94);
+  -webkit-backdrop-filter: blur(18px) saturate(1.04);
+  backdrop-filter: blur(18px) saturate(1.04);
+  background: var(--composer-editor-surface);
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
 }
 
@@ -151,6 +181,18 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  .composer-preview {
+    -webkit-mask-image: none;
+    mask-image: none;
+    text-overflow: ellipsis;
+  }
+
+  .composer-editor-shell.expanded {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: var(--composer-editor-surface-solid);
+  }
+
   .composer-editor-shell.expanded::before,
   .composer-editor-shell.expanded::after {
     -webkit-backdrop-filter: none;
