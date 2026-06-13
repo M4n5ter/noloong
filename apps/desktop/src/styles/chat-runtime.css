@@ -204,6 +204,7 @@
   border-radius: 18px;
   background: rgba(243, 239, 228, 0.055);
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
   word-break: break-word;
 }
 

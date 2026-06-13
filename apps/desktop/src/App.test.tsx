@@ -363,6 +363,8 @@ describe("Noloong app chat regression harness", () => {
     expect(runtime.promptRequests[0]).toMatchObject({
       input: { type: "text", text: "first line\nsecond line continues" },
     });
+    const sentMessage = screen.getByText("first line second line continues");
+    expect(sentMessage.textContent).toBe("first line\nsecond line continues");
   });
 
   it("sends attachment prompts as message content blocks", async () => {
