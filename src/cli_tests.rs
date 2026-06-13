@@ -1,8 +1,8 @@
 use super::{
     AppOptions, Cli, CliCommand, CliError, app_bundle_executable_from_current_exe,
-    macos_app_executable_under_target, macos_debug_app_executable_under_target,
-    prepare_app_launch, prepare_direct_app_launch_options, start_embedded_interaction,
-    validate_interaction_bind,
+    development_app_executable_candidate, macos_app_executable_under_target,
+    macos_debug_app_executable_under_target, prepare_app_launch, prepare_direct_app_launch_options,
+    start_embedded_interaction, validate_interaction_bind,
 };
 use crate::build_info_cli::{BuildInfoSourceSubcommand, BuildInfoSubcommand};
 use crate::cli::profile_locale;
@@ -138,6 +138,31 @@ fn cli_debug_app_executable_lives_under_target_debug() {
         macos_debug_app_executable_under_target("/repo/target"),
         PathBuf::from("/repo/target/debug/Noloong")
     );
+}
+
+#[test]
+fn cli_development_app_resolves_debug_executable_without_synthesizing_bundle() {
+    let root = std::env::temp_dir().join(format!(
+        "noloong-dev-app-resolution-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let desktop_dir = root.join("apps").join("desktop");
+    fs::create_dir_all(&desktop_dir).unwrap();
+    fs::write(desktop_dir.join("package.json"), "{}").unwrap();
+
+    let executable = development_app_executable_candidate(&root).unwrap();
+
+    assert_eq!(
+        executable,
+        root.join("target").join("debug").join("Noloong")
+    );
+    assert!(!executable.to_string_lossy().contains("release/bundle"));
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

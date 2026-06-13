@@ -30,7 +30,7 @@ use noloong_app::{
     initialize_interaction_status,
 };
 use std::{
-    env, fs,
+    env,
     future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -187,19 +187,16 @@ pub(crate) enum CliError {
     #[error("App failed: {0}")]
     App(#[from] noloong_app::AppError),
     #[error(
-        "app bundle executable is missing; run `bun run app:bundle` first, or use `bun run app:dev` for Tauri development"
+        "app executable is missing; run from the repository root for development, or build the macOS app bundle first"
     )]
-    AppBundleMissing,
-    #[error("app bundle exited unsuccessfully: {executable} ({status})")]
-    AppBundleExited {
+    AppExecutableMissing,
+    #[error("app executable exited unsuccessfully: {executable} ({status})")]
+    AppExecutableExited {
         executable: String,
         status: ExitStatus,
     },
     #[error("development app command failed: {command} ({status})")]
-    DevelopmentAppCommandExited {
-        command: String,
-        status: ExitStatus,
-    },
+    DevelopmentAppCommandExited { command: String, status: ExitStatus },
     #[error("failed to serialize app launch options: {0}")]
     AppLaunchOptions(String),
     #[error("I/O failed: {0}")]
@@ -334,12 +331,12 @@ async fn run_app_command(options: AppOptions) -> Result<(), CliError> {
     let prepared = prepare_app_launch(options).await?;
     let result = match resolve_app_executable().await? {
         Some(mut app) => {
-            terminate_existing_app_bundle_instances().await?;
-            let result = run_app_bundle(app.executable.clone(), &prepared.launch_options).await;
+            terminate_existing_app_instances().await?;
+            let result = run_app_executable(app.executable.clone(), &prepared.launch_options).await;
             app.shutdown().await;
             result
         }
-        None => Err(CliError::AppBundleMissing),
+        None => Err(CliError::AppExecutableMissing),
     };
     prepared.shutdown().await;
     result
@@ -369,10 +366,12 @@ async fn resolve_app_executable() -> Result<Option<ResolvedAppExecutable>, CliEr
     if let Some(app) = ensure_development_app_executable().await? {
         return Ok(Some(app));
     }
-    Ok(resolve_app_bundle_executable().map(|executable| ResolvedAppExecutable {
-        executable,
-        dev_server: None,
-    }))
+    Ok(
+        resolve_app_bundle_executable().map(|executable| ResolvedAppExecutable {
+            executable,
+            dev_server: None,
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -429,12 +428,11 @@ pub(crate) async fn prepare_app_launch(options: AppOptions) -> Result<PreparedAp
     let interaction_endpoint = server.endpoint();
     let interaction_status = initialize_app_interaction(Some(&interaction_endpoint)).await;
     let embedded_server = Arc::new(RuntimeControlInteractionManager::new(server));
-    let runtime_control_server =
-        start_app_runtime_control_server(
-            Some(launch_profile_config_path.clone()),
-            Arc::clone(&embedded_server),
-        )
-        .await?;
+    let runtime_control_server = start_app_runtime_control_server(
+        Some(launch_profile_config_path.clone()),
+        Arc::clone(&embedded_server),
+    )
+    .await?;
     let runtime_control_endpoint = Some(runtime_control_server.endpoint());
     Ok(PreparedAppLaunch {
         launch_options: AppLaunchOptions {
@@ -473,7 +471,7 @@ pub(crate) async fn initialize_app_interaction(
     Some(status)
 }
 
-async fn run_app_bundle(
+async fn run_app_executable(
     executable: PathBuf,
     launch_options: &AppLaunchOptions,
 ) -> Result<(), CliError> {
@@ -486,14 +484,14 @@ async fn run_app_bundle(
     if status.success() {
         return Ok(());
     }
-    Err(CliError::AppBundleExited {
+    Err(CliError::AppExecutableExited {
         executable: executable.display().to_string(),
         status,
     })
 }
 
 #[cfg(target_os = "macos")]
-async fn terminate_existing_app_bundle_instances() -> Result<(), CliError> {
+async fn terminate_existing_app_instances() -> Result<(), CliError> {
     let status = Command::new("/usr/bin/pkill")
         .args(["-x", MACOS_APP_EXECUTABLE_NAME])
         .status()
@@ -501,14 +499,14 @@ async fn terminate_existing_app_bundle_instances() -> Result<(), CliError> {
     if status.success() || status.code() == Some(1) {
         return Ok(());
     }
-    Err(CliError::AppBundleExited {
+    Err(CliError::AppExecutableExited {
         executable: MACOS_APP_EXECUTABLE_NAME.into(),
         status,
     })
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn terminate_existing_app_bundle_instances() -> Result<(), CliError> {
+async fn terminate_existing_app_instances() -> Result<(), CliError> {
     Ok(())
 }
 
@@ -527,14 +525,20 @@ fn resolve_explicit_app_bundle_executable() -> Option<PathBuf> {
 #[cfg(debug_assertions)]
 async fn ensure_development_app_executable() -> Result<Option<ResolvedAppExecutable>, CliError> {
     let current_dir = env::current_dir()?;
-    if !current_dir.join(DESKTOP_APP_PACKAGE_DIR).join("package.json").is_file() {
+    let Some(debug_executable) = development_app_executable_candidate(&current_dir) else {
         return Ok(None);
-    }
+    };
 
     let dev_server = ensure_desktop_dev_server().await?;
 
     let app_status = Command::new("cargo")
-        .args(["build", "-p", "noloong-app", "--bin", MACOS_APP_EXECUTABLE_NAME])
+        .args([
+            "build",
+            "-p",
+            "noloong-app",
+            "--bin",
+            MACOS_APP_EXECUTABLE_NAME,
+        ])
         .status()
         .await?;
     if !app_status.success() {
@@ -544,14 +548,11 @@ async fn ensure_development_app_executable() -> Result<Option<ResolvedAppExecuta
         });
     }
 
-    let debug_executable = macos_debug_app_executable_under_target(current_dir.join("target"));
     if !debug_executable.is_file() {
         return Ok(None);
     }
-    let app_executable =
-        ensure_development_app_bundle(current_dir.join("target"), &debug_executable)?;
     Ok(Some(ResolvedAppExecutable {
-        executable: app_executable,
+        executable: debug_executable,
         dev_server,
     }))
 }
@@ -568,7 +569,13 @@ async fn ensure_desktop_dev_server() -> Result<Option<Child>, CliError> {
     }
 
     let mut child = Command::new("bun")
-        .args(["--cwd", DESKTOP_APP_PACKAGE_DIR, "dev", "--host", "127.0.0.1"])
+        .args([
+            "--cwd",
+            DESKTOP_APP_PACKAGE_DIR,
+            "dev",
+            "--host",
+            "127.0.0.1",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
@@ -629,77 +636,19 @@ pub(crate) fn macos_app_executable_under_target(target_dir: impl AsRef<Path>) ->
 }
 
 pub(crate) fn macos_debug_app_executable_under_target(target_dir: impl AsRef<Path>) -> PathBuf {
-    target_dir.as_ref().join("debug").join(MACOS_APP_EXECUTABLE_NAME)
-}
-
-fn ensure_development_app_bundle(
-    target_dir: impl AsRef<Path>,
-    debug_executable: &Path,
-) -> Result<PathBuf, CliError> {
-    let bundle_dir = target_dir
+    target_dir
         .as_ref()
-        .join("release")
-        .join("bundle")
-        .join("macos")
-        .join(MACOS_APP_BUNDLE_NAME);
-    let contents_dir = bundle_dir.join("Contents");
-    let macos_dir = contents_dir.join("MacOS");
-    let resources_dir = contents_dir.join("Resources");
-    fs::create_dir_all(&macos_dir)?;
-    fs::create_dir_all(&resources_dir)?;
-
-    let app_executable = macos_dir.join(MACOS_APP_EXECUTABLE_NAME);
-    fs::copy(debug_executable, &app_executable)?;
-    set_executable_permissions(&app_executable)?;
-    fs::write(contents_dir.join("Info.plist"), development_app_info_plist())?;
-    fs::write(contents_dir.join("PkgInfo"), "APPL????")?;
-    Ok(app_executable)
+        .join("debug")
+        .join(MACOS_APP_EXECUTABLE_NAME)
 }
 
-#[cfg(unix)]
-fn set_executable_permissions(path: &Path) -> Result<(), CliError> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_executable_permissions(_path: &Path) -> Result<(), CliError> {
-    Ok(())
-}
-
-fn development_app_info_plist() -> &'static str {
-    r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>en</string>
-  <key>CFBundleDisplayName</key>
-  <string>Noloong</string>
-  <key>CFBundleExecutable</key>
-  <string>Noloong</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.noloong.desktop</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>Noloong</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
-  <key>CFBundleVersion</key>
-  <string>0.1.0</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>10.13</string>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-</dict>
-</plist>
-"#
+#[cfg(debug_assertions)]
+pub(crate) fn development_app_executable_candidate(current_dir: &Path) -> Option<PathBuf> {
+    current_dir
+        .join(DESKTOP_APP_PACKAGE_DIR)
+        .join("package.json")
+        .is_file()
+        .then(|| macos_debug_app_executable_under_target(current_dir.join("target")))
 }
 
 async fn run_with_embedded_interaction(
