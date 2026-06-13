@@ -34,6 +34,11 @@ export type I18nKey =
   | "transcript.newSessionTitle"
   | "transcript.newSessionDetail"
   | "transcript.empty"
+  | "sessionContext.environment"
+  | "sessionContext.running"
+  | "sessionContext.paused"
+  | "sessionContext.failed"
+  | "sessionContext.aborted"
   | "message.sending"
   | "composer.write"
   | "composer.connecting"
@@ -149,6 +154,11 @@ const messages = {
     "transcript.newSessionTitle": "New session",
     "transcript.newSessionDetail": "Send a message to create a session.",
     "transcript.empty": "Start with the next thing you want Noloong to think through.",
+    "sessionContext.environment": "{profile} environment",
+    "sessionContext.running": "{profile} is thinking",
+    "sessionContext.paused": "{profile} needs a decision",
+    "sessionContext.failed": "{profile} stopped with an error",
+    "sessionContext.aborted": "{profile} stopped",
     "message.sending": "sending",
     "composer.write": "Write a message...",
     "composer.connecting": "Connecting display stream...",
@@ -262,6 +272,11 @@ const messages = {
     "transcript.newSessionTitle": "新会话",
     "transcript.newSessionDetail": "发送消息后会自动创建会话。",
     "transcript.empty": "从下一件想让 Noloong 思考的事开始。",
+    "sessionContext.environment": "{profile} 环境",
+    "sessionContext.running": "{profile} 正在思考",
+    "sessionContext.paused": "{profile} 需要你决定",
+    "sessionContext.failed": "{profile} 已因错误停止",
+    "sessionContext.aborted": "{profile} 已停止",
     "message.sending": "发送中",
     "composer.write": "输入消息...",
     "composer.connecting": "正在连接 Display 流...",

@@ -17,7 +17,7 @@ import { CenteredStatus } from "./CenteredStatus";
 import { MarkdownMessage } from "../markdown/MarkdownMessage";
 import { MarkdownRenderer } from "../markdown/MarkdownRenderer";
 import { isNearTranscriptBottom, scrollTranscriptToEnd } from "./scroll";
-import { sessionTitle } from "./sessionHelpers";
+import { sessionContextLabel, sessionTitle } from "./sessionHelpers";
 import type { InteractionState } from "./types";
 import type { PromptSubmission } from "./attachments";
 import { PromptComposer } from "./PromptComposer";
@@ -56,9 +56,7 @@ export function SessionList({
               type="button"
             >
               <strong>{sessionTitle(session)}</strong>
-              <span>
-                {session.profileId} · {session.status}
-              </span>
+              <span>{sessionContextLabel(session, interaction.initializeResult.profiles, i18n)}</span>
             </button>
           </li>
         );
@@ -180,7 +178,7 @@ export function TranscriptView({
       ? sessionTitle(interaction.selectedSession)
       : i18n.t("transcript.newSessionTitle");
   const subtitle = interaction.selectedSession
-    ? `${interaction.selectedSession.profileId} · ${interaction.selectedSession.status}`
+    ? sessionContextLabel(interaction.selectedSession, interaction.initializeResult.profiles, i18n)
     : i18n.t("transcript.newSessionDetail");
   const timelineEmpty = interaction.conversation.timeline.length === 0;
 

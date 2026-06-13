@@ -628,17 +628,45 @@
   right: 1px;
   left: 1px;
   z-index: 1;
-  height: 26px;
+  height: 34px;
+  --composer-edge-radius: 0 0 23px 23px;
+  --composer-edge-direction: 0deg;
   pointer-events: none;
   content: "";
   opacity: 0;
-  transition: opacity 140ms ease;
+  transition: opacity 160ms ease;
+  -webkit-backdrop-filter: blur(7px) saturate(1.08);
+  backdrop-filter: blur(7px) saturate(1.08);
+  border-radius: var(--composer-edge-radius);
+  background:
+    linear-gradient(
+      var(--composer-edge-direction),
+      rgba(243, 239, 228, 0.08),
+      rgba(243, 239, 228, 0) 34%
+    ),
+    linear-gradient(
+      var(--composer-edge-direction),
+      rgba(23, 25, 20, 0.98),
+      rgba(23, 25, 20, 0)
+    );
+  -webkit-mask-image: linear-gradient(
+    var(--composer-edge-direction),
+    #000 0%,
+    #000 46%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    var(--composer-edge-direction),
+    #000 0%,
+    #000 46%,
+    transparent 100%
+  );
 }
 
 .composer-editor-shell.expanded::before {
   top: 1px;
-  border-radius: 23px 23px 0 0;
-  background: linear-gradient(180deg, rgba(23, 25, 20, 0.96), rgba(23, 25, 20, 0));
+  --composer-edge-radius: 23px 23px 0 0;
+  --composer-edge-direction: 180deg;
 }
 
 .composer-editor-shell.expanded.fade-top::before {
@@ -647,12 +675,18 @@
 
 .composer-editor-shell.expanded::after {
   bottom: 1px;
-  border-radius: 0 0 23px 23px;
-  background: linear-gradient(0deg, rgba(23, 25, 20, 0.96), rgba(23, 25, 20, 0));
 }
 
 .composer-editor-shell.expanded.fade-bottom::after {
   opacity: 1;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .composer-editor-shell.expanded::before,
+  .composer-editor-shell.expanded::after {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 
 .composer-input {

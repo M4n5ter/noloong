@@ -50,11 +50,7 @@ export function PromptComposer({
       setScrollFades({ top: false, bottom: false });
       return;
     }
-    const maxScrollTop = textarea.scrollHeight - textarea.clientHeight;
-    setScrollFades({
-      top: textarea.scrollTop > 1,
-      bottom: maxScrollTop - textarea.scrollTop > 1,
-    });
+    setScrollFades(composerScrollFadeState(textarea));
   }, [expanded]);
 
   useLayoutEffect(() => {
@@ -269,4 +265,19 @@ function firstPreviewLine(text: string): string {
 
 function needsExpandedComposer(text: string): boolean {
   return text.includes("\n") || text.length > COMPACT_TEXT_LIMIT;
+}
+
+function composerScrollFadeState(metrics: {
+  clientHeight: number;
+  scrollHeight: number;
+  scrollTop: number;
+}): { top: boolean; bottom: boolean } {
+  const overflow = metrics.scrollHeight - metrics.clientHeight;
+  if (overflow <= 1) {
+    return { top: false, bottom: false };
+  }
+  return {
+    top: metrics.scrollTop > 1,
+    bottom: overflow - metrics.scrollTop > 1,
+  };
 }

@@ -2,8 +2,10 @@ import type {
   AppDisplayEvent,
   AppInteractionSessionDescriptor,
   AppInteractionSessionStatus,
+  InteractionProfileDescriptor,
   InteractionInitializeResult,
 } from "../generated/contracts";
+import type { AppI18n } from "../i18n";
 import type { InteractionClient } from "../interaction/client";
 import { textFromMessage } from "../interaction/contentText";
 
@@ -34,6 +36,28 @@ export function sessionTitle(session: AppInteractionSessionDescriptor): string {
     .find((text) => text.length > 0)
     ?.split("\n")[0];
   return firstText?.slice(0, 40) || session.sessionId;
+}
+
+export function sessionContextLabel(
+  session: AppInteractionSessionDescriptor,
+  profiles: InteractionProfileDescriptor[] | undefined,
+  i18n: AppI18n,
+): string {
+  const profile = profiles?.find((item) => item.profileId === session.profileId);
+  const profileName = profile?.displayName?.trim() || session.profileId;
+  switch (session.status) {
+    case "running":
+      return i18n.t("sessionContext.running", { profile: profileName });
+    case "paused":
+      return i18n.t("sessionContext.paused", { profile: profileName });
+    case "failed":
+      return i18n.t("sessionContext.failed", { profile: profileName });
+    case "aborted":
+      return i18n.t("sessionContext.aborted", { profile: profileName });
+    case "completed":
+    case "idle":
+      return i18n.t("sessionContext.environment", { profile: profileName });
+  }
 }
 
 export function sessionStatusFromDisplayEvent(

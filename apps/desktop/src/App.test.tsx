@@ -38,8 +38,27 @@ describe("Noloong app chat regression harness", () => {
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     expect(await screen.findByRole("heading", { name: "New session" })).toBeInTheDocument();
-    expect(screen.getAllByText("default · idle").length).toBeGreaterThan(0);
+    expect(screen.getByText("Default environment")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("default · idle");
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
+  });
+
+  it("presents active session state as human context instead of raw status tokens", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByRole("heading", { name: "New session" });
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "run_started",
+        runId: "run-1",
+      });
+    });
+
+    expect(await screen.findByText("Default is thinking")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("default · running");
   });
 
   it("opens settings with the macOS settings shortcut and returns to chat", async () => {
@@ -101,8 +120,11 @@ describe("Noloong app chat regression harness", () => {
 
     await user.click(within(toolbar).getByRole("button", { name: "Sessions" }));
 
-    expect(screen.getByRole("dialog", { name: "Sessions" })).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog", { name: "Sessions" });
+    expect(dialog).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Return" })).toHaveFocus();
+    expect(within(dialog).getByText("Default environment")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("default · idle");
     expect(within(toolbar).queryByRole("button", { name: "Sessions" })).not.toBeInTheDocument();
   });
 
