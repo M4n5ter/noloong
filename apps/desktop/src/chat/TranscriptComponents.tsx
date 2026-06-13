@@ -1,8 +1,6 @@
 import { ShieldCheck, Settings } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
-import type {
-  AppToolPermissionOutcome,
-} from "../generated/contracts";
+import type { AppToolPermissionOutcome } from "../generated/contracts";
 import {
   reasoningVisibleText,
   type ApprovalTimelineItem,
@@ -20,6 +18,7 @@ import { isNearTranscriptBottom, scrollTranscriptToEnd } from "./scroll";
 import { sessionContextLabel, sessionTitle } from "./sessionHelpers";
 import type { InteractionState } from "./types";
 import type { PromptSubmission } from "./attachments";
+import { approvalDecisionViewModel, toolActivityViewModel } from "./approvalPresentation";
 import type { ConversationMenuState } from "./conversationCommands";
 import { PromptComposer } from "./PromptComposer";
 
@@ -346,16 +345,19 @@ function ReasoningCard({
 }
 
 function ToolActivityRow({ i18n, tool }: { i18n: AppI18n; tool: ToolTimelineItem }) {
-  const detail = tool.outputText || tool.updates.at(-1) || "";
+  const view = toolActivityViewModel(tool, i18n);
   return (
     <article className={`activity-card tool-card ${tool.isError ? "tool-error" : ""}`}>
       <div className="activity-title-row">
-        <span>{tool.toolName}</span>
+        <span className="activity-title-stack">
+          <span>{view.title}</span>
+          {view.auditLabel ? <code>{view.auditLabel}</code> : null}
+        </span>
         <span className={`activity-status activity-status-${tool.status}`}>
-          {tool.status === "running" ? i18n.t("tool.running") : i18n.t("tool.done")}
+          {view.statusLabel}
         </span>
       </div>
-      {detail ? <p>{detail}</p> : null}
+      {view.detail ? <p>{view.detail}</p> : null}
     </article>
   );
 }
@@ -371,6 +373,7 @@ function ApprovalCard({
 }) {
   const pending = approval.status === "pending";
   const decision = approvalDecisionViewModel(approval, i18n);
+
   return (
     <article
       aria-label={i18n.t("approval.required")}
@@ -385,18 +388,20 @@ function ApprovalCard({
           <h2>{decision.title}</h2>
         </div>
       </header>
-      {decision.command ? <p className="approval-command">{decision.command}</p> : null}
+      <p className="approval-summary">{decision.summary}</p>
       {decision.reason ? <p className="approval-reason">{decision.reason}</p> : null}
-      <dl className="approval-impact">
-        <div>
-          <dt>{i18n.t("approval.tool")}</dt>
-          <dd>{approval.toolName}</dd>
+      {decision.command ? (
+        <div className="approval-command-block">
+          <span>{i18n.t("approval.command")}</span>
+          <code>{decision.command}</code>
         </div>
-        {approval.cwd ? (
+      ) : null}
+      <dl className="approval-impact">
+        {decision.cwd ? (
           <div>
-            <dt>{i18n.t("approval.directory")}</dt>
+            <dt>{i18n.t("approval.workingFolder")}</dt>
             <dd>
-              <code>{approval.cwd}</code>
+              <code>{decision.cwd}</code>
             </dd>
           </div>
         ) : null}
@@ -406,7 +411,10 @@ function ApprovalCard({
             <dd>
               <ul className="approval-permission-list">
                 {decision.permissions.map((permission) => (
-                  <li key={permission}>{permission}</li>
+                  <li key={permission.id}>
+                    <span>{permission.label}</span>
+                    {permission.detail ? <small>{permission.detail}</small> : null}
+                  </li>
                 ))}
               </ul>
             </dd>
@@ -416,34 +424,23 @@ function ApprovalCard({
       {pending ? (
         <div className="approval-actions">
           <button
-            className="approval-deny"
+            className="approval-cancel"
             onClick={() => void onResolveApproval(approval.approvalId, "deny")}
             type="button"
           >
-            {i18n.t("approval.deny")}
+            {i18n.t("approval.cancel")}
           </button>
           <button
-            className="approval-allow"
+            className="approval-confirm"
             onClick={() => void onResolveApproval(approval.approvalId, "allow")}
             type="button"
           >
-            {i18n.t("approval.allow")}
+            {decision.confirmLabel}
           </button>
         </div>
       ) : null}
     </article>
   );
-}
-
-function approvalDecisionViewModel(approval: ApprovalTimelineItem, i18n: AppI18n) {
-  const prompt = approval.prompt.trim();
-  const reason = approval.reason || (approval.command ? "" : prompt);
-  return {
-    title: approval.command ? i18n.t("approval.commandTitle") : i18n.t("approval.actionTitle"),
-    command: approval.command,
-    reason,
-    permissions: approval.permissionDescriptions,
-  };
 }
 
 function approvalStatusLabel(

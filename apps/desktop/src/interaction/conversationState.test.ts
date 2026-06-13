@@ -198,7 +198,12 @@ describe("conversation timeline reducer", () => {
         reason: "Needs host access.",
         command: "pwd && ls -la",
         cwd: "/Users/m4n5ter/rust/noloong",
-        permissionDescriptions: ["Run shell commands."],
+        permissions: [
+          {
+            capability: "host.command",
+            description: "Run shell commands.",
+          },
+        ],
         status: "pending",
       },
     ]);

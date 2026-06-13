@@ -315,6 +315,7 @@ macOS 窗口不是品牌画布，也不是网页 chrome。
 - 自定义 title bar 只能用于视觉整合，不能破坏系统窗口控制、拖拽区域、active / inactive 外观、全屏和多窗口行为。
 - toolbar 如果存在，必须承载内容动作或窗口导航；不要放 Settings 这类低频入口，也不要把 logo、口号或状态灯放进 toolbar。
 - toolbar item 应有菜单栏等价命令；用户隐藏、忽略或无法点击 toolbar 时，核心功能仍然可达。
+- running / idle、profile、provider、连接端口、配置路径和调试标记都不是窗口标题或 title bar 内容。它们只在对当前任务有帮助时出现在内容邻近处，并且要使用人类语言。
 
 避免：
 
@@ -468,8 +469,12 @@ Chat 界面首先是工作面，不是 hero page。
 - 操作按钮使用明确动词，并按角色区分 normal / primary / cancel / destructive；破坏性动作不能使用 primary 样式。
 - 默认按钮只给最可能且安全的动作；Cancel 永远不能是 default。
 - 出现 destructive action 时必须同时提供 Cancel；Escape 和 Command-Period 应触发快速取消。
+- Escape 和 Command-Period 只取消当前最前的上下文。若 Sessions、Settings、popover、menu、sheet 或 alert 正在前台，快捷取消应先关闭或处理这些前台上下文，不能越过它们去拒绝后台审批。
 - 拒绝、取消或返回必须同样容易找到，并且文案要说明取消的是哪件事。
-- 所有按钮、状态和错误都必须走 i18n 文案；不能把英文调试字符串、tool id、JSON path 或后端 enum 直接显示给用户。
+- 所有按钮、状态和错误都必须走 i18n 文案；不能把英文调试字符串、tool id、JSON path 或后端 enum 直接作为主文案显示给用户。
+- 审批主文案不展示原始 tool id；命令、工作目录、文件范围、权限描述和风险原因必须可读、可复制、可审计。
+- 未知插件、MCP 或扩展权限不能被泛化到“本地访问”而丢失语义；优先显示后端提供的 description。只有没有 description 时才用低层级能力名作为 fallback。
+- 工具执行行可以用低对比技术标签保留审计线索，例如 tool id；审批卡主区域不使用这些技术标签来解释决策。
 - 视觉上可以比工具状态更明确，但不能像 dashboard card 一样抢走整段回答的层级。
 
 它不应该：

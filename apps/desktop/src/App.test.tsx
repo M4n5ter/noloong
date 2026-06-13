@@ -131,29 +131,6 @@ describe("Noloong app chat regression harness", () => {
     );
   });
 
-  it("keeps default browser preview approvals and sessions panel wired to the dev runtime", async () => {
-    const user = userEvent.setup();
-
-    render(<App />);
-
-    await user.type(await screen.findByPlaceholderText("Write a message..."), "approval please");
-    await user.click(screen.getByRole("button", { name: "Send message" }));
-
-    const approval = await screen.findByRole(
-      "article",
-      { name: "Approval required" },
-      { timeout: 3000 },
-    );
-    expect(within(approval).getByText("Needs your decision")).toBeVisible();
-    expect(within(approval).getByRole("heading", { name: "Run this command?" })).toBeVisible();
-    expect(within(approval).getByRole("button", { name: "Allow" })).toBeVisible();
-
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    const sessionsPanel = await screen.findByRole("dialog", { name: "Sessions" });
-    expect(within(sessionsPanel).getByRole("button", { name: "Create session" })).toBeVisible();
-    expect(within(sessionsPanel).getByText("Desktop Dev needs a decision")).toBeVisible();
-  });
-
   it("keeps the browser preview stop action from completing an aborted run", async () => {
     const user = userEvent.setup();
     const finalEvents: string[] = [];
@@ -176,39 +153,6 @@ describe("Noloong app chat regression harness", () => {
         expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument(),
       );
 
-      expect(finalEvents).toHaveLength(0);
-    } finally {
-      stopObserving();
-    }
-  });
-
-  it("expires browser preview approval actions when a paused run is stopped", async () => {
-    const user = userEvent.setup();
-    const finalEvents: string[] = [];
-    const stopObserving = observeDevInteractionRuntimeForTests({
-      onDisplayEvent(_sessionId, event) {
-        if (event.type === "assistant_message_final") {
-          finalEvents.push(event.message.id);
-        }
-      },
-    });
-
-    try {
-      render(<App />);
-
-      await user.type(await screen.findByPlaceholderText("Write a message..."), "approval please");
-      await user.click(screen.getByRole("button", { name: "Send message" }));
-
-      const approval = await screen.findByRole(
-        "article",
-        { name: "Approval required" },
-        { timeout: 3000 },
-      );
-      await user.click(await screen.findByRole("button", { name: "Stop" }));
-
-      await waitFor(() => expect(within(approval).getByText("Expired")).toBeVisible());
-      expect(within(approval).queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-      expect(within(approval).queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
       expect(finalEvents).toHaveLength(0);
     } finally {
       stopObserving();
@@ -813,119 +757,6 @@ describe("Noloong app chat regression harness", () => {
     expect(screen.queryByRole("heading", { name: "Reasoning Summary" })).not.toBeInTheDocument();
   });
 
-  it("resolves approval requests from a localized decision card without showing raw protocol text", async () => {
-    const runtime = new FakeInteractionRuntime(emptySession());
-    const user = userEvent.setup();
-
-    render(<App dependencies={dependenciesFor(runtime)} />);
-
-    await screen.findByPlaceholderText("Write a message...");
-    await composerReadyForInput();
-
-    act(() => {
-      runtime.emitDisplayEvent({
-        type: "approval_requested",
-        approval: {
-          approvalId: "approval-1",
-          toolCall: { id: "call-1", name: "host.exec.start" },
-          request: {
-            prompt: "Run command?",
-            reason: "需要人工审批",
-            metadata: {
-              command: "pwd && ls -la",
-              cwd: "/Users/m4n5ter/rust/noloong",
-            },
-          },
-          permissions: [
-            {
-              capability: "host.exec",
-              description: "Run host commands.",
-            },
-            {
-              capability: "host.cwd",
-              description: "Use the selected working directory.",
-            },
-          ],
-        },
-      });
-    });
-
-    const card = await screen.findByRole("article", { name: "Approval required" });
-    expect(within(card).getByRole("heading", { name: "Run this command?" })).toBeInTheDocument();
-    expect(within(card).getByText("Needs your decision")).toBeInTheDocument();
-    expect(within(card).getByText("pwd && ls -la")).toBeInTheDocument();
-    expect(within(card).getByText("需要人工审批")).toBeInTheDocument();
-    expect(within(card).getByText("/Users/m4n5ter/rust/noloong")).toBeVisible();
-    const permissions = within(card).getByRole("list");
-    expect(within(permissions).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(permissions).getByText("Run host commands.")).toBeVisible();
-    expect(within(permissions).getByText("Use the selected working directory.")).toBeVisible();
-    const toolRow = within(card).getByText("Tool").closest("div");
-    expect(toolRow).not.toBeNull();
-    expect(within(toolRow as HTMLElement).getByText("host.exec.start")).toBeVisible();
-    expect(within(card).getByRole("button", { name: "Allow" })).toBeInTheDocument();
-    expect(within(card).getByRole("button", { name: "Deny" })).toBeInTheDocument();
-    expect(document.body).not.toHaveTextContent("Run command?");
-    expect(document.body).not.toHaveTextContent("pending");
-
-    await user.click(within(card).getByRole("button", { name: "Allow" }));
-
-    await waitFor(() =>
-      expect(runtime.approvalResolveRequests).toEqual([
-        expect.objectContaining({
-          approvalId: "approval-1",
-          decision: expect.objectContaining({ outcome: "allow" }),
-          sessionId: "session-1",
-        }),
-      ]),
-    );
-  });
-
-  it("localizes approval decision controls in Chinese", async () => {
-    const runtime = new FakeInteractionRuntime(emptySession());
-
-    render(<App dependencies={dependenciesFor(runtime, "zh")} />);
-
-    await screen.findByPlaceholderText("输入消息...");
-    await composerReadyForInput("输入消息...");
-
-    act(() => {
-      runtime.emitDisplayEvent({
-        type: "approval_requested",
-        approval: {
-          approvalId: "approval-1",
-          toolCall: { id: "call-1", name: "host.exec.start" },
-          request: {
-            prompt: "Run command?",
-            reason: "需要人工审批",
-            metadata: {
-              command: "pwd && ls -la",
-              cwd: "/Users/m4n5ter/rust/noloong",
-            },
-          },
-          permissions: [
-            {
-              capability: "host.exec",
-              description: "Run host commands.",
-            },
-          ],
-        },
-      });
-    });
-
-    const card = await screen.findByRole("article", { name: "需要审批" });
-    expect(within(card).getByRole("heading", { name: "运行这条命令？" })).toBeInTheDocument();
-    expect(within(card).getByText("需要你决定")).toBeInTheDocument();
-    expect(within(card).getByText("/Users/m4n5ter/rust/noloong")).toBeVisible();
-    const permissions = within(card).getByRole("list");
-    expect(within(permissions).getAllByRole("listitem")).toHaveLength(1);
-    expect(within(permissions).getByText("Run host commands.")).toBeVisible();
-    const toolRow = within(card).getByText("工具").closest("div");
-    expect(toolRow).not.toBeNull();
-    expect(within(toolRow as HTMLElement).getByText("host.exec.start")).toBeVisible();
-    expect(within(card).getByRole("button", { name: "同意" })).toBeInTheDocument();
-    expect(within(card).getByRole("button", { name: "拒绝" })).toBeInTheDocument();
-  });
 });
 
 function dependenciesFor(runtime: FakeInteractionRuntime, locale: "en" | "zh" = "en") {

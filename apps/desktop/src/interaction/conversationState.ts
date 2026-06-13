@@ -7,6 +7,7 @@ import type {
   AppToolOutput,
   AppToolPermissionDecision,
   AppToolPermissionOutcome,
+  AppToolPermissionRequirement,
   AppToolUpdate,
 } from "../generated/contracts";
 import { readableJson, textFromContentBlocks, textFromMessage } from "./contentText";
@@ -52,7 +53,7 @@ export type ApprovalTimelineItem = {
   reason: string;
   command: string | null;
   cwd: string | null;
-  permissionDescriptions: string[];
+  permissions: AppToolPermissionRequirement[];
   status: "pending" | "approved" | "denied" | "expired";
 };
 
@@ -566,9 +567,7 @@ function approvalFromRequest(approval: AppToolApprovalRequest): ApprovalTimeline
     reason: approval.request.reason ?? "",
     command: details.command,
     cwd: details.cwd,
-    permissionDescriptions: (approval.permissions ?? []).map(
-      (permission) => permission.description ?? permission.capability,
-    ),
+    permissions: approval.permissions ?? [],
     status: "pending",
   };
 }

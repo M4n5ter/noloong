@@ -358,7 +358,7 @@ class DevInteractionRuntime {
         },
         request: {
           prompt: "Apply this preview-only visual change?",
-          reason: "The dev runtime uses this card to keep approval layout testable.",
+          reason: "This preview-only action would update local project files.",
         },
         permissions: [
           {

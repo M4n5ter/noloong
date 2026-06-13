@@ -14,6 +14,7 @@ import {
 } from "./conversationCommands";
 import { SessionList, TranscriptView } from "./TranscriptComponents";
 import type { BootstrapState, InteractionState } from "./types";
+import { useApprovalQuickCancel } from "./useApprovalQuickCancel";
 import { useInteractionRuntime } from "./useInteractionRuntime";
 import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 
@@ -85,6 +86,7 @@ function InteractionCanvas({
   );
   const ready = runtime.interaction.status === "ready";
   const sessionsPanelVisible = sessionsPanelOpen && ready;
+  const foregroundContextOpen = sessionsPanelVisible;
   const surfaceClassName = [
     "chat-surface",
     ready ? "runtime-ready" : "",
@@ -143,6 +145,12 @@ function InteractionCanvas({
     const focusTarget = sessionsPanelCloseRef.current ?? sessionsPanelRef.current;
     focusTarget?.focus({ preventScroll: true });
   }, [ready, sessionsPanelOpen]);
+
+  useApprovalQuickCancel({
+    conversation: runtime.interaction.status === "ready" ? runtime.interaction.conversation : null,
+    disabled: foregroundContextOpen,
+    onResolveApproval: runtime.resolveApproval,
+  });
 
   function openSessionsPanel() {
     previousFocusRef.current =

@@ -49,6 +49,9 @@ export type I18nKey =
   | "composer.removeAttachment"
   | "tool.running"
   | "tool.done"
+  | "tool.genericTitle"
+  | "tool.previewTitle"
+  | "tool.commandTitle"
   | "run.stop"
   | "reasoning.thinking"
   | "reasoning.thoughtFor"
@@ -58,17 +61,24 @@ export type I18nKey =
   | "approval.required"
   | "approval.actionTitle"
   | "approval.commandTitle"
+  | "approval.commandSummary"
+  | "approval.actionSummary"
   | "approval.pending"
   | "approval.approved"
   | "approval.denied"
   | "approval.expired"
-  | "approval.tool"
   | "approval.command"
-  | "approval.directory"
+  | "approval.workingFolder"
   | "approval.reason"
   | "approval.permissions"
-  | "approval.allow"
-  | "approval.deny"
+  | "approval.runCommand"
+  | "approval.continue"
+  | "approval.cancel"
+  | "approval.permission.hostExec"
+  | "approval.permission.hostCwd"
+  | "approval.permission.write"
+  | "approval.permission.generic"
+  | "approval.permission.genericWithCapability"
   | "settings.loadingTitle"
   | "settings.loadingDetail"
   | "settings.failedTitle"
@@ -166,6 +176,9 @@ const messages = {
     "composer.removeAttachment": "Remove {name}",
     "tool.running": "Running",
     "tool.done": "Done",
+    "tool.genericTitle": "Using a local tool",
+    "tool.previewTitle": "Inspecting preview",
+    "tool.commandTitle": "Local command",
     "run.stop": "Stop",
     "reasoning.thinking": "Thinking",
     "reasoning.thoughtFor": "Thought for {duration}",
@@ -174,18 +187,25 @@ const messages = {
     "reasoning.empty": "No visible reasoning yet.",
     "approval.required": "Approval required",
     "approval.actionTitle": "Review this action",
-    "approval.commandTitle": "Run this command?",
-    "approval.pending": "Needs your decision",
+    "approval.commandTitle": "Run a local command?",
+    "approval.commandSummary": "Noloong wants to run this command in your project.",
+    "approval.actionSummary": "Noloong needs your permission before continuing.",
+    "approval.pending": "Waiting for your decision",
     "approval.approved": "Approved",
-    "approval.denied": "Denied",
+    "approval.denied": "Canceled",
     "approval.expired": "Expired",
-    "approval.tool": "Tool",
     "approval.command": "Command",
-    "approval.directory": "Directory",
+    "approval.workingFolder": "Working folder",
     "approval.reason": "Why",
     "approval.permissions": "Access",
-    "approval.allow": "Allow",
-    "approval.deny": "Deny",
+    "approval.runCommand": "Run Command",
+    "approval.continue": "Continue",
+    "approval.cancel": "Cancel",
+    "approval.permission.hostExec": "Can run a local command.",
+    "approval.permission.hostCwd": "Uses the selected working folder.",
+    "approval.permission.write": "Can change files in the project.",
+    "approval.permission.generic": "Requests local access for this action.",
+    "approval.permission.genericWithCapability": "Requests local access: {capability}.",
     "settings.loadingTitle": "Loading settings",
     "settings.loadingDetail": "Reading profile configuration.",
     "settings.failedTitle": "Settings failed",
@@ -282,6 +302,9 @@ const messages = {
     "composer.removeAttachment": "移除 {name}",
     "tool.running": "运行中",
     "tool.done": "完成",
+    "tool.genericTitle": "正在使用本地工具",
+    "tool.previewTitle": "正在检查预览",
+    "tool.commandTitle": "本地命令",
     "run.stop": "停止",
     "reasoning.thinking": "正在思考",
     "reasoning.thoughtFor": "思考了 {duration}",
@@ -290,18 +313,25 @@ const messages = {
     "reasoning.empty": "暂时没有可见思考内容。",
     "approval.required": "需要审批",
     "approval.actionTitle": "确认这次操作",
-    "approval.commandTitle": "运行这条命令？",
-    "approval.pending": "需要你决定",
+    "approval.commandTitle": "运行本地命令？",
+    "approval.commandSummary": "Noloong 想在你的项目里运行这条命令。",
+    "approval.actionSummary": "Noloong 需要你的许可后才能继续。",
+    "approval.pending": "等待你决定",
     "approval.approved": "已同意",
-    "approval.denied": "已拒绝",
+    "approval.denied": "已取消",
     "approval.expired": "已过期",
-    "approval.tool": "工具",
     "approval.command": "命令",
-    "approval.directory": "目录",
+    "approval.workingFolder": "工作目录",
     "approval.reason": "原因",
     "approval.permissions": "权限",
-    "approval.allow": "同意",
-    "approval.deny": "拒绝",
+    "approval.runCommand": "运行命令",
+    "approval.continue": "继续",
+    "approval.cancel": "取消",
+    "approval.permission.hostExec": "可以运行本地命令。",
+    "approval.permission.hostCwd": "会使用选定的工作目录。",
+    "approval.permission.write": "可以修改项目文件。",
+    "approval.permission.generic": "请求这次操作所需的本地访问权限。",
+    "approval.permission.genericWithCapability": "请求本地访问权限：{capability}。",
     "settings.loadingTitle": "正在加载设置",
     "settings.loadingDetail": "正在读取配置。",
     "settings.failedTitle": "设置加载失败",
