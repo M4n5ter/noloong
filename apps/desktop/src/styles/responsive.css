@@ -38,13 +38,13 @@
     padding: 72px 14px 18px;
   }
 
-  .settings-workbench-sidebar,
-  .settings-workbench-detail {
+  .settings-workbench-sidebar {
     height: auto;
   }
 
   .settings-workbench-sidebar {
     grid-template-rows: auto auto auto;
+    padding: 0;
   }
 
   .settings-pane-nav {
@@ -54,12 +54,21 @@
   }
 
   .settings-pane-button {
-    width: 176px;
+    width: 164px;
     flex: 0 0 auto;
   }
 
   .settings-workbench-detail {
-    min-height: 520px;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    padding-bottom: 92px;
+  }
+
+  .lens-form,
+  .jsonc-pane,
+  .json-list {
+    overflow: visible;
   }
 
   .environment-summary {
@@ -72,6 +81,12 @@
 
   .lens-header {
     flex-direction: column;
+  }
+
+  .settings-workbench-detail > .lens-header .lens-actions {
+    position: static;
+    align-self: flex-end;
+    margin-top: 2px;
   }
 }
 
@@ -96,5 +111,16 @@
 
   .environment-summary {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-pane-button {
+    width: 132px;
+    grid-template-columns: 22px minmax(0, 1fr);
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .settings-pane-button small {
+    display: none;
   }
 }
