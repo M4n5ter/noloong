@@ -51,6 +51,8 @@ export type I18nKey =
   | "reasoning.showRaw"
   | "reasoning.empty"
   | "approval.required"
+  | "approval.actionTitle"
+  | "approval.commandTitle"
   | "approval.pending"
   | "approval.approved"
   | "approval.denied"
@@ -164,7 +166,9 @@ const messages = {
     "reasoning.showRaw": "Show raw",
     "reasoning.empty": "No visible reasoning yet.",
     "approval.required": "Approval required",
-    "approval.pending": "Waiting",
+    "approval.actionTitle": "Review this action",
+    "approval.commandTitle": "Run this command?",
+    "approval.pending": "Needs your decision",
     "approval.approved": "Approved",
     "approval.denied": "Denied",
     "approval.expired": "Expired",
@@ -275,7 +279,9 @@ const messages = {
     "reasoning.showRaw": "显示原文",
     "reasoning.empty": "暂时没有可见思考内容。",
     "approval.required": "需要审批",
-    "approval.pending": "等待处理",
+    "approval.actionTitle": "确认这次操作",
+    "approval.commandTitle": "运行这条命令？",
+    "approval.pending": "需要你决定",
     "approval.approved": "已同意",
     "approval.denied": "已拒绝",
     "approval.expired": "已过期",

@@ -530,7 +530,13 @@ describe("Noloong app chat regression harness", () => {
     });
 
     const card = await screen.findByRole("article", { name: "Approval required" });
+    expect(within(card).getByRole("heading", { name: "Run this command?" })).toBeInTheDocument();
+    expect(within(card).getByText("Needs your decision")).toBeInTheDocument();
     expect(within(card).getByText("pwd && ls -la")).toBeInTheDocument();
+    expect(within(card).getByText("需要人工审批")).toBeInTheDocument();
+    expect(within(card).getByText("host.exec.start")).toBeInTheDocument();
+    expect(within(card).getByText("/Users/m4n5ter/rust/noloong")).toBeInTheDocument();
+    expect(within(card).getByText("Run host commands.")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "Allow" })).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "Deny" })).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("Run command?");
@@ -548,11 +554,50 @@ describe("Noloong app chat regression harness", () => {
       ]),
     );
   });
+
+  it("localizes approval decision controls in Chinese", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+
+    render(<App dependencies={dependenciesFor(runtime, "zh")} />);
+
+    await screen.findByPlaceholderText("输入消息...");
+    await composerReadyForInput("输入消息...");
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "approval_requested",
+        approval: {
+          approvalId: "approval-1",
+          toolCall: { id: "call-1", name: "host.exec.start" },
+          request: {
+            prompt: "Run command?",
+            reason: "需要人工审批",
+            metadata: {
+              command: "pwd && ls -la",
+              cwd: "/Users/m4n5ter/rust/noloong",
+            },
+          },
+          permissions: [
+            {
+              capability: "host.exec",
+              description: "Run host commands.",
+            },
+          ],
+        },
+      });
+    });
+
+    const card = await screen.findByRole("article", { name: "需要审批" });
+    expect(within(card).getByRole("heading", { name: "运行这条命令？" })).toBeInTheDocument();
+    expect(within(card).getByText("需要你决定")).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "同意" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+  });
 });
 
-function dependenciesFor(runtime: FakeInteractionRuntime) {
+function dependenciesFor(runtime: FakeInteractionRuntime, locale: "en" | "zh" = "en") {
   return {
-    bootstrap: async () => runtime.bootstrap("en"),
+    bootstrap: async () => runtime.bootstrap(locale),
     createInteractionClient: runtime.createClient,
     connectInteractionDisplayStream: runtime.connectDisplayStream,
   };
@@ -578,8 +623,8 @@ function setScrollMetrics(
   });
 }
 
-async function composerReadyForInput(): Promise<void> {
-  await screen.findByPlaceholderText("Write a message...");
+async function composerReadyForInput(placeholder = "Write a message..."): Promise<void> {
+  await screen.findByPlaceholderText(placeholder);
 }
 
 async function expectVisibleText(text: string): Promise<void> {

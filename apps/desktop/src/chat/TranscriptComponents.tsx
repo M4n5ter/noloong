@@ -1,4 +1,4 @@
-import { Settings } from "lucide-react";
+import { ShieldCheck, Settings } from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
 import type {
   AppToolPermissionOutcome,
@@ -386,64 +386,54 @@ function ApprovalCard({
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
 }) {
   const pending = approval.status === "pending";
-  const summary = approval.prompt.trim();
+  const decision = approvalDecisionViewModel(approval, i18n);
   return (
-    <article aria-label={i18n.t("approval.required")} className="activity-card approval-card">
-      <div className="activity-title-row">
-        <span>{i18n.t("approval.required")}</span>
-        <span className={`approval-status approval-status-${approval.status}`}>
-          {approvalStatusLabel(approval.status, i18n)}
+    <article
+      aria-label={i18n.t("approval.required")}
+      className={`activity-card approval-card approval-card-${approval.status}`}
+    >
+      <header className="approval-head">
+        <span aria-hidden="true" className="approval-glyph">
+          <ShieldCheck size={16} />
         </span>
-      </div>
-      <dl className="approval-details">
         <div>
-          <dt>{i18n.t("approval.tool")}</dt>
-          <dd>{approval.toolName}</dd>
+          <p className="approval-eyebrow">{approvalStatusLabel(approval.status, i18n)}</p>
+          <h2>{decision.title}</h2>
         </div>
-        {approval.command ? (
-          <div>
-            <dt>{i18n.t("approval.command")}</dt>
-            <dd className="approval-command">{approval.command}</dd>
+      </header>
+      {decision.command ? <p className="approval-command">{decision.command}</p> : null}
+      {decision.reason ? <p className="approval-reason">{decision.reason}</p> : null}
+      <dl className="approval-details">
+        {decision.details.map((detail) => (
+          <div key={detail.label}>
+            <dt>{detail.label}</dt>
+            <dd>{detail.value}</dd>
           </div>
-        ) : null}
-        {approval.cwd ? (
+        ))}
+        {decision.permissions.length > 0 ? (
           <div>
-            <dt>{i18n.t("approval.directory")}</dt>
-            <dd>{approval.cwd}</dd>
-          </div>
-        ) : null}
-        {approval.reason ? (
-          <div>
-            <dt>{i18n.t("approval.reason")}</dt>
-            <dd>{approval.reason}</dd>
-          </div>
-        ) : null}
-        {!approval.command && !approval.cwd && summary ? (
-          <div>
-            <dt>{i18n.t("approval.reason")}</dt>
-            <dd>{summary}</dd>
+            <dt>{i18n.t("approval.permissions")}</dt>
+            <dd>
+              <ul className="approval-permission-list">
+                {decision.permissions.map((permission) => (
+                  <li key={permission}>{permission}</li>
+                ))}
+              </ul>
+            </dd>
           </div>
         ) : null}
       </dl>
-      {approval.permissionDescriptions.length > 0 ? (
-        <section className="approval-permissions">
-          <h3>{i18n.t("approval.permissions")}</h3>
-          <ul>
-            {approval.permissionDescriptions.map((permission) => (
-              <li key={permission}>{permission}</li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
       {pending ? (
         <div className="approval-actions">
           <button
+            className="approval-allow"
             onClick={() => void onResolveApproval(approval.approvalId, "allow")}
             type="button"
           >
             {i18n.t("approval.allow")}
           </button>
           <button
+            className="approval-deny"
             onClick={() => void onResolveApproval(approval.approvalId, "deny")}
             type="button"
           >
@@ -453,6 +443,21 @@ function ApprovalCard({
       ) : null}
     </article>
   );
+}
+
+function approvalDecisionViewModel(approval: ApprovalTimelineItem, i18n: AppI18n) {
+  const prompt = approval.prompt.trim();
+  const reason = approval.reason || (approval.command ? "" : prompt);
+  return {
+    title: approval.command ? i18n.t("approval.commandTitle") : i18n.t("approval.actionTitle"),
+    command: approval.command,
+    reason,
+    details: [
+      { label: i18n.t("approval.tool"), value: approval.toolName },
+      ...(approval.cwd ? [{ label: i18n.t("approval.directory"), value: approval.cwd }] : []),
+    ],
+    permissions: approval.permissionDescriptions,
+  };
 }
 
 function approvalStatusLabel(
