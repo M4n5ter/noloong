@@ -270,9 +270,6 @@ function TimelineItemView({
     case "message":
       return <MessageCard i18n={i18n} item={item} />;
     case "reasoning":
-      if (item.status === "completed") {
-        return null;
-      }
       return (
         <ReasoningCard i18n={i18n} thought={item} onToggleReasoning={onToggleReasoning} />
       );
@@ -301,39 +298,43 @@ function ReasoningCard({
   thought: ReasoningTimelineItem;
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
 }) {
-  const summary = reasoningVisibleText(thought);
+  const visibleText = reasoningVisibleText(thought);
+  const detailText =
+    thought.status === "completed" && thought.expanded ? thought.summaryText : visibleText;
   const rawText = thought.rawText;
   const hasRawText = rawText.length > 0;
-  const showDetails = thought.status === "running";
+  const hasSummaryText = thought.summaryText.trim().length > 0;
+  const hasDetailText = detailText.trim().length > 0;
+  const showDetails = thought.status === "running" || thought.expanded;
   const canToggleDetails =
-    thought.status === "completed" ? hasRawText : hasRawText && thought.summaryText.length > 0;
+    thought.status === "completed" ? hasSummaryText || hasRawText : hasRawText && hasSummaryText;
   const title =
     thought.status === "completed"
       ? i18n.t("reasoning.thoughtFor", { duration: i18n.duration(thought.elapsedMs) })
       : i18n.t("reasoning.thinking");
 
   return (
-    <article className="activity-card reasoning-card">
+    <article className={`reasoning-card reasoning-card-${thought.status}`}>
       <div className="activity-title-row">
-        <span>{title}</span>
+        <span className="reasoning-status-dot" aria-hidden="true" />
+        <span className="reasoning-title">{title}</span>
         {canToggleDetails ? (
           <button
             className="activity-link"
             onClick={() => onToggleReasoning(thought.thoughtId, !thought.expanded)}
             type="button"
           >
-            {thought.expanded ? i18n.t("reasoning.hideRaw") : i18n.t("reasoning.showRaw")}
+            {thought.expanded ? i18n.t("reasoning.hideDetails") : i18n.t("reasoning.showDetails")}
           </button>
         ) : null}
       </div>
-      {showDetails ? (
-        summary ? (
-          <div className="reasoning-content">
-            <MarkdownRenderer streaming={thought.status === "running"}>{summary}</MarkdownRenderer>
-          </div>
-        ) : (
-          <p className="muted">{i18n.t("reasoning.empty")}</p>
-        )
+      {showDetails && hasDetailText ? (
+        <div className="reasoning-content">
+          <MarkdownRenderer streaming={thought.status === "running"}>{detailText}</MarkdownRenderer>
+        </div>
+      ) : null}
+      {showDetails && !hasDetailText && thought.status === "running" ? (
+        <p className="muted">{i18n.t("reasoning.empty")}</p>
       ) : null}
       {thought.expanded && rawText ? (
         <div className="reasoning-raw">

@@ -55,8 +55,8 @@ export type I18nKey =
   | "run.stop"
   | "reasoning.thinking"
   | "reasoning.thoughtFor"
-  | "reasoning.hideRaw"
-  | "reasoning.showRaw"
+  | "reasoning.hideDetails"
+  | "reasoning.showDetails"
   | "reasoning.empty"
   | "approval.required"
   | "approval.actionTitle"
@@ -182,8 +182,8 @@ const messages = {
     "run.stop": "Stop",
     "reasoning.thinking": "Thinking",
     "reasoning.thoughtFor": "Thought for {duration}",
-    "reasoning.hideRaw": "Hide raw",
-    "reasoning.showRaw": "Show raw",
+    "reasoning.hideDetails": "Hide details",
+    "reasoning.showDetails": "Show details",
     "reasoning.empty": "No visible reasoning yet.",
     "approval.required": "Approval required",
     "approval.actionTitle": "Review this action",
@@ -308,8 +308,8 @@ const messages = {
     "run.stop": "停止",
     "reasoning.thinking": "正在思考",
     "reasoning.thoughtFor": "思考了 {duration}",
-    "reasoning.hideRaw": "隐藏原文",
-    "reasoning.showRaw": "显示原文",
+    "reasoning.hideDetails": "隐藏详情",
+    "reasoning.showDetails": "显示详情",
     "reasoning.empty": "暂时没有可见思考内容。",
     "approval.required": "需要审批",
     "approval.actionTitle": "确认这次操作",

@@ -717,8 +717,9 @@ describe("Noloong app chat regression harness", () => {
     await waitFor(() => expect(transcript.scrollTop).toBe(1000));
   });
 
-  it("renders live reasoning markdown and removes it from the reading flow after completion", async () => {
+  it("collapses live reasoning into an expandable completed status", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
@@ -753,8 +754,95 @@ describe("Noloong app chat regression harness", () => {
     });
 
     await waitFor(() => expect(screen.queryByText("Thinking")).not.toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "Show raw" })).not.toBeInTheDocument();
+    expect(screen.getByText("Thought for 2 seconds")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Reasoning Summary" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details" }));
+
+    expect(screen.getByRole("button", { name: "Hide details" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Reasoning Summary" })).toBeInTheDocument();
+  });
+
+  it("keeps completed reasoning expandable when raw text exists", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByPlaceholderText("Write a message...");
+    await composerReadyForInput();
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      });
+      runtime.emitDisplayEvent({
+        type: "thought_delta",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        kind: "summary",
+        text: "summary only",
+      });
+      runtime.emitDisplayEvent({
+        type: "thought_delta",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        kind: "raw",
+        text: "raw detail",
+      });
+      runtime.emitDisplayEvent({
+        type: "thought_completed",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        elapsedMs: 2100,
+      });
+    });
+
+    expect(screen.getByText("Thought for 2 seconds")).toBeInTheDocument();
+    expect(screen.queryByText("summary only")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details" }));
+
+    expect(screen.getByText("summary only")).toBeInTheDocument();
+    expect(screen.getByText("raw detail")).toBeInTheDocument();
+  });
+
+  it("does not duplicate raw-only completed reasoning when expanded", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByPlaceholderText("Write a message...");
+    await composerReadyForInput();
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      });
+      runtime.emitDisplayEvent({
+        type: "thought_delta",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        kind: "raw",
+        text: "raw detail",
+      });
+      runtime.emitDisplayEvent({
+        type: "thought_completed",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        elapsedMs: 2100,
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "Show details" }));
+
+    expect(screen.getAllByText("raw detail")).toHaveLength(1);
   });
 
 });

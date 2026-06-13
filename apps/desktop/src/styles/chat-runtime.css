@@ -377,6 +377,61 @@
   overflow-wrap: anywhere;
 }
 
+.reasoning-card {
+  display: grid;
+  width: min(560px, 100%);
+  min-width: 0;
+  justify-self: start;
+  gap: 8px;
+  padding: 2px 0 2px 15px;
+  border-left: 1px solid rgba(229, 212, 179, 0.12);
+  color: rgba(243, 239, 228, 0.42);
+  font-size: 13px;
+  line-height: 1.42;
+}
+
+.reasoning-card .activity-title-row {
+  justify-content: start;
+  gap: 8px;
+  color: rgba(243, 239, 228, 0.46);
+}
+
+.reasoning-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reasoning-status-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(168, 196, 220, 0.34);
+}
+
+.reasoning-card-running .reasoning-status-dot {
+  background: rgba(168, 196, 220, 0.72);
+  box-shadow: 0 0 0 3px rgba(168, 196, 220, 0.08);
+}
+
+.reasoning-content,
+.reasoning-raw {
+  color: rgba(243, 239, 228, 0.58);
+}
+
+.reasoning-content .markdown-body,
+.reasoning-raw .markdown-body {
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.reasoning-card .muted {
+  margin: 0;
+}
+
 .activity-link {
   border: 0;
   background: transparent;
