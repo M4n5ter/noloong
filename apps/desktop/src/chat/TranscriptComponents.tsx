@@ -69,7 +69,9 @@ export function TranscriptView({
   i18n,
   interaction,
   onAbortRun,
+  onCreateSession,
   onOpenSettings,
+  onOpenSessions,
   onResolveApproval,
   onSubmitPrompt,
   onToggleReasoning,
@@ -77,7 +79,9 @@ export function TranscriptView({
   i18n: AppI18n;
   interaction: InteractionState;
   onAbortRun: () => Promise<void>;
+  onCreateSession: () => void;
   onOpenSettings: () => void;
+  onOpenSessions: () => void;
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
   onSubmitPrompt: (submission: PromptSubmission) => Promise<void>;
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
@@ -235,6 +239,8 @@ export function TranscriptView({
         disabled={!canSubmit}
         i18n={i18n}
         onAbortRun={canAbort ? onAbortRun : undefined}
+        onCreateSession={onCreateSession}
+        onOpenSessions={onOpenSessions}
         onSubmit={submitPrompt}
         placeholder={
           interaction.streamStatus === "ready"

@@ -33,6 +33,8 @@ describe("PromptComposer", () => {
         disabled
         i18n={createI18n("en")}
         onAbortRun={onAbortRun}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
         onSubmit={onSubmit}
         placeholder="Write a message..."
       />,
@@ -54,6 +56,8 @@ describe("PromptComposer", () => {
       <PromptComposer
         disabled={false}
         i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
         onSubmit={vi.fn()}
         placeholder="Write a message..."
       />,

@@ -242,27 +242,27 @@ describe("Noloong app chat regression harness", () => {
     expect(await screen.findByRole("heading", { name: "Provider" })).toBeInTheDocument();
   });
 
-  it("keeps the desktop session toolbar icon-only with accessible names", async () => {
+  it("keeps session controls inside the composer capsule with accessible names", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
     const user = userEvent.setup();
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     await screen.findByRole("heading", { name: "What should Noloong think through?" });
-    const toolbar = screen.getByRole("complementary", { name: "Session controls" });
+    const sessionControls = screen.getByRole("group", { name: "Session controls" });
 
-    expect(within(toolbar).getByRole("button", { name: "Sessions" })).toBeInTheDocument();
-    expect(within(toolbar).getByRole("button", { name: "Create session" })).toBeInTheDocument();
-    expect(within(toolbar).queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
+    expect(within(sessionControls).getByRole("button", { name: "Sessions" })).toBeInTheDocument();
+    expect(within(sessionControls).getByRole("button", { name: "Create session" })).toBeInTheDocument();
+    expect(within(sessionControls).queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
 
-    await user.click(within(toolbar).getByRole("button", { name: "Sessions" }));
+    await user.click(within(sessionControls).getByRole("button", { name: "Sessions" }));
 
     const dialog = screen.getByRole("dialog", { name: "Sessions" });
     expect(dialog).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Return" })).toHaveFocus();
     expect(within(dialog).getByText("Default environment")).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · idle");
-    expect(within(toolbar).queryByRole("button", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Session controls" })).not.toBeInTheDocument();
   });
 
   it("opens the sessions panel as a modal and restores focus when it closes", async () => {
@@ -300,7 +300,7 @@ describe("Noloong app chat regression harness", () => {
     expect(failureStatus).toHaveTextContent("Interaction failed");
     expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();
     expect(within(failureStatus).getByRole("heading", { name: "Interaction failed" })).toBeVisible();
-    expect(screen.getByRole("complementary", { name: "Session controls" })).toBeVisible();
+    expect(screen.queryByRole("group", { name: "Session controls" })).not.toBeInTheDocument();
   });
 
   it("shows the local user message immediately after sending", async () => {

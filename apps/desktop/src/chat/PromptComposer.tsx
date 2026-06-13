@@ -1,6 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Maximize2, Minimize2, Paperclip, Send, Square, X } from "lucide-react";
+import { Maximize2, MessageCircle, Minimize2, Paperclip, Plus, Send, Square, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AppI18n } from "../i18n";
 import { pathsToAttachments, type PromptAttachment, type PromptSubmission } from "./attachments";
@@ -10,12 +10,16 @@ const COMPACT_TEXT_LIMIT = 96;
 export function PromptComposer({
   disabled,
   i18n,
+  onCreateSession,
+  onOpenSessions,
   onAbortRun,
   onSubmit,
   placeholder,
 }: {
   disabled: boolean;
   i18n: AppI18n;
+  onCreateSession: () => void;
+  onOpenSessions: () => void;
   onAbortRun?: () => Promise<void>;
   onSubmit: (submission: PromptSubmission) => Promise<void>;
   placeholder: string;
@@ -163,6 +167,36 @@ export function PromptComposer({
       ref={formRef}
     >
       <div className="composer-capsule" onClick={() => textareaRef.current?.focus()}>
+        <div aria-label={i18n.t("chat.sessionToolbar")} className="composer-navigation" role="group">
+          <button
+            aria-label={i18n.t("sessions.title")}
+            className="composer-tool"
+            data-tooltip={i18n.t("sessions.title")}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenSessions();
+            }}
+            title={i18n.t("sessions.title")}
+            type="button"
+          >
+            <MessageCircle size={16} />
+          </button>
+          <button
+            aria-label={i18n.t("sessions.create")}
+            className="composer-tool"
+            data-tooltip={i18n.t("sessions.create")}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onCreateSession();
+            }}
+            title={i18n.t("sessions.create")}
+            type="button"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
         <div className="composer-input-shell">
           {expanded || previewingCompactOverflow ? (
             <span aria-hidden="true" className="composer-preview">

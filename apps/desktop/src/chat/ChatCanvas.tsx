@@ -165,7 +165,9 @@ function InteractionCanvas({
             i18n={i18n}
             interaction={runtime.interaction}
             onAbortRun={runtime.abortCurrentRun}
+            onCreateSession={() => void runtime.createSession()}
             onOpenSettings={onOpenSettings}
+            onOpenSessions={openSessionsPanel}
             onResolveApproval={runtime.resolveApproval}
             onSubmitPrompt={runtime.submitPrompt}
             onToggleReasoning={runtime.toggleReasoning}
@@ -174,35 +176,6 @@ function InteractionCanvas({
           <SurfaceStatus i18n={i18n} interaction={runtime.interaction} onOpenSettings={onOpenSettings} />
         )}
       </section>
-      <aside
-        aria-hidden={sessionsPanelVisible}
-        aria-label={i18n.t("chat.sessionToolbar")}
-        className="session-toolbar"
-        inert={sessionsPanelVisible ? true : undefined}
-      >
-        <button
-          aria-label={i18n.t("sessions.title")}
-          className={sessionsPanelVisible ? "session-tool active" : "session-tool"}
-          data-tooltip={i18n.t("sessions.title")}
-          disabled={!ready}
-          onClick={openSessionsPanel}
-          title={i18n.t("sessions.title")}
-          type="button"
-        >
-          <MessageCircle size={18} />
-        </button>
-        <button
-          aria-label={i18n.t("sessions.create")}
-          className="session-tool"
-          data-tooltip={i18n.t("sessions.create")}
-          disabled={!ready}
-          onClick={() => void runtime.createSession()}
-          title={i18n.t("sessions.create")}
-          type="button"
-        >
-          <Plus size={18} />
-        </button>
-      </aside>
       {sessionsPanelVisible ? (
         <section
           aria-label={i18n.t("sessionsPanel.title")}

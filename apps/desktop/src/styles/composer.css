@@ -10,8 +10,8 @@
 
 .composer-capsule {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "input actions";
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "navigation input actions";
   grid-template-rows: 38px;
   width: 100%;
   min-width: 0;
@@ -20,7 +20,7 @@
   align-items: center;
   justify-items: stretch;
   column-gap: 10px;
-  padding: 8px 10px 8px 24px;
+  padding: 8px 10px;
   border: 1px solid rgba(243, 239, 228, 0.13);
   border-radius: 999px;
   background: rgba(23, 25, 20, 0.82);
@@ -207,6 +207,7 @@
 }
 
 .attachment-strip,
+.composer-navigation,
 .composer-actions {
   display: flex;
   align-items: center;
@@ -248,6 +249,10 @@
   border-radius: 999px;
   background: rgba(23, 25, 20, 0.44);
   cursor: pointer;
+}
+
+.composer-navigation {
+  grid-area: navigation;
 }
 
 .composer-actions {
