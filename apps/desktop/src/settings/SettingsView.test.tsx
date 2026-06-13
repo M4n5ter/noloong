@@ -26,9 +26,12 @@ describe("SettingsView", () => {
   afterEach(() => {
     cleanup();
     document.title = "";
+    window.localStorage.clear();
   });
 
   beforeEach(() => {
+    installTestLocalStorage();
+    window.localStorage.clear();
     vi.mocked(loadProfileConfig).mockResolvedValue(profileDocument());
     vi.mocked(validateProfileConfig).mockImplementation(async (text) => ({
       valid: true,
@@ -122,6 +125,38 @@ describe("SettingsView", () => {
     await waitFor(() => expect(document.title).toBe("Storage"));
   });
 
+  it("restores the last viewed settings pane", async () => {
+    const user = userEvent.setup();
+
+    window.localStorage.setItem("noloong.settings.activeNode", "storage");
+    const first = render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Storage" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Storage"));
+    await user.click(screen.getByRole("button", { name: "Advanced JSONC" }));
+    expect(window.localStorage.getItem("noloong.settings.activeNode")).toBe("jsonc");
+
+    first.unmount();
+    document.title = "";
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Advanced JSONC" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Advanced JSONC"));
+  });
+
   it("keeps the profile config path out of visible settings chrome", async () => {
     const user = userEvent.setup();
 
@@ -150,6 +185,29 @@ describe("SettingsView", () => {
     expect(screen.queryByText(/profile\.jsonc/)).not.toBeInTheDocument();
   });
 });
+
+function installTestLocalStorage(): void {
+  const entries = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        entries.set(key, value);
+      },
+      removeItem: (key: string) => {
+        entries.delete(key);
+      },
+      clear: () => {
+        entries.clear();
+      },
+      key: (index: number) => Array.from(entries.keys())[index] ?? null,
+      get length() {
+        return entries.size;
+      },
+    } satisfies Storage,
+  });
+}
 
 function profileDocument(): AppProfileConfigDocument {
   const config = {

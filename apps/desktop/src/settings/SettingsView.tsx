@@ -63,6 +63,8 @@ type SettingsNode =
   | "plugins"
   | "jsonc";
 
+const SETTINGS_ACTIVE_NODE_STORAGE_KEY = "noloong.settings.activeNode";
+
 export function SettingsView({
   i18n,
   launchOptions,
@@ -73,7 +75,7 @@ export function SettingsView({
   onRuntimeRestart: (result: AppRuntimeRestartResult) => void;
 }) {
   const [state, setState] = useState<SettingsViewState>({ status: "loading" });
-  const [activeNode, setActiveNode] = useState<SettingsNode>("provider");
+  const [activeNode, setActiveNode] = useState<SettingsNode>(() => readStoredSettingsNode());
   const validationRevisionRef = useRef(0);
 
   useEffect(() => {
@@ -211,6 +213,7 @@ export function SettingsView({
               disabled={!config && node.id !== "jsonc"}
               key={node.id}
               onClick={() => {
+                storeSettingsNode(node.id);
                 setActiveNode(node.id);
               }}
               type="button"
@@ -692,6 +695,33 @@ function syncSettingsWindowTitle(title: string): void {
     return;
   }
   void getCurrentWindow().setTitle(title).catch(() => undefined);
+}
+
+function readStoredSettingsNode(): SettingsNode {
+  try {
+    const value = window.localStorage.getItem(SETTINGS_ACTIVE_NODE_STORAGE_KEY);
+    return isSettingsNode(value) ? value : "provider";
+  } catch {
+    return "provider";
+  }
+}
+
+function storeSettingsNode(node: SettingsNode): void {
+  try {
+    window.localStorage.setItem(SETTINGS_ACTIVE_NODE_STORAGE_KEY, node);
+  } catch {
+    // The pane still changes even when local persistence is unavailable.
+  }
+}
+
+function isSettingsNode(value: string | null): value is SettingsNode {
+  return (
+    value === "profile" ||
+    value === "provider" ||
+    value === "storage" ||
+    value === "plugins" ||
+    value === "jsonc"
+  );
 }
 
 function defaultPlugin(): AgentPluginDeclaration {
