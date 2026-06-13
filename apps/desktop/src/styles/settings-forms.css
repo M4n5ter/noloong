@@ -57,17 +57,41 @@
   font-size: 13px;
 }
 
-.lens-form input,
+.lens-form input:not([type="checkbox"]),
 .lens-form select,
 .lens-form textarea,
 .json-field textarea {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid rgba(243, 239, 228, 0.12);
+  border: 1px solid rgba(243, 239, 228, 0.075);
   border-radius: 16px;
   outline: none;
-  background: rgba(32, 34, 27, 0.82);
-  color: #f3efe4;
+  background: rgba(23, 25, 20, 0.42);
+  box-shadow: inset 0 1px 0 rgba(243, 239, 228, 0.018);
+  color: rgba(243, 239, 228, 0.88);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.lens-form input:not([type="checkbox"]):hover,
+.lens-form select:hover,
+.lens-form textarea:hover,
+.json-field textarea:hover {
+  border-color: rgba(243, 239, 228, 0.105);
+  background: rgba(23, 25, 20, 0.52);
+}
+
+.lens-form input:not([type="checkbox"]):focus,
+.lens-form select:focus,
+.lens-form textarea:focus,
+.json-field textarea:focus {
+  border-color: rgba(206, 225, 239, 0.72);
+  background: rgba(23, 25, 20, 0.62);
+  box-shadow:
+    inset 0 1px 0 rgba(243, 239, 228, 0.026),
+    0 0 0 3px rgba(188, 212, 232, 0.46);
 }
 
 .inline-actions,
@@ -81,13 +105,23 @@
   border-radius: 999px;
 }
 
-.check-row {
+.lens-form .check-row {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 
-.check-row input {
-  width: auto;
+.lens-form .check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+  accent-color: rgba(206, 225, 239, 0.78);
+}
+
+.lens-form .check-row input[type="checkbox"]:focus-visible {
+  outline: 2px solid rgba(206, 225, 239, 0.72);
+  outline-offset: 3px;
 }
 
 .subsection {
