@@ -205,10 +205,10 @@ const messages = {
     "settings.backToChat": "Back to chat",
     "settings.title": "Settings",
     "settings.save": "Save",
-    "settings.saved": "Saved {path}",
-    "settings.savedAndApplied": "Saved and applied {path}",
-    "settings.savedApplyFailed": "Saved {path}, but applying it failed: {error}",
-    "settings.savedExternal": "Saved {path}. External runtime must be restarted outside the app.",
+    "settings.saved": "Saved",
+    "settings.savedAndApplied": "Saved and applied",
+    "settings.savedApplyFailed": "Saved, but applying it failed: {error}",
+    "settings.savedExternal": "Saved. Restart the external runtime to use the changes.",
     "settings.environmentTitle": "Environment",
     "settings.currentProfile": "Current profile",
     "settings.environmentSummaryLabel": "Current environment",
@@ -333,10 +333,10 @@ const messages = {
     "settings.backToChat": "返回聊天",
     "settings.title": "设置",
     "settings.save": "保存",
-    "settings.saved": "已保存 {path}",
-    "settings.savedAndApplied": "已保存并应用 {path}",
-    "settings.savedApplyFailed": "已保存 {path}，但应用失败：{error}",
-    "settings.savedExternal": "已保存 {path}。外部运行时需要在应用外重启。",
+    "settings.saved": "已保存",
+    "settings.savedAndApplied": "已保存并应用",
+    "settings.savedApplyFailed": "已保存，但应用失败：{error}",
+    "settings.savedExternal": "已保存。请重启外部运行时以使用更改。",
     "settings.environmentTitle": "环境",
     "settings.currentProfile": "当前配置档",
     "settings.environmentSummaryLabel": "当前环境",
@@ -407,19 +407,12 @@ export function createI18n(locale: UiLocale) {
       return interpolate(catalog[key], vars);
     },
     headerSubtitle(options: {
-      status: "loading" | "failed" | "ready";
-      appVersion?: string | null;
-      profileConfigPath?: string | null;
+      status: "loading" | "failed";
     }) {
       if (options.status === "loading") {
         return catalog["header.starting"];
       }
-      if (options.status === "failed") {
-        return catalog["header.failed"];
-      }
-      return `${options.appVersion || "unknown"} · ${
-        options.profileConfigPath || catalog["header.starterDraft"]
-      }`;
+      return catalog["header.failed"];
     },
     disconnected(status: AppInteractionStatus | null | undefined) {
       if (status?.status === "unavailable") {

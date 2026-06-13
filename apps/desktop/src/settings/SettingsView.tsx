@@ -136,8 +136,8 @@ export function SettingsView({
               ...current,
               draft: applySavedDocument(current.draft, document),
               notice: launchOptions.runtimeControlEndpoint
-                ? i18n.t("settings.saved", { path: document.path })
-                : i18n.t("settings.savedExternal", { path: document.path }),
+                ? i18n.t("settings.saved")
+                : i18n.t("settings.savedExternal"),
             }
           : current,
       );
@@ -159,7 +159,7 @@ export function SettingsView({
       onRuntimeRestart(restart);
       setState((current) =>
         current.status === "ready"
-          ? { ...current, notice: i18n.t("settings.savedAndApplied", { path: document.path }) }
+          ? { ...current, notice: i18n.t("settings.savedAndApplied") }
           : current,
       );
     } catch (error) {
@@ -168,7 +168,6 @@ export function SettingsView({
           ? {
               ...current,
               notice: i18n.t("settings.savedApplyFailed", {
-                path: document.path,
                 error: String(error),
               }),
             }
@@ -231,9 +230,6 @@ export function SettingsView({
             </button>
           ))}
         </nav>
-        <p className="settings-path" title={draft.path}>
-          {settingsPathLabel(draft.path)}
-        </p>
       </aside>
       <section className="settings-workbench-detail">
         <div className="lens-header">
@@ -723,10 +719,6 @@ function settingsNodeSubtitle(
     case "jsonc":
       return i18n.t("settings.savedState");
   }
-}
-
-function settingsPathLabel(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
 function defaultPlugin(): AgentPluginDeclaration {

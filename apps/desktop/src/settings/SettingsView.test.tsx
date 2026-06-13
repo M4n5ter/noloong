@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppProfileConfigDocument } from "../generated/contracts";
 import { createI18n } from "../i18n";
 import { SettingsView } from "./SettingsView";
@@ -23,6 +23,10 @@ vi.mock("./api", () => ({
 }));
 
 describe("SettingsView", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     vi.mocked(loadProfileConfig).mockResolvedValue(profileDocument());
     vi.mocked(validateProfileConfig).mockImplementation(async (text) => ({
@@ -99,6 +103,35 @@ describe("SettingsView", () => {
     expect(
       summary.compareDocumentPosition(modelField) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("keeps the profile config path out of visible settings chrome", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{ runtimeControlEndpoint: { httpUrl: "http://127.0.0.1:7777" } }}
+        onBack={() => {}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByLabelText("Current environment");
+    expect(screen.queryByText("profile.jsonc")).not.toBeInTheDocument();
+
+    const model = screen
+      .getAllByLabelText("Model")
+      .find((element): element is HTMLInputElement => element instanceof HTMLInputElement);
+    if (!model) {
+      throw new Error("Expected a model input field");
+    }
+    await user.clear(model);
+    await user.type(model, "gpt-5.5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Saved and applied")).toBeInTheDocument();
+    expect(screen.queryByText(/profile\.jsonc/)).not.toBeInTheDocument();
   });
 });
 

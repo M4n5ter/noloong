@@ -122,16 +122,6 @@
   font-size: 11px;
 }
 
-.settings-path {
-  overflow: hidden;
-  margin: 0;
-  color: rgba(243, 239, 228, 0.34);
-  font-size: 11px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .settings-workbench-detail {
   display: grid;
   height: calc(100vh - 116px);
