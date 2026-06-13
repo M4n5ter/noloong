@@ -54,14 +54,6 @@
     overflow: visible;
   }
 
-  .environment-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .environment-summary-item + .environment-summary-item::before {
-    display: none;
-  }
-
   .lens-header {
     flex-direction: column;
   }
@@ -80,10 +72,6 @@
 
   .composer-capsule {
     padding-left: 18px;
-  }
-
-  .environment-summary {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .settings-pane-button {
