@@ -168,31 +168,35 @@
 }
 
 .message.user {
-  justify-self: end;
-  width: fit-content;
-  max-width: min(480px, 68%);
+  justify-self: stretch;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
-  gap: 5px;
-  padding: 8px 0;
-  color: rgba(243, 239, 228, 0.78);
+  gap: 6px;
+  padding: 10px 0 10px 16px;
+  border-left: 1px solid rgba(229, 212, 179, 0.18);
+  color: rgba(243, 239, 228, 0.7);
   text-align: left;
 }
 
 .message.user p {
   min-width: 0;
+  max-width: 680px;
   margin: 0;
-  padding: 10px 14px;
-  border: 1px solid rgba(243, 239, 228, 0.08);
-  border-radius: 18px;
-  background: rgba(243, 239, 228, 0.055);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.message.user.pending p {
-  border-color: rgba(229, 212, 179, 0.14);
-  background: rgba(229, 212, 179, 0.075);
+.message.user.pending {
+  border-left-color: rgba(229, 212, 179, 0.34);
+  background:
+    linear-gradient(90deg, rgba(229, 212, 179, 0.055), transparent 42%),
+    transparent;
 }
 
 .markdown-body {
