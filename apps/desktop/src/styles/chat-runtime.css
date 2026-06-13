@@ -1,5 +1,10 @@
-.chat-surface.runtime-ready {
+.chat-surface {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-surface.runtime-ready {
   grid-template-columns: minmax(0, 1fr) 56px;
   grid-template-rows: minmax(0, 1fr);
   column-gap: clamp(16px, 2.8vw, 36px);
@@ -29,9 +34,13 @@
 
 .conversation-surface.runtime-unavailable .surface-status-pill {
   position: static;
-  max-width: min(520px, 100%);
-  padding: 14px 16px;
-  border-radius: 22px;
+  display: grid;
+  max-width: min(360px, 100%);
+  justify-items: center;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 24px;
+  text-align: center;
 }
 
 .chat-surface.sessions-panel-open .conversation-surface {
@@ -80,6 +89,10 @@
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
+}
+
+.conversation-surface.runtime-unavailable .surface-status-pill h1 {
+  font-size: 15px;
 }
 
 .conversation {

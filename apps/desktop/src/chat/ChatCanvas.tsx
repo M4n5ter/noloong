@@ -274,7 +274,7 @@ function SurfaceStatus({
       {interaction.status === "disconnected" ? (
         <button className="text-button subtle icon-text" onClick={onOpenSettings} type="button">
           <Settings size={14} />
-          <span>{i18n.t("chat.openSettings")}</span>
+          <span>{i18n.t("chat.prepareEnvironment")}</span>
         </button>
       ) : null}
     </section>

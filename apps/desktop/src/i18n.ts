@@ -13,6 +13,7 @@ export type I18nKey =
   | "bootstrap.loadingDetail"
   | "bootstrap.failedTitle"
   | "chat.openSettings"
+  | "chat.prepareEnvironment"
   | "chat.sessionToolbar"
   | "chat.connectingTitle"
   | "chat.connectingDetail"
@@ -141,15 +142,15 @@ const messages = {
     "bootstrap.loadingDetail": "Reading the Rust-side launch state.",
     "bootstrap.failedTitle": "Bootstrap failed",
     "chat.openSettings": "Open settings",
+    "chat.prepareEnvironment": "Set up environment",
     "chat.sessionToolbar": "Session controls",
     "chat.connectingTitle": "Connecting",
     "chat.connectingDetail": "Initializing the interaction client.",
     "chat.missingConfigTitle": "Profile configuration is missing",
     "chat.missingConfigDetail":
       "Create or save a profile configuration before starting a chat session.",
-    "chat.unavailableTitle": "Runtime unavailable",
-    "chat.unavailableDetail":
-      "No interaction endpoint is active for this launch. Check the runtime or open settings.",
+    "chat.unavailableTitle": "Choose an environment",
+    "chat.unavailableDetail": "Set up a profile before starting a conversation.",
     "chat.initializationFailedTitle": "Interaction initialization failed",
     "chat.failedTitle": "Interaction failed",
     "sessions.title": "Sessions",
@@ -271,13 +272,14 @@ const messages = {
     "bootstrap.loadingDetail": "正在读取 Rust 侧启动状态。",
     "bootstrap.failedTitle": "启动失败",
     "chat.openSettings": "打开设置",
+    "chat.prepareEnvironment": "设置环境",
     "chat.sessionToolbar": "会话控制",
     "chat.connectingTitle": "正在连接",
     "chat.connectingDetail": "正在初始化交互客户端。",
     "chat.missingConfigTitle": "缺少配置",
     "chat.missingConfigDetail": "请先创建或保存配置，然后再开始聊天会话。",
-    "chat.unavailableTitle": "运行时不可用",
-    "chat.unavailableDetail": "本次启动没有可用的交互端点。请检查运行时，或先打开设置。",
+    "chat.unavailableTitle": "选择环境",
+    "chat.unavailableDetail": "开始对话前，请先设置一个配置档。",
     "chat.initializationFailedTitle": "交互初始化失败",
     "chat.failedTitle": "交互失败",
     "sessions.title": "会话",

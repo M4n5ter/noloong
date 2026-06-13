@@ -43,6 +43,36 @@ describe("Noloong app chat regression harness", () => {
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
   });
 
+  it("turns a missing interaction endpoint into an environment setup prompt", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+
+    render(
+      <App
+        dependencies={{
+          ...dependenciesFor(runtime),
+          bootstrap: async () => ({
+            appVersion: "test",
+            interactionEndpoint: null,
+            interactionStatus: { status: "unavailable" },
+            locale: "en",
+            profileConfigPath: null,
+          }),
+        }}
+      />,
+    );
+
+    const heading = await screen.findByRole("heading", { name: "Choose an environment" });
+    const status = heading.closest('[role="status"]');
+    expect(status).toBeInstanceOf(HTMLElement);
+    if (!(status instanceof HTMLElement)) {
+      throw new Error("Expected the environment setup prompt to be announced as status");
+    }
+    expect(heading).toBeVisible();
+    expect(status).toHaveTextContent("Set up a profile before starting a conversation.");
+    expect(within(status).getByRole("button", { name: "Set up environment" })).toBeVisible();
+    expect(document.body).not.toHaveTextContent(/runtime|endpoint/i);
+  });
+
   it("presents active session state as human context instead of raw status tokens", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
 

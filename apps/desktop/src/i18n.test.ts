@@ -16,9 +16,7 @@ describe("app i18n", () => {
     const i18n = createI18n("en");
 
     expect(i18n.disconnected(null).title).toBe("Profile configuration is missing");
-    expect(i18n.disconnected({ status: "unavailable" }).title).toBe(
-      "Runtime unavailable",
-    );
+    expect(i18n.disconnected({ status: "unavailable" }).title).toBe("Choose an environment");
     expect(i18n.disconnected({ status: "failed", error: "rpc failed" })).toEqual({
       title: "Interaction initialization failed",
       detail: "rpc failed",
