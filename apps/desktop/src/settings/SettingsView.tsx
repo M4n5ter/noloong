@@ -44,7 +44,6 @@ import {
   deleteSelectedPlugin,
   deleteSelectedProfile,
   discardSettingsChanges,
-  providerModel,
   renameSelectedProfile,
   selectedProfile,
   selectProfile,
@@ -197,21 +196,15 @@ export function SettingsView({
 
   const draft = state.draft;
   const config = draft.config;
-  const profile = selectedProfile(draft);
   const showSaveActions = draft.dirty || draft.saving;
   const hasFeedback = state.notice != null || draft.error != null;
+  const nodes = settingsNodes(i18n, config != null);
 
   return (
     <section className="settings-workbench" data-render-surface="environment">
-      <aside className="settings-workbench-sidebar">
-        <header className="settings-workbench-heading">
-          <div>
-            <h1 data-render-heading>{i18n.t("settings.environmentTitle")}</h1>
-            <p>{profile?.displayName ?? i18n.t("settings.currentProfile")}</p>
-          </div>
-        </header>
+      <header className="settings-workbench-toolbar">
         <nav aria-label={i18n.t("settings.environmentTitle")} className="settings-pane-nav">
-          {settingsNodes(i18n, config != null).map((node) => (
+          {nodes.map((node) => (
             <button
               aria-label={node.label}
               className={panelNode === node.id ? "settings-pane-button active" : "settings-pane-button"}
@@ -223,14 +216,11 @@ export function SettingsView({
               type="button"
             >
               <node.icon size={18} />
-              <span>
-                <strong>{node.label}</strong>
-                <small>{settingsNodeSubtitle(node.id, i18n, profile ?? undefined)}</small>
-              </span>
+              <span>{node.label}</span>
             </button>
           ))}
         </nav>
-      </aside>
+      </header>
       <section className="settings-workbench-detail">
         <div className="lens-header">
           <div>
@@ -693,25 +683,6 @@ function settingsNodeLabel(activeNode: SettingsNode, i18n: AppI18n) {
       return i18n.t("settings.storage");
     case "plugins":
       return i18n.t("settings.plugins");
-  }
-}
-
-function settingsNodeSubtitle(
-  activeNode: SettingsNode,
-  i18n: AppI18n,
-  profile: HostProfileConfig["profiles"][number] | undefined,
-): string {
-  switch (activeNode) {
-    case "profile":
-      return profile?.profileId ?? i18n.t("settings.currentProfile");
-    case "provider":
-      return profile ? providerModel(profile.provider) : i18n.t("settings.fixJsonc");
-    case "storage":
-      return i18n.t("settings.eventStore");
-    case "plugins":
-      return i18n.t("settings.noPlugins");
-    case "jsonc":
-      return i18n.t("settings.savedState");
   }
 }
 

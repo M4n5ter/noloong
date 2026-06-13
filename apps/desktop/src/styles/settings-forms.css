@@ -101,10 +101,6 @@
   gap: 8px;
 }
 
-.lens-actions {
-  border-radius: 999px;
-}
-
 .lens-form .check-row {
   display: flex;
   align-items: center;

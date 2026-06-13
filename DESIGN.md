@@ -344,11 +344,12 @@ macOS 窗口不是品牌画布，也不是网页 chrome。
 
 - 设置应通过 App menu / Command-Comma 进入，而不是作为 chat 工作面的常驻工具按钮。
 - 设置窗口应是稳定、可预期的多 pane 结构；导航可以被视觉重塑，但行为上要像系统 Settings。
-- Settings navigation 应使用稳定的 toolbar-based multi-pane 模型；toolbar 不可自定义，并应始终可见。
+- Settings navigation 应使用稳定的 toolbar-based multi-pane 模型；toolbar 不可自定义，并应始终可见。这里的 toolbar 是窗口顶部的 pane 切换，不是左侧永久 sidebar，也不是主 chat 的工具入口。
 - 设置窗口标题应表达当前 pane，不重复应用名，不暴露配置路径或调试状态。
 - Settings 窗口下次打开应恢复上次 pane；关闭、重新打开和 Command-Comma 的行为都要一致。
 - Settings 窗口不应把最小化、最大化当作核心路径；如果平台能力允许，应弱化或禁用不必要的窗口控制。
 - 主 chat 的 toolbar、边缘工具和底部胶囊不能把 Settings 当作高频内容动作；环境损坏或首次配置时可以提供上下文入口。
+- Save、Discard、validation feedback 这类关键动作和反馈必须贴近当前 pane 的标题或具体字段；不要固定在窗口底部，因为 macOS 窗口底部经常被移出屏幕。
 
 在这个前提下，设置内容应该被设计成“环境编辑器”：
 
