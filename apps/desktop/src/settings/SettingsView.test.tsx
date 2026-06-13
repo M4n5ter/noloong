@@ -61,8 +61,10 @@ describe("SettingsView", () => {
     );
 
     const model = await screen.findByLabelText("Model");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     await user.clear(model);
     await user.type(model, "gpt-5.5");
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(model).toBeDisabled();

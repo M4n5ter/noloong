@@ -103,6 +103,12 @@ button {
   color: #f3efe4;
 }
 
+.text-button.primary:disabled {
+  border-color: rgba(243, 239, 228, 0.1);
+  background: rgba(23, 25, 20, 0.5);
+  color: rgba(243, 239, 228, 0.42);
+}
+
 .text-button {
   display: inline-flex;
   min-height: 36px;
@@ -126,6 +132,10 @@ button {
 .text-button:disabled {
   cursor: default;
   opacity: 0.42;
+}
+
+.text-button:disabled:hover {
+  border-color: rgba(243, 239, 228, 0.1);
 }
 
 .icon-text {
