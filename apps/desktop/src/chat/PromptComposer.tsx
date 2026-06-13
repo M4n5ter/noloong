@@ -1,6 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Maximize2, Minimize2, Paperclip, Send, X } from "lucide-react";
+import { Maximize2, Minimize2, Paperclip, Send, Square, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AppI18n } from "../i18n";
 import { pathsToAttachments, type PromptAttachment, type PromptSubmission } from "./attachments";
@@ -10,11 +10,13 @@ const COMPACT_TEXT_LIMIT = 96;
 export function PromptComposer({
   disabled,
   i18n,
+  onAbortRun,
   onSubmit,
   placeholder,
 }: {
   disabled: boolean;
   i18n: AppI18n;
+  onAbortRun?: () => Promise<void>;
   onSubmit: (submission: PromptSubmission) => Promise<void>;
   placeholder: string;
 }) {
@@ -27,6 +29,7 @@ export function PromptComposer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const disabledRef = useRef(disabled);
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled;
+  const canAbort = Boolean(onAbortRun);
   const canExpand = expanded || needsExpandedComposer(text);
   const previewingCompactOverflow = canExpand && !expanded;
   const compactPreview = firstPreviewLine(text);
@@ -224,12 +227,21 @@ export function PromptComposer({
             <Paperclip size={16} />
           </button>
           <button
-            aria-label={i18n.t("composer.send")}
-            className="send-button"
-            disabled={!canSend}
-            type="submit"
+            aria-label={canAbort ? i18n.t("run.stop") : i18n.t("composer.send")}
+            className={canAbort ? "send-button stop-run-button" : "send-button"}
+            disabled={!canSend && !canAbort}
+            onClick={
+              canAbort
+                ? (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void onAbortRun?.();
+                  }
+                : undefined
+            }
+            type={canAbort ? "button" : "submit"}
           >
-            <Send size={16} />
+            {canAbort ? <Square size={14} /> : <Send size={16} />}
           </button>
         </div>
       </div>

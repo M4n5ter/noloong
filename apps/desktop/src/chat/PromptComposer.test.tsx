@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createI18n } from "../i18n";
@@ -19,7 +19,32 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 describe("PromptComposer", () => {
   afterEach(() => {
+    cleanup();
     vi.clearAllMocks();
+  });
+
+  it("uses the send control as the stop control while a run is active", async () => {
+    const user = userEvent.setup();
+    const onAbortRun = vi.fn().mockResolvedValue(undefined);
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <PromptComposer
+        disabled
+        i18n={createI18n("en")}
+        onAbortRun={onAbortRun}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const stop = screen.getByRole("button", { name: "Stop" });
+    expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
+
+    await user.click(stop);
+
+    expect(onAbortRun).toHaveBeenCalledTimes(1);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("shows scroll edge affordances only where expanded input has clipped content", async () => {

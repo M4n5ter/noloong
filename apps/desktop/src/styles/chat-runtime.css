@@ -136,13 +136,6 @@
   gap: 16px;
 }
 
-.session-status-row {
-  display: flex;
-  min-height: 30px;
-  align-items: center;
-  justify-content: flex-end;
-}
-
 .session-title-row > div {
   min-width: 0;
 }
@@ -174,29 +167,6 @@
   color: rgba(243, 239, 228, 0.54);
   font-size: 15px;
   line-height: 1.55;
-}
-
-.run-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.stop-button {
-  min-height: 28px;
-  padding: 5px 10px;
-  border: 1px solid rgba(243, 239, 228, 0.12);
-  border-radius: 999px;
-  background: rgba(42, 47, 37, 0.72);
-  color: rgba(243, 239, 228, 0.7);
-  font-size: 12px;
-  line-height: 16px;
-}
-
-.stop-button {
-  cursor: pointer;
-  background: rgba(23, 25, 20, 0.5);
-  color: rgba(243, 239, 228, 0.62);
 }
 
 .message {

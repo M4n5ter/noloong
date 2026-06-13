@@ -215,15 +215,8 @@ export function TranscriptView({
                 <h1 data-render-heading>{title}</h1>
                 <p>{subtitle}</p>
               </div>
-              {canAbort ? <RunControl i18n={i18n} onAbortRun={onAbortRun} /> : null}
             </div>
-          ) : (
-            canAbort ? (
-              <div className="session-status-row">
-                <RunControl i18n={i18n} onAbortRun={onAbortRun} />
-              </div>
-            ) : null
-          )}
+          ) : null}
           {timelineEmpty ? (
             <p className="transcript-empty-prompt">{i18n.t("transcript.empty")}</p>
           ) : (
@@ -243,6 +236,7 @@ export function TranscriptView({
       <PromptComposer
         disabled={!canSubmit}
         i18n={i18n}
+        onAbortRun={canAbort ? onAbortRun : undefined}
         onSubmit={submitPrompt}
         placeholder={
           interaction.streamStatus === "ready"
@@ -250,22 +244,6 @@ export function TranscriptView({
             : interaction.streamError ?? i18n.t("composer.connecting")
         }
       />
-    </div>
-  );
-}
-
-function RunControl({
-  i18n,
-  onAbortRun,
-}: {
-  i18n: AppI18n;
-  onAbortRun: () => Promise<void>;
-}) {
-  return (
-    <div className="run-status">
-      <button className="stop-button" onClick={() => void onAbortRun()} type="button">
-        {i18n.t("run.stop")}
-      </button>
     </div>
   );
 }

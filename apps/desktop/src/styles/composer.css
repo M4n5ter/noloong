@@ -298,3 +298,14 @@
   background: #e5d4b3;
   color: #20221b;
 }
+
+.stop-run-button {
+  border-color: rgba(182, 117, 85, 0.3);
+  background: rgba(182, 117, 85, 0.62);
+  color: rgba(243, 239, 228, 0.9);
+}
+
+.stop-run-button:hover {
+  border-color: rgba(229, 212, 179, 0.34);
+  background: rgba(182, 117, 85, 0.72);
+}
