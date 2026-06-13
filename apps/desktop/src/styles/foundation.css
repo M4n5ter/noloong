@@ -82,10 +82,7 @@ button {
   flex: 1;
 }
 
-.text-button,
-.composer-tool,
-.composer-expand,
-.send-button {
+.text-button {
   border: 1px solid rgba(243, 239, 228, 0.13);
   background: rgba(23, 25, 20, 0.78);
   cursor: pointer;
@@ -96,10 +93,7 @@ button {
     opacity 160ms ease;
 }
 
-.text-button:hover,
-.composer-tool:hover,
-.composer-expand:hover,
-.send-button:hover {
+.text-button:hover {
   border-color: rgba(168, 196, 220, 0.42);
 }
 
@@ -129,9 +123,7 @@ button {
   color: #e5d4b3;
 }
 
-.text-button:disabled,
-.composer-tool:disabled,
-.send-button:disabled {
+.text-button:disabled {
   cursor: default;
   opacity: 0.42;
 }
