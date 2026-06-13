@@ -4,6 +4,8 @@ import {
   applyJsoncValidation,
   applySavedDocument,
   canSaveSettings,
+  discardSettingsChanges,
+  renameSelectedProfile,
   selectedProfile,
   settingsDraftFromDocument,
   updateSelectedProfile,
@@ -118,6 +120,66 @@ describe("settings draft store", () => {
 
     expect(saved.exists).toBe(true);
     expect(saved.dirty).toBe(false);
+  });
+
+  it("renames the selected profile and keeps default profile references coherent", () => {
+    const config = sampleConfig();
+    config.profiles.push({
+      ...structuredClone(config.profiles[0]),
+      profileId: "secondary",
+      displayName: "Secondary",
+    });
+    const draft = settingsDraftFromDocument({
+      path: "/tmp/profile.jsonc",
+      text: JSON.stringify(config, null, 2),
+      exists: true,
+      validation: {
+        valid: true,
+        config,
+      },
+    });
+
+    const renamed = renameSelectedProfile(draft, "daily-driver");
+
+    expect(renamed.selectedProfileId).toBe("daily-driver");
+    expect(renamed.config?.defaultProfileId).toBe("daily-driver");
+    expect(selectedProfile(renamed)?.profileId).toBe("daily-driver");
+
+    const duplicate = renameSelectedProfile(renamed, "secondary");
+
+    expect(duplicate.selectedProfileId).toBe("daily-driver");
+    expect(duplicate.config?.profiles.map((profile) => profile.profileId)).toEqual([
+      "daily-driver",
+      "secondary",
+    ]);
+  });
+
+  it("discards to the last saved typed config even when the saved text is JSONC", () => {
+    const config = sampleConfig();
+    const savedText = [
+      "{",
+      "  // JSONC comments must remain discard-safe.",
+      '  "defaultProfileId": "chatgpt-responses",',
+      '  "profiles": [],',
+      "}",
+    ].join("\n");
+    const draft = settingsDraftFromDocument({
+      path: "/tmp/profile.jsonc",
+      text: savedText,
+      exists: true,
+      validation: {
+        valid: true,
+        config,
+      },
+    });
+    const edited = updateSelectedProfile(draft, { displayName: "Unsaved" });
+
+    const discarded = discardSettingsChanges(edited);
+
+    expect(discarded.text).toBe(savedText);
+    expect(discarded.config).toBe(config);
+    expect(selectedProfile(discarded)?.displayName).toBe("ChatGPT Responses");
+    expect(discarded.dirty).toBe(false);
   });
 });
 

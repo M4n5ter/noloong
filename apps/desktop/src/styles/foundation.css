@@ -1,0 +1,177 @@
+:root {
+  color: #f3efe4;
+  background: #20221b;
+  font-family: "Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  font-feature-settings: "ss01" 1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+.app-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #20221b;
+}
+
+.title-bar {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  height: 54px;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 24px 0 92px;
+  user-select: none;
+}
+
+.title-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.title-copy strong {
+  color: rgba(243, 239, 228, 0.54);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.title-copy span {
+  overflow: hidden;
+  max-width: min(52vw, 520px);
+  color: rgba(243, 239, 228, 0.46);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title-drag-spacer {
+  align-self: stretch;
+  flex: 1;
+}
+
+.text-button,
+.context-tool,
+.composer-tool,
+.composer-expand,
+.send-button {
+  border: 1px solid rgba(243, 239, 228, 0.13);
+  background: rgba(23, 25, 20, 0.78);
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease;
+}
+
+.text-button:hover,
+.context-tool:hover,
+.composer-tool:hover,
+.composer-expand:hover,
+.send-button:hover {
+  border-color: rgba(168, 196, 220, 0.42);
+}
+
+.text-button.primary,
+.context-tool.active {
+  border-color: rgba(168, 196, 220, 0.44);
+  background: rgba(58, 84, 107, 0.72);
+  color: #f3efe4;
+}
+
+.text-button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 13px;
+  border-radius: 999px;
+  color: rgba(243, 239, 228, 0.72);
+}
+
+.text-button.subtle {
+  background: transparent;
+}
+
+.text-button.danger {
+  border-color: rgba(182, 117, 85, 0.42);
+  color: #e5d4b3;
+}
+
+.text-button:disabled,
+.context-tool:disabled,
+.composer-tool:disabled,
+.send-button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.icon-text {
+  white-space: nowrap;
+}
+
+.centered-status {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  gap: 16px;
+  padding: 32px;
+  text-align: center;
+}
+
+.centered-status h1 {
+  margin: 0;
+  font-size: clamp(28px, 5vw, 64px);
+}
+
+.centered-status p,
+.muted {
+  color: rgba(243, 239, 228, 0.48);
+}
+
+.error-text,
+.settings-error {
+  color: #e5d4b3;
+}
+
+.chat-surface,
+.settings-workbench {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  padding: 78px clamp(18px, 4vw, 56px) 28px;
+}

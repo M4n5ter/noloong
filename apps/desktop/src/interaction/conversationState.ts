@@ -50,6 +50,8 @@ export type ApprovalTimelineItem = {
   toolName: string;
   prompt: string;
   reason: string;
+  command: string | null;
+  cwd: string | null;
   permissionDescriptions: string[];
   status: "pending" | "approved" | "denied" | "expired";
 };
@@ -124,6 +126,7 @@ export function applyDisplayEventToConversation(
     case "run_completed":
       return {
         ...state,
+        timeline: settleRunReasoning(state.timeline, event.runId),
         runStatus: "completed",
         currentRunId: event.runId,
         pauseReason: null,
@@ -131,6 +134,7 @@ export function applyDisplayEventToConversation(
     case "run_failed":
       return {
         ...state,
+        timeline: settleRunReasoning(state.timeline, event.runId),
         runStatus: "failed",
         currentRunId: event.runId,
         runError: event.error,
@@ -138,6 +142,7 @@ export function applyDisplayEventToConversation(
     case "run_aborted":
       return {
         ...state,
+        timeline: settleRunReasoning(state.timeline, event.runId),
         runStatus: "aborted",
         currentRunId: event.runId,
       };
@@ -178,12 +183,7 @@ export function applyDisplayEventToConversation(
     case "thought_completed":
       return {
         ...state,
-        timeline: upsertReasoning(state.timeline, event.thoughtId, (thought) => ({
-          ...thought,
-          runId: event.runId,
-          status: "completed",
-          elapsedMs: event.elapsedMs,
-        })),
+        timeline: completeReasoning(state.timeline, event.thoughtId, event.runId, event.elapsedMs),
       };
     case "tool_started":
       return {
@@ -454,6 +454,39 @@ function defaultReasoning(thoughtId: string): ReasoningTimelineItem {
   };
 }
 
+function completeReasoning(
+  timeline: TimelineItem[],
+  thoughtId: string,
+  runId: string,
+  elapsedMs: number,
+): TimelineItem[] {
+  const completed = upsertReasoning(timeline, thoughtId, (thought) => ({
+    ...thought,
+    runId,
+    status: "completed",
+    elapsedMs,
+  }));
+  return completed.filter(
+    (item) => item.kind !== "reasoning" || item.thoughtId !== thoughtId || hasReasoningContent(item),
+  );
+}
+
+function settleRunReasoning(timeline: TimelineItem[], runId: string): TimelineItem[] {
+  return timeline.flatMap((item) => {
+    if (item.kind !== "reasoning" || item.runId !== runId || item.status !== "running") {
+      return [item];
+    }
+    if (!hasReasoningContent(item)) {
+      return [];
+    }
+    return [{ ...item, status: "completed" }];
+  });
+}
+
+function hasReasoningContent(thought: ReasoningTimelineItem): boolean {
+  return reasoningVisibleText(thought).trim().length > 0;
+}
+
 function upsertReasoning(
   timeline: TimelineItem[],
   thoughtId: string,
@@ -523,6 +556,7 @@ function updateApprovalStatus(
 }
 
 function approvalFromRequest(approval: AppToolApprovalRequest): ApprovalTimelineItem {
+  const details = approvalRequestDetails(approval);
   return {
     kind: "approval",
     approvalId: approval.approvalId,
@@ -530,11 +564,35 @@ function approvalFromRequest(approval: AppToolApprovalRequest): ApprovalTimeline
     toolName: approval.toolCall.name,
     prompt: approval.request.prompt ?? "",
     reason: approval.request.reason ?? "",
+    command: details.command,
+    cwd: details.cwd,
     permissionDescriptions: (approval.permissions ?? []).map(
       (permission) => permission.description ?? permission.capability,
     ),
     status: "pending",
   };
+}
+
+function approvalRequestDetails(approval: AppToolApprovalRequest): {
+  command: string | null;
+  cwd: string | null;
+} {
+  const metadata = recordValue(approval.request.metadata);
+  const args = recordValue(approval.toolCall.arguments);
+  return {
+    command: stringValue(metadata?.command) ?? stringValue(args?.command),
+    cwd: stringValue(metadata?.cwd) ?? stringValue(args?.cwd),
+  };
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function appendAssistantDelta(

@@ -1,0 +1,134 @@
+.lens-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.lens-header h2 {
+  margin: 0;
+  color: rgba(243, 239, 228, 0.88);
+  font-size: 22px;
+  font-weight: 660;
+  line-height: 1.15;
+}
+
+.lens-header p {
+  margin: 0;
+  color: rgba(243, 239, 228, 0.42);
+  font-size: 13px;
+}
+
+.settings-notice {
+  margin: 0;
+  color: #a4d17d;
+}
+
+.settings-error {
+  margin: 0;
+}
+
+.settings-pane-fieldset {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-pane-fieldset:disabled {
+  opacity: 0.68;
+}
+
+.lens-form,
+.jsonc-pane,
+.json-list {
+  display: grid;
+  min-height: 0;
+  gap: 14px;
+  overflow: auto;
+}
+
+.lens-form label,
+.json-field {
+  display: grid;
+  gap: 7px;
+  color: rgba(243, 239, 228, 0.48);
+  font-size: 13px;
+}
+
+.lens-form input,
+.lens-form select,
+.lens-form textarea,
+.json-field textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(243, 239, 228, 0.12);
+  border-radius: 16px;
+  outline: none;
+  background: rgba(32, 34, 27, 0.82);
+  color: #f3efe4;
+}
+
+.inline-actions,
+.lens-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check-row {
+  display: flex !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.check-row input {
+  width: auto;
+}
+
+.subsection {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(243, 239, 228, 0.075);
+  border-radius: 18px;
+  background: rgba(243, 239, 228, 0.025);
+}
+
+.subsection h3 {
+  margin: 0;
+  color: rgba(243, 239, 228, 0.74);
+  font-size: 13px;
+  font-weight: 660;
+}
+
+.jsonc-pane {
+  min-height: 0;
+}
+
+.jsonc-pane > p {
+  margin: 0;
+  color: rgba(243, 239, 228, 0.42);
+}
+
+.cm-editor {
+  min-height: 300px;
+  max-height: 100%;
+  border: 1px solid rgba(243, 239, 228, 0.1);
+  border-radius: 22px;
+  overflow: hidden;
+  background: #171914;
+}
+
+.json-list-item {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(243, 239, 228, 0.09);
+  border-radius: 22px;
+}
+
+.json-field small {
+  color: #e5d4b3;
+}

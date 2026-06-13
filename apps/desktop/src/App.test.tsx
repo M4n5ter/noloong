@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -11,8 +12,13 @@ import {
   FakeInteractionRuntime,
 } from "./test/fakeInteractionRuntime";
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
+
 describe("Noloong app chat regression harness", () => {
   beforeEach(() => {
+    vi.mocked(open).mockReset();
     let frameTime = 0;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       frameTime += 16;
@@ -31,29 +37,111 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    expect(await screen.findByText("fake-interaction · test")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "New session" })).toBeInTheDocument();
     expect(screen.getAllByText("default · idle").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
   });
 
-  it("declares native Tauri title bar drag regions", async () => {
+  it("opens settings with the macOS settings shortcut and returns to chat", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    expect(await screen.findByText("fake-interaction · test")).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "New session" });
+    await user.keyboard("{Meta>},{/Meta}");
 
-    expect(document.querySelector(".title-bar")).toHaveAttribute(
-      "data-tauri-drag-region",
-      "deep",
-    );
-    expect(screen.getByRole("button", { name: "Chat" })).toHaveAttribute(
-      "data-tauri-drag-region",
-      "false",
-    );
-    expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute(
-      "data-tauri-drag-region",
-      "false",
-    );
+    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to chat" }));
+
+    expect(screen.getByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
+  });
+
+  it("also accepts the control-comma settings shortcut fallback", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByRole("heading", { name: "New session" });
+    await user.keyboard("{Control>},{/Control}");
+
+    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeInTheDocument();
+  });
+
+  it("opens an environment pane directly from Provider", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByRole("heading", { name: "New session" });
+    await user.keyboard("{Meta>},{/Meta}");
+    await screen.findByRole("button", { name: "Back to chat" });
+
+    await user.click(screen.getByRole("button", { name: "Provider" }));
+
+    expect(await screen.findByRole("heading", { name: "Provider" })).toBeInTheDocument();
+  });
+
+  it("keeps the desktop session toolbar icon-only with accessible names", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByRole("heading", { name: "New session" });
+    const toolbar = screen.getByRole("complementary", { name: "Session controls" });
+
+    expect(within(toolbar).getByRole("button", { name: "Sessions" })).toBeInTheDocument();
+    expect(within(toolbar).getByRole("button", { name: "Create session" })).toBeInTheDocument();
+    expect(within(toolbar).queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
+
+    await user.click(within(toolbar).getByRole("button", { name: "Sessions" }));
+
+    expect(screen.getByRole("dialog", { name: "Sessions" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Return" })).toHaveFocus();
+    expect(within(toolbar).queryByRole("button", { name: "Sessions" })).not.toBeInTheDocument();
+  });
+
+  it("opens the sessions panel as a modal and restores focus when it closes", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    const sessionsButton = await screen.findByRole("button", { name: "Sessions" });
+    await user.click(sessionsButton);
+
+    const dialog = screen.getByRole("dialog", { name: "Sessions" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Return" })).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(sessionsButton).toHaveFocus();
+  });
+
+  it("does not leave the chat inert if the sessions panel action fails", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+    runtime.failNextCreateSession();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await user.click(await screen.findByRole("button", { name: "Sessions" }));
+    expect(screen.getByRole("dialog", { name: "Sessions" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Create session" }));
+
+    const failureStatus = await screen.findByRole("status");
+    expect(failureStatus).toHaveTextContent("Interaction failed");
+    expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(within(failureStatus).getByRole("heading", { name: "Interaction failed" })).toBeVisible();
+    expect(screen.getByRole("complementary", { name: "Session controls" })).toBeVisible();
   });
 
   it("shows the local user message immediately after sending", async () => {
@@ -70,6 +158,94 @@ describe("Noloong app chat regression harness", () => {
     expect(runtime.promptRequests[0]).toMatchObject({
       sessionId: "session-1",
       input: { type: "text", text: "hello from user" },
+    });
+  });
+
+  it("reveals the composer expander when measured text overflows the compact capsule", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    const composer = await screen.findByPlaceholderText("Write a message...");
+    expect(screen.queryByRole("button", { name: "Expand composer" })).not.toBeInTheDocument();
+    Object.defineProperties(composer, {
+      clientHeight: { configurable: true, value: 38 },
+      scrollHeight: { configurable: true, value: 64 },
+      clientWidth: { configurable: true, value: 240 },
+      scrollWidth: { configurable: true, value: 240 },
+    });
+
+    fireEvent.change(composer, { target: { value: "wrapped text" } });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Expand composer" })).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+  });
+
+  it("sends attachment prompts as message content blocks", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+    vi.mocked(open).mockResolvedValue(["/tmp/reference.png"]);
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await user.click(await screen.findByRole("button", { name: "Attach files" }));
+    expect(await screen.findByText("reference.png")).toBeInTheDocument();
+
+    const composer = await screen.findByPlaceholderText("Write a message...");
+    await user.type(composer, "inspect this");
+    await user.click(screen.getByRole("button", { name: "↑" }));
+
+    await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
+    expect(runtime.promptRequests[0]).toMatchObject({
+      sessionId: "session-1",
+      input: {
+        type: "message",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "inspect this" },
+            {
+              type: "media",
+              media: {
+                kind: "image",
+                source: { type: "uri", uri: "file:///tmp/reference.png" },
+                mimeType: "image/png",
+                name: "reference.png",
+              },
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it("removes attachments without submitting the prompt", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+    vi.mocked(open).mockResolvedValue(["/tmp/reference.png"]);
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await user.click(await screen.findByRole("button", { name: "Attach files" }));
+    expect(await screen.findByText("reference.png")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove reference.png" }));
+    expect(screen.queryByText("reference.png")).not.toBeInTheDocument();
+    expect(runtime.promptRequests).toHaveLength(0);
+
+    const composer = await screen.findByPlaceholderText("Write a message...");
+    await user.type(composer, "text only");
+    await user.click(screen.getByRole("button", { name: "↑" }));
+
+    await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
+    expect(runtime.promptRequests[0]).toMatchObject({
+      sessionId: "session-1",
+      input: { type: "text", text: "text only" },
     });
   });
 
@@ -97,7 +273,7 @@ describe("Noloong app chat regression harness", () => {
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     await screen.findByPlaceholderText("Write a message...");
-    await displayStreamReady();
+    await composerReadyForInput();
     act(() => runtime.emitAssistantDelta("draft answer"));
     await expectVisibleText("draft answer");
 
@@ -140,7 +316,7 @@ describe("Noloong app chat regression harness", () => {
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     await screen.findByPlaceholderText("Write a message...");
-    await displayStreamReady();
+    await composerReadyForInput();
     act(() => runtime.emitAssistantDelta("draft answer"));
     await expectVisibleText("draft answer");
 
@@ -260,13 +436,13 @@ describe("Noloong app chat regression harness", () => {
     await waitFor(() => expect(transcript.scrollTop).toBe(1000));
   });
 
-  it("renders live reasoning markdown and folds it after completion", async () => {
+  it("renders live reasoning markdown and removes it from the reading flow after completion", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     await screen.findByPlaceholderText("Write a message...");
-    await displayStreamReady();
+    await composerReadyForInput();
 
     act(() => {
       runtime.emitDisplayEvent({
@@ -295,9 +471,62 @@ describe("Noloong app chat regression harness", () => {
       });
     });
 
-    await waitFor(() => expect(screen.getByText("Thought for 2 seconds")).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Thinking")).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Show raw" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Reasoning Summary" })).not.toBeInTheDocument();
+  });
+
+  it("resolves approval requests from a localized decision card without showing raw protocol text", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByPlaceholderText("Write a message...");
+    await composerReadyForInput();
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "approval_requested",
+        approval: {
+          approvalId: "approval-1",
+          toolCall: { id: "call-1", name: "host.exec.start" },
+          request: {
+            prompt: "Run command?",
+            reason: "需要人工审批",
+            metadata: {
+              command: "pwd && ls -la",
+              cwd: "/Users/m4n5ter/rust/noloong",
+            },
+          },
+          permissions: [
+            {
+              capability: "host.exec",
+              description: "Run host commands.",
+            },
+          ],
+        },
+      });
+    });
+
+    const card = await screen.findByRole("article", { name: "Approval required" });
+    expect(within(card).getByText("pwd && ls -la")).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Allow" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Deny" })).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("Run command?");
+    expect(document.body).not.toHaveTextContent("pending");
+
+    await user.click(within(card).getByRole("button", { name: "Allow" }));
+
+    await waitFor(() =>
+      expect(runtime.approvalResolveRequests).toEqual([
+        expect.objectContaining({
+          approvalId: "approval-1",
+          decision: expect.objectContaining({ outcome: "allow" }),
+          sessionId: "session-1",
+        }),
+      ]),
+    );
   });
 });
 
@@ -311,7 +540,7 @@ function dependenciesFor(runtime: FakeInteractionRuntime) {
 
 async function transcriptElement(): Promise<HTMLDivElement> {
   await screen.findByPlaceholderText("Write a message...");
-  await displayStreamReady();
+  await composerReadyForInput();
   const transcript = document.querySelector(".transcript");
   if (!(transcript instanceof HTMLDivElement)) {
     throw new Error("transcript element was not rendered");
@@ -329,8 +558,8 @@ function setScrollMetrics(
   });
 }
 
-async function displayStreamReady(): Promise<void> {
-  await screen.findByText("Display stream ready");
+async function composerReadyForInput(): Promise<void> {
+  await screen.findByPlaceholderText("Write a message...");
 }
 
 async function expectVisibleText(text: string): Promise<void> {

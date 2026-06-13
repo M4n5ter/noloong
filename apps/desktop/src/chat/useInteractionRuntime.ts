@@ -19,6 +19,7 @@ import {
   sessionStatusFromDisplayEvent,
   updateSessionStatus,
 } from "./sessionHelpers";
+import { optimisticPromptText, submissionContentBlocks, type PromptSubmission } from "./attachments";
 import type { InteractionReadyState, InteractionState } from "./types";
 
 type UseInteractionRuntimeOptions = {
@@ -32,7 +33,7 @@ export type InteractionRuntime = {
   interaction: InteractionState;
   createSession(): Promise<string | null>;
   selectSession(sessionId: string): Promise<void>;
-  submitPrompt(text: string): Promise<void>;
+  submitPrompt(submission: PromptSubmission): Promise<void>;
   abortCurrentRun(): Promise<void>;
   resolveApproval(approvalId: string, outcome: AppToolPermissionOutcome): Promise<void>;
   toggleReasoning(thoughtId: string, expanded: boolean): void;
@@ -402,13 +403,14 @@ export function useInteractionRuntime({
   }, [client]);
 
   const submitPrompt = useCallback(
-    async (text: string) => {
+    async (submission: PromptSubmission) => {
       const ready = readyRef.current;
       if (!client || !ready) {
         return;
       }
-      const promptText = text.trimEnd();
-      if (promptText.trim().length === 0) {
+      const promptText = optimisticPromptText(submission);
+      const content = submissionContentBlocks(submission);
+      if (content.length === 0) {
         return;
       }
 
@@ -442,7 +444,18 @@ export function useInteractionRuntime({
 
         const promptedSession = await stream.prompt({
           sessionId,
-          input: { type: "text", text: promptText },
+          input:
+            submission.attachments.length === 0
+              ? { type: "text", text: submission.text.trimEnd() }
+              : {
+                  type: "message",
+                  message: {
+                    id: `app-prompt-${Date.now()}`,
+                    role: "user",
+                    content,
+                    metadata: {},
+                  },
+                },
         });
         const selectedSession = await client.getSession(promptedSession.sessionId);
         const latestReady = readyRef.current;

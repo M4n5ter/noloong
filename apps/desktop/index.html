@@ -4,9 +4,46 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Noloong</title>
+    <style>
+      html,
+      body,
+      #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: #20221b;
+        color: #f3efe4;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      .boot-fallback {
+        display: grid;
+        height: 100%;
+        place-content: center;
+        gap: 10px;
+        text-align: center;
+      }
+
+      .boot-fallback strong {
+        font-size: 28px;
+      }
+
+      .boot-fallback span {
+        color: rgba(243, 239, 228, 0.58);
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot-fallback">
+        <strong>Noloong</strong>
+        <span>Starting desktop surface...</span>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -6,6 +6,7 @@ mod config;
 mod host;
 mod models_dev;
 mod profile_config_cli;
+mod runtime_control;
 mod schema;
 mod telegram_cli;
 #[cfg(test)]

@@ -1,10 +1,10 @@
 use image::GenericImageView;
 use noloong_app::{
-    AppInteractionEndpoint, AppInteractionStatus, AppLaunchOptions,
+    AppInteractionEndpoint, AppInteractionStatus, AppLaunchOptions, AppRuntimeControlEndpoint,
     interaction::InteractionProfileDescriptor,
 };
 use serde_json::Value;
-use std::fs;
+use std::{fs, process::Command};
 
 #[test]
 fn tauri_shell_declares_noloong_app_identity() {
@@ -20,7 +20,7 @@ fn tauri_shell_declares_noloong_app_identity() {
         config["build"]["beforeBuildCommand"],
         "bun --cwd ../apps/desktop build"
     );
-    assert_eq!(config["build"]["devUrl"], "http://localhost:5173");
+    assert_eq!(config["build"]["devUrl"], "http://127.0.0.1:5173");
     assert_eq!(config["build"]["frontendDist"], "../../apps/desktop/dist");
 
     let window = config["app"]["windows"]
@@ -29,11 +29,12 @@ fn tauri_shell_declares_noloong_app_identity() {
         .expect("main window config");
 
     assert_eq!(window["title"], "Noloong");
+    assert_eq!(window["backgroundThrottling"], "disabled");
+    assert_eq!(window["backgroundColor"], "#F7F3EA");
     assert_eq!(window["decorations"], true);
-    assert_eq!(window["titleBarStyle"], "Overlay");
-    assert_eq!(window["hiddenTitle"], true);
-    assert_eq!(window["trafficLightPosition"]["x"], 18);
-    assert_eq!(window["trafficLightPosition"]["y"], 19);
+    assert!(window["titleBarStyle"].is_null());
+    assert!(window["hiddenTitle"].is_null());
+    assert!(window["trafficLightPosition"].is_null());
     assert_eq!(window["closable"], true);
     assert_eq!(window["minimizable"], true);
     assert_eq!(window["maximizable"], true);
@@ -59,6 +60,14 @@ fn main_window_capability_allows_native_title_bar_dragging() {
             .iter()
             .any(|value| value == "core:window:allow-start-dragging"),
         "Tauri title bar drag regions require the window start_dragging permission",
+    );
+    assert!(
+        permissions.iter().any(|value| value == "dialog:allow-open"),
+        "File attachments require only the Tauri dialog open permission",
+    );
+    assert!(
+        !permissions.iter().any(|value| value == "dialog:default"),
+        "File attachments should not grant broader save/message dialog permissions",
     );
 }
 
@@ -91,6 +100,15 @@ fn bun_workspace_declares_desktop_frontend_entrypoints() {
     assert_eq!(desktop["private"], true);
     assert!(desktop["dependencies"]["@vitejs/plugin-react"].is_null());
     assert_eq!(desktop["dependencies"]["@tauri-apps/api"], "^2.11.0");
+    assert_eq!(
+        desktop["dependencies"]["@tauri-apps/plugin-dialog"],
+        "2.7.1"
+    );
+    assert_eq!(
+        desktop["dependencies"]["@fontsource-variable/inter-tight"],
+        "5.2.7"
+    );
+    assert_eq!(desktop["dependencies"]["lucide-react"], "1.17.0");
     assert_eq!(desktop["dependencies"]["react"], "^19.2.0");
     assert_eq!(desktop["dependencies"]["react-dom"], "^19.2.0");
     assert_eq!(desktop["devDependencies"]["vite"], "^8.0.0");
@@ -109,6 +127,38 @@ fn app_crate_uses_tauri_shell_without_gpui_runtime() {
     assert!(!manifest.contains("gpui.workspace = true"));
     assert!(!manifest.contains("gpui_platform.workspace = true"));
     assert!(!manifest.contains("gpui-component.workspace = true"));
+}
+
+#[test]
+fn app_crate_declares_noloong_macos_binary_target() {
+    let metadata = cargo_metadata();
+    let package = metadata["packages"]
+        .as_array()
+        .and_then(|packages| packages.iter().find(|package| package["name"] == "noloong-app"))
+        .expect("noloong-app package should be present in cargo metadata");
+    let bin_targets: Vec<&Value> = package["targets"]
+        .as_array()
+        .expect("package should declare targets")
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .collect();
+
+    assert_eq!(
+        bin_targets.len(),
+        1,
+        "noloong-app should expose one app binary target",
+    );
+    assert_eq!(bin_targets[0]["name"], "Noloong");
+    assert!(
+        bin_targets[0]["src_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("/crates/noloong-app/src/main.rs")),
+        "Noloong binary target should use src/main.rs",
+    );
 }
 
 #[test]
@@ -200,6 +250,10 @@ fn launch_options_serialize_as_frontend_bootstrap_contract() {
                 metadata: Default::default(),
             }],
         }),
+        runtime_control_endpoint: Some(AppRuntimeControlEndpoint {
+            http_url: "http://127.0.0.1:49153".into(),
+            bearer_token: Some("control-token".into()),
+        }),
     })
     .expect("launch options should serialize");
 
@@ -219,6 +273,14 @@ fn launch_options_serialize_as_frontend_bootstrap_contract() {
         value["interactionStatus"]["profiles"][0]["profileId"],
         "chatgpt"
     );
+    assert_eq!(
+        value["runtimeControlEndpoint"]["httpUrl"],
+        "http://127.0.0.1:49153"
+    );
+    assert_eq!(
+        value["runtimeControlEndpoint"]["bearerToken"],
+        "control-token"
+    );
 }
 
 fn tauri_config() -> Value {
@@ -234,6 +296,20 @@ fn read_json(path: impl AsRef<std::path::Path>) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|error| {
         panic!("{} should be valid JSON: {error}", path.display());
     })
+}
+
+fn cargo_metadata() -> Value {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(repository_root())
+        .output()
+        .expect("cargo metadata should run");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("cargo metadata should emit JSON")
 }
 
 fn repository_root() -> std::path::PathBuf {

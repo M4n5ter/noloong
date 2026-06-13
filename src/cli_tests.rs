@@ -1,5 +1,6 @@
 use super::{
     AppOptions, Cli, CliCommand, CliError, app_bundle_executable_from_current_exe,
+    macos_app_executable_under_target, macos_debug_app_executable_under_target,
     prepare_app_launch, prepare_direct_app_launch_options, start_embedded_interaction,
     validate_interaction_bind,
 };
@@ -17,7 +18,13 @@ use noloong_agent::Locale;
 use noloong_app::{AppInteractionStatus, AppLaunchOptions};
 use noloong_config::Locale as ConfigLocale;
 use serde_json::json;
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[test]
 fn cli_serve_rejects_public_bind_without_token() {
@@ -121,7 +128,15 @@ fn cli_app_bundle_executable_is_derived_from_target_directory() {
 
     assert_eq!(
         executable,
-        PathBuf::from("/repo/target/release/bundle/macos/Noloong.app/Contents/MacOS/noloong-app")
+        macos_app_executable_under_target("/repo/target")
+    );
+}
+
+#[test]
+fn cli_debug_app_executable_lives_under_target_debug() {
+    assert_eq!(
+        macos_debug_app_executable_under_target("/repo/target"),
+        PathBuf::from("/repo/target/debug/Noloong")
     );
 }
 
@@ -152,7 +167,47 @@ async fn cli_app_prepares_external_interaction_endpoint_without_embedded_server(
             .and_then(|endpoint| endpoint.bearer_token.as_deref()),
         Some("secret")
     );
+    assert!(
+        prepared
+            .launch_options
+            .profile_config_path
+            .as_ref()
+            .is_some_and(|path| PathBuf::from(path).is_absolute())
+    );
     assert!(!prepared.has_embedded_server());
+}
+
+#[tokio::test]
+async fn cli_app_passes_absolute_profile_config_path_to_the_bundle() {
+    let config = app_embedded_test_config().to_canonical_json().unwrap();
+    let relative = PathBuf::from("target").join(format!(
+        "noloong-app-relative-profile-{}-{}.jsonc",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&relative, config).unwrap();
+    let absolute = std::env::current_dir().unwrap().join(&relative);
+
+    let prepared = prepare_app_launch(AppOptions {
+        profile_config: Some(relative.display().to_string()),
+        locale: None,
+        interaction_ws_url: None,
+        interaction_token: None,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        prepared.launch_options.profile_config_path.as_deref(),
+        Some(absolute.to_str().unwrap())
+    );
+    assert!(prepared.has_embedded_server());
+
+    prepared.shutdown().await;
+    remove_temp_file(relative);
 }
 
 #[tokio::test]
@@ -226,6 +281,7 @@ async fn cli_direct_bundle_app_launch_initializes_interaction_status() {
         locale: Some(ConfigLocale::Zh),
         interaction_endpoint: Some(endpoint),
         interaction_status: None,
+        runtime_control_endpoint: None,
     })
     .await
     .unwrap();

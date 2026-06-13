@@ -128,6 +128,23 @@ export const appLaunchOptionsSchema = {
         }
       ]
     },
+    "AppRuntimeControlEndpoint": {
+      "properties": {
+        "bearerToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "httpUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "httpUrl"
+      ],
+      "type": "object"
+    },
     "ApprovalPolicy": {
       "oneOf": [
         {
@@ -1090,6 +1107,16 @@ export const appLaunchOptionsSchema = {
       "type": [
         "string",
         "null"
+      ]
+    },
+    "runtimeControlEndpoint": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AppRuntimeControlEndpoint"
+        },
+        {
+          "type": "null"
+        }
       ]
     }
   },
@@ -3854,6 +3881,1091 @@ export const appInteractionStatusSchema = {
     }
   ],
   "title": "AppInteractionStatus"
+} as const;
+
+export const appRuntimeControlEndpointSchema = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "bearerToken": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "httpUrl": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "httpUrl"
+  ],
+  "title": "AppRuntimeControlEndpoint",
+  "type": "object"
+} as const;
+
+export const appRuntimeRestartResultSchema = {
+  "$defs": {
+    "AgentPluginDeclaration": {
+      "properties": {
+        "components": {
+          "items": {
+            "$ref": "#/$defs/PluginComponent"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "onLoadFailure": {
+          "$ref": "#/$defs/PluginLoadFailurePolicy",
+          "default": "disable_for_run"
+        },
+        "pluginId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "displayName",
+        "components"
+      ],
+      "type": "object"
+    },
+    "AppInteractionEndpoint": {
+      "properties": {
+        "bearerToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wsUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wsUrl"
+      ],
+      "type": "object"
+    },
+    "AppInteractionStatus": {
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "profiles": {
+              "items": {
+                "$ref": "#/$defs/InteractionProfileDescriptor"
+              },
+              "type": "array"
+            },
+            "protocolVersion": {
+              "type": "string"
+            },
+            "serverName": {
+              "type": "string"
+            },
+            "status": {
+              "const": "ready",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "serverName",
+            "protocolVersion",
+            "profiles"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovalPolicy": {
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "allow_all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "require_approval",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "fallback_to_human": {
+              "type": "boolean"
+            },
+            "mode": {
+              "const": "auto_review",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "fallback_to_human"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BuiltInSystemPromptProfile": {
+      "enum": [
+        "auto",
+        "general",
+        "open_ai"
+      ],
+      "type": "string"
+    },
+    "BuiltInToolName": {
+      "enum": [
+        "host.exec.start",
+        "host.exec.read",
+        "host.exec.wait",
+        "host.exec.write",
+        "host.exec.terminate",
+        "host.exec.list",
+        "agent.subagent.spawn",
+        "agent.subagent.wait",
+        "agent.subagent.result",
+        "agent.subagent.list",
+        "agent.goal.update",
+        "agent.manifest.propose_patch"
+      ],
+      "type": "string"
+    },
+    "ExtensionCapabilitySelector": {
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "model_provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "tool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "context_provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "phase_node",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "phase_hook",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "tool_call_hook",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "compaction_summarizer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "context_compactor",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "http_auth_provider",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FileEditToolPolicy": {
+      "enum": [
+        "auto_by_model",
+        "apply_patch",
+        "write_file",
+        "disabled"
+      ],
+      "type": "string"
+    },
+    "InteractionProfileDescriptor": {
+      "properties": {
+        "defaultManifestPatches": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ManifestPatch"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "default": {},
+          "type": "object"
+        },
+        "profileId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "displayName"
+      ],
+      "type": "object"
+    },
+    "Locale": {
+      "enum": [
+        "en",
+        "zh"
+      ],
+      "type": "string"
+    },
+    "ManifestPatch": {
+      "oneOf": [
+        {
+          "properties": {
+            "op": {
+              "const": "replace_system_prompt",
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "prompt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "use_built_in_system_prompt",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "set_built_in_system_prompt_profile",
+              "type": "string"
+            },
+            "profile": {
+              "$ref": "#/$defs/BuiltInSystemPromptProfile"
+            }
+          },
+          "required": [
+            "op",
+            "profile"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "addition": {
+              "$ref": "#/$defs/SystemPromptAddition"
+            },
+            "op": {
+              "const": "upsert_system_prompt_addition",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "addition"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "remove_system_prompt_addition",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "op": {
+              "const": "set_system_prompt_addition_enabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "id",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "op": {
+              "const": "reorder_system_prompt_additions",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "ids"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "clear_system_prompt_additions",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "locale": {
+              "$ref": "#/$defs/Locale"
+            },
+            "op": {
+              "const": "set_locale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "locale"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "enable_tool",
+              "type": "string"
+            },
+            "toolName": {
+              "$ref": "#/$defs/BuiltInToolName"
+            }
+          },
+          "required": [
+            "op",
+            "toolName"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "disable_tool",
+              "type": "string"
+            },
+            "toolName": {
+              "$ref": "#/$defs/BuiltInToolName"
+            }
+          },
+          "required": [
+            "op",
+            "toolName"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "update_approval_policy",
+              "type": "string"
+            },
+            "policy": {
+              "$ref": "#/$defs/ApprovalPolicy"
+            }
+          },
+          "required": [
+            "op",
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "update_file_edit_tool_policy",
+              "type": "string"
+            },
+            "policy": {
+              "$ref": "#/$defs/FileEditToolPolicy"
+            }
+          },
+          "required": [
+            "op",
+            "policy"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "register_plugin",
+              "type": "string"
+            },
+            "plugin": {
+              "$ref": "#/$defs/AgentPluginDeclaration"
+            }
+          },
+          "required": [
+            "op",
+            "plugin"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "op": {
+              "const": "set_plugin_enabled",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "pluginId",
+            "enabled"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "op": {
+              "const": "remove_plugin",
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "pluginId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "metadata": {
+              "default": null
+            },
+            "op": {
+              "const": "reserved_phase_profile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "description"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "McpHeaderSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "static",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "host_env",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "McpPluginComponent": {
+      "properties": {
+        "disabledTools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabledTools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "serverId": {
+          "type": "string"
+        },
+        "toolNamePrefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "$ref": "#/$defs/McpPluginTransport"
+        }
+      },
+      "required": [
+        "serverId",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "McpPluginTransport": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/McpStdioTransport",
+          "properties": {
+            "type": {
+              "const": "stdio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/McpStreamableHttpTransport",
+          "properties": {
+            "type": {
+              "const": "streamable_http",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "McpStdioTransport": {
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PluginEnvSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "McpStreamableHttpTransport": {
+      "properties": {
+        "connectTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "headers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/McpHeaderSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "NoloongExtensionPluginComponent": {
+      "properties": {
+        "allowedCapabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExtensionCapabilitySelector"
+          },
+          "type": "array"
+        },
+        "transport": {
+          "$ref": "#/$defs/NoloongExtensionTransport"
+        }
+      },
+      "required": [
+        "transport"
+      ],
+      "type": "object"
+    },
+    "NoloongExtensionTransport": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StdioPluginTransport",
+          "properties": {
+            "type": {
+              "const": "stdio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginComponent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SkillsPluginComponent",
+          "properties": {
+            "type": {
+              "const": "skills",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/McpPluginComponent",
+          "properties": {
+            "type": {
+              "const": "mcp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/NoloongExtensionPluginComponent",
+          "properties": {
+            "type": {
+              "const": "noloong_extension",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginEnvSource": {
+      "oneOf": [
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "const": "host_env",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginLoadFailurePolicy": {
+      "enum": [
+        "disable_for_run",
+        "fail_run"
+      ],
+      "type": "string"
+    },
+    "SkillsPluginComponent": {
+      "properties": {
+        "roots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "roots"
+      ],
+      "type": "object"
+    },
+    "StdioPluginTransport": {
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PluginEnvSource"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "requestTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "streamTimeoutSecs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "SystemPromptAddition": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "interactionEndpoint": {
+      "$ref": "#/$defs/AppInteractionEndpoint"
+    },
+    "interactionStatus": {
+      "$ref": "#/$defs/AppInteractionStatus"
+    }
+  },
+  "required": [
+    "interactionEndpoint",
+    "interactionStatus"
+  ],
+  "title": "AppRuntimeRestartResult",
+  "type": "object"
 } as const;
 
 export const interactionInitializeRequestSchema = {
@@ -11417,6 +12529,7 @@ export type AppLaunchOptions = {
   "interactionStatus"?: AppInteractionStatus | null;
   "locale"?: Locale | null;
   "profileConfigPath"?: null | string;
+  "runtimeControlEndpoint"?: AppRuntimeControlEndpoint | null;
 };
 
 export type HostProfileConfig = {
@@ -11442,6 +12555,16 @@ export type AppInteractionStatus = {
   "status": "pending";
 } | {
   "status": "unavailable";
+};
+
+export type AppRuntimeControlEndpoint = {
+  "bearerToken"?: null | string;
+  "httpUrl": string;
+};
+
+export type AppRuntimeRestartResult = {
+  "interactionEndpoint": AppInteractionEndpoint;
+  "interactionStatus": AppInteractionStatus;
 };
 
 export type InteractionInitializeRequest = {

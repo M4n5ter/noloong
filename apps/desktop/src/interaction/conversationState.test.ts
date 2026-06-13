@@ -60,6 +60,44 @@ describe("conversation timeline reducer", () => {
     });
   });
 
+  it("drops empty completed reasoning placeholders", () => {
+    const events: AppDisplayEvent[] = [
+      {
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      },
+      {
+        type: "thought_completed",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        elapsedMs: 1200,
+      },
+    ];
+
+    const state = events.reduce(applyDisplayEventToConversation, emptyConversationState());
+
+    expect(state.timeline).toEqual([]);
+  });
+
+  it("drops empty running reasoning when a run reaches a terminal state", () => {
+    const events: AppDisplayEvent[] = [
+      {
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      },
+      {
+        type: "run_completed",
+        runId: "run-1",
+      },
+    ];
+
+    const state = events.reduce(applyDisplayEventToConversation, emptyConversationState());
+
+    expect(state.timeline).toEqual([]);
+  });
+
   it("tracks run status transitions", () => {
     const running = applyDisplayEventToConversation(emptyConversationState(), {
       type: "run_started",
@@ -136,6 +174,10 @@ describe("conversation timeline reducer", () => {
         request: {
           prompt: "Run command?",
           reason: "Needs host access.",
+          metadata: {
+            command: "pwd && ls -la",
+            cwd: "/Users/m4n5ter/rust/noloong",
+          },
         },
         permissions: [
           {
@@ -154,6 +196,8 @@ describe("conversation timeline reducer", () => {
         toolName: "host.exec.start",
         prompt: "Run command?",
         reason: "Needs host access.",
+        command: "pwd && ls -la",
+        cwd: "/Users/m4n5ter/rust/noloong",
         permissionDescriptions: ["Run shell commands."],
         status: "pending",
       },

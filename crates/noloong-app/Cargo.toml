@@ -2,6 +2,11 @@
 name = "noloong-app"
 version.workspace = true
 edition.workspace = true
+autobins = false
+
+[[bin]]
+name = "Noloong"
+path = "src/main.rs"
 
 [lints]
 workspace = true
@@ -19,6 +24,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 url.workspace = true
+tauri-plugin-dialog = "2.7.1"
 
 [build-dependencies]
 tauri-build.workspace = true

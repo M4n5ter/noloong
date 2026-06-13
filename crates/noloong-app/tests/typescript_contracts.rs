@@ -1,5 +1,6 @@
 use noloong_app::{
-    AppInteractionEndpoint, AppInteractionStatus, AppLaunchOptions,
+    AppInteractionEndpoint, AppInteractionStatus, AppLaunchOptions, AppRuntimeControlEndpoint,
+    AppRuntimeRestartResult,
     interaction::{
         AppApprovalResolveRequest, AppDisplayEvent, AppDisplaySubscribeRequest,
         AppInteractionDisplayNotification, AppInteractionSessionDescriptor, AppMessage,
@@ -115,6 +116,16 @@ fn contracts() -> Vec<TypescriptContract> {
             "appInteractionStatusSchema",
             "AppInteractionStatus",
             schema_for!(AppInteractionStatus),
+        ),
+        TypescriptContract::new(
+            "appRuntimeControlEndpointSchema",
+            "AppRuntimeControlEndpoint",
+            schema_for!(AppRuntimeControlEndpoint),
+        ),
+        TypescriptContract::new(
+            "appRuntimeRestartResultSchema",
+            "AppRuntimeRestartResult",
+            schema_for!(AppRuntimeRestartResult),
         ),
         TypescriptContract::new(
             "interactionInitializeRequestSchema",

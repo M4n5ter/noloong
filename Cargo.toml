@@ -104,6 +104,7 @@ noloong-agent-weixin.workspace = true
 noloong-openai.workspace = true
 noloong-config.workspace = true
 noloong-app.workspace = true
+axum.workspace = true
 env_logger.workspace = true
 getrandom.workspace = true
 human-panic.workspace = true

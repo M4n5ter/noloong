@@ -27,9 +27,11 @@ export class FakeInteractionRuntime {
     profiles: [{ profileId: "default", displayName: "Default" }],
   };
   promptRequests: AppPromptRequest[] = [];
+  approvalResolveRequests: AppApprovalResolveRequest[] = [];
 
   private readonly sessions = new Map<string, AppInteractionSessionDescriptor>();
   private displayHandlers: InteractionDisplayStreamHandlers | null = null;
+  private createSessionFailure: Error | null = null;
   private promptDeferred: Deferred<AppInteractionSessionDescriptor> | null = null;
   private queuedGetSessionResponses: AppInteractionSessionDescriptor[] = [];
 
@@ -56,6 +58,11 @@ export class FakeInteractionRuntime {
     initialize: async (_request?: Partial<InteractionInitializeRequest>) => this.initializeResult,
     listSessions: async () => [...this.sessions.values()].map(clone),
     createSession: async (_request?: AppSessionCreateRequest) => {
+      if (this.createSessionFailure) {
+        const error = this.createSessionFailure;
+        this.createSessionFailure = null;
+        throw error;
+      }
       const session = emptySession(`session-${this.sessions.size + 1}`);
       this.sessions.set(session.sessionId, session);
       return clone(session);
@@ -88,8 +95,10 @@ export class FakeInteractionRuntime {
         this.sessions.set(session.sessionId, session);
         return clone(session);
       },
-      resolveApproval: async (_request: AppApprovalResolveRequest) =>
-        clone(this.requireSession(_request.sessionId)),
+      resolveApproval: async (request: AppApprovalResolveRequest) => {
+        this.approvalResolveRequests.push(request);
+        return clone(this.requireSession(request.sessionId));
+      },
       close: () => {
         this.displayHandlers = null;
       },
@@ -102,6 +111,10 @@ export class FakeInteractionRuntime {
 
   queueGetSessionResponse(session: AppInteractionSessionDescriptor): void {
     this.queuedGetSessionResponses.push(clone(session));
+  }
+
+  failNextCreateSession(message = "create session failed"): void {
+    this.createSessionFailure = new Error(message);
   }
 
   emitDisplayEvent(event: AppDisplayEvent, sessionId = "session-1"): void {

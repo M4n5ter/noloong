@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "bun --cwd ../apps/desktop dev",
     "beforeBuildCommand": "bun --cwd ../apps/desktop build",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../../apps/desktop/dist"
   },
   "app": {
@@ -14,17 +14,13 @@
       {
         "label": "main",
         "title": "Noloong",
-        "width": 1180,
-        "height": 780,
-        "minWidth": 760,
-        "minHeight": 520,
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 680,
+        "backgroundThrottling": "disabled",
+        "backgroundColor": "#F7F3EA",
         "decorations": true,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": {
-          "x": 18,
-          "y": 19
-        },
         "closable": true,
         "minimizable": true,
         "maximizable": true,

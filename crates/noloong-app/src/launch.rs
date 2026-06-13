@@ -1,4 +1,7 @@
-use crate::interaction::{AppInteractionEndpoint, AppInteractionStatus};
+use crate::{
+    interaction::{AppInteractionEndpoint, AppInteractionStatus},
+    runtime_control::AppRuntimeControlEndpoint,
+};
 use noloong_config::Locale;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,8 @@ pub struct AppLaunchOptions {
     pub interaction_endpoint: Option<AppInteractionEndpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_status: Option<AppInteractionStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_control_endpoint: Option<AppRuntimeControlEndpoint>,
 }
 
 impl Default for AppLaunchOptions {
@@ -30,6 +35,7 @@ impl Default for AppLaunchOptions {
             locale: None,
             interaction_endpoint: None,
             interaction_status: None,
+            runtime_control_endpoint: None,
         }
     }
 }

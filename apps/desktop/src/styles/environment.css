@@ -1,0 +1,143 @@
+/* Desktop settings workbench. */
+.settings-workbench {
+  display: grid;
+  min-height: 100%;
+  grid-template-columns: minmax(248px, 292px) minmax(0, 780px);
+  justify-content: center;
+  gap: 18px;
+  padding: 82px clamp(28px, 5vw, 72px) 34px;
+}
+
+.settings-workbench-sidebar,
+.settings-workbench-detail {
+  min-height: 0;
+  border: 1px solid rgba(243, 239, 228, 0.075);
+  background: rgba(23, 25, 20, 0.46);
+}
+
+.settings-workbench-sidebar {
+  display: grid;
+  height: calc(100vh - 116px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 22px;
+}
+
+.settings-workbench-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-workbench-heading h1 {
+  margin: 0;
+  color: rgba(243, 239, 228, 0.88);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.18;
+}
+
+.settings-workbench-heading p {
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: rgba(243, 239, 228, 0.48);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-back-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(243, 239, 228, 0.1);
+  border-radius: 999px;
+  background: rgba(32, 34, 27, 0.68);
+  color: rgba(243, 239, 228, 0.64);
+}
+
+.settings-pane-nav {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  overflow: auto;
+  padding: 2px;
+}
+
+.settings-pane-button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: transparent;
+  color: rgba(243, 239, 228, 0.62);
+  text-align: left;
+}
+
+.settings-pane-button:hover {
+  border-color: rgba(243, 239, 228, 0.08);
+  background: rgba(243, 239, 228, 0.04);
+}
+
+.settings-pane-button.active {
+  border-color: rgba(243, 239, 228, 0.105);
+  background: rgba(243, 239, 228, 0.065);
+  color: rgba(243, 239, 228, 0.9);
+}
+
+.settings-pane-button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.settings-pane-button span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-pane-button strong,
+.settings-pane-button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-pane-button strong {
+  font-size: 13px;
+  font-weight: 640;
+}
+
+.settings-pane-button small {
+  color: rgba(243, 239, 228, 0.4);
+  font-size: 11px;
+}
+
+.settings-path {
+  overflow: hidden;
+  margin: 0;
+  color: rgba(243, 239, 228, 0.34);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-workbench-detail {
+  display: grid;
+  height: calc(100vh - 116px);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
+  padding: 20px;
+  border-radius: 24px;
+}
