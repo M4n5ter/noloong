@@ -83,7 +83,6 @@ button {
 }
 
 .text-button,
-.context-tool,
 .composer-tool,
 .composer-expand,
 .send-button {
@@ -98,15 +97,13 @@ button {
 }
 
 .text-button:hover,
-.context-tool:hover,
 .composer-tool:hover,
 .composer-expand:hover,
 .send-button:hover {
   border-color: rgba(168, 196, 220, 0.42);
 }
 
-.text-button.primary,
-.context-tool.active {
+.text-button.primary {
   border-color: rgba(168, 196, 220, 0.44);
   background: rgba(58, 84, 107, 0.72);
   color: #f3efe4;
@@ -133,7 +130,6 @@ button {
 }
 
 .text-button:disabled,
-.context-tool:disabled,
 .composer-tool:disabled,
 .send-button:disabled {
   cursor: default;

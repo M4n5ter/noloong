@@ -2,7 +2,7 @@ import {
   connectInteractionDisplayStream as connectDefaultInteractionDisplayStream,
   createInteractionClient as createDefaultInteractionClient,
 } from "../interaction/client";
-import { Brain, MessageCircle, Plus, Settings } from "lucide-react";
+import { MessageCircle, Plus, Settings } from "lucide-react";
 import type { AppLaunchOptions } from "../generated/contracts";
 import type { AppI18n } from "../i18n";
 import { CenteredStatus } from "./CenteredStatus";
@@ -182,18 +182,18 @@ function InteractionCanvas({
       >
         <button
           aria-label={i18n.t("sessions.title")}
-          className={sessionsPanelVisible ? "context-tool active" : "context-tool"}
+          className={sessionsPanelVisible ? "session-tool active" : "session-tool"}
           data-tooltip={i18n.t("sessions.title")}
           disabled={!ready}
           onClick={openSessionsPanel}
           title={i18n.t("sessions.title")}
           type="button"
         >
-          <Brain size={18} />
+          <MessageCircle size={18} />
         </button>
         <button
           aria-label={i18n.t("sessions.create")}
-          className="context-tool"
+          className="session-tool"
           data-tooltip={i18n.t("sessions.create")}
           disabled={!ready}
           onClick={() => void runtime.createSession()}
