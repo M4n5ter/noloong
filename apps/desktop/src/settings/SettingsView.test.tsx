@@ -81,7 +81,7 @@ describe("SettingsView", () => {
     expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
   });
 
-  it("presents the selected environment before the editable fields", async () => {
+  it("keeps pane content focused on the editable settings", async () => {
     render(
       <SettingsView
         i18n={createI18n("en")}
@@ -91,16 +91,8 @@ describe("SettingsView", () => {
       />,
     );
 
-    const summary = await screen.findByLabelText("Current environment");
-
-    expect(summary).toHaveTextContent("Provider");
-    expect(summary).toHaveTextContent("ChatGPT");
-    expect(summary).toHaveTextContent("Model");
-    expect(summary).toHaveTextContent("gpt-5.4");
-    expect(summary).toHaveTextContent("Reasoning");
-    expect(summary).toHaveTextContent("medium / auto");
-    expect(summary).toHaveTextContent("Context");
-    expect(summary).toHaveTextContent("No plugins");
+    expect(await screen.findByRole("heading", { name: "Provider" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Current environment")).not.toBeInTheDocument();
 
     const modelField = screen
       .getAllByLabelText("Model")
@@ -108,9 +100,7 @@ describe("SettingsView", () => {
     if (!modelField) {
       throw new Error("Expected a model input field");
     }
-    expect(
-      summary.compareDocumentPosition(modelField) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(modelField).toHaveValue("gpt-5.4");
   });
 
   it("keeps the profile config path out of visible settings chrome", async () => {
@@ -125,7 +115,7 @@ describe("SettingsView", () => {
       />,
     );
 
-    await screen.findByLabelText("Current environment");
+    await screen.findByRole("heading", { name: "Provider" });
     expect(screen.queryByText("profile.jsonc")).not.toBeInTheDocument();
 
     const model = screen

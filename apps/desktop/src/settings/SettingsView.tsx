@@ -33,7 +33,6 @@ import {
 } from "./api";
 import { JsonListEditor, JsonObjectEditor } from "./JsonEditors";
 import { JsoncEditor } from "./JsoncEditor";
-import { environmentSummaryItems } from "./environmentSummary";
 import {
   addProfile,
   applyJsoncTextPending,
@@ -191,8 +190,8 @@ export function SettingsView({
   const config = draft.config;
   const profile = selectedProfile(draft);
   const panelNode = config ? activeNode : "jsonc";
-  const environmentSummary = profile ? environmentSummaryItems(profile, i18n) : [];
   const showSaveActions = draft.dirty || draft.saving;
+  const hasFeedback = state.notice != null || draft.error != null;
 
   return (
     <section className="settings-workbench" data-render-surface="environment">
@@ -260,20 +259,12 @@ export function SettingsView({
             </div>
           ) : null}
         </div>
-        {environmentSummary.length > 0 ? (
-          <section className="environment-summary" aria-label={i18n.t("settings.environmentSummaryLabel")}>
-            {environmentSummary.map((item) => (
-              <div className="environment-summary-item" key={item.label}>
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-              </div>
-            ))}
-          </section>
+        {hasFeedback ? (
+          <div className="settings-feedback" aria-live="polite">
+            {state.notice ? <p className="settings-notice">{state.notice}</p> : null}
+            {draft.error ? <p className="settings-error">{draft.error}</p> : null}
+          </div>
         ) : null}
-        <div className="settings-feedback" aria-live="polite">
-          {state.notice ? <p className="settings-notice">{state.notice}</p> : null}
-          {draft.error ? <p className="settings-error">{draft.error}</p> : null}
-        </div>
         {!config ? (
           <JsoncPane
             completeJsonc={completeJsonc}

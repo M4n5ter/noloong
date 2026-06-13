@@ -123,10 +123,14 @@
   position: relative;
   display: grid;
   height: calc(100vh - 116px);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
   overflow: hidden;
   padding: 14px 20px 82px;
+}
+
+.settings-workbench-detail:has(.settings-feedback) {
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .settings-workbench-detail > .lens-header .lens-actions {
@@ -138,48 +142,6 @@
   border: 1px solid rgba(243, 239, 228, 0.11);
   background: rgba(23, 25, 20, 0.86);
   box-shadow: 0 18px 52px rgba(0, 0, 0, 0.24);
-}
-
-.environment-summary {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 2px 0 8px;
-}
-
-.environment-summary-item {
-  display: grid;
-  min-width: 0;
-  max-width: min(240px, 100%);
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: baseline;
-  gap: 6px;
-  padding: 6px 10px;
-  border: 1px solid rgba(243, 239, 228, 0.045);
-  border-radius: 999px;
-  background: rgba(243, 239, 228, 0.022);
-}
-
-.environment-summary-item span,
-.environment-summary-item strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.environment-summary-item span {
-  color: rgba(243, 239, 228, 0.52);
-  font-size: 11px;
-  line-height: 1.2;
-}
-
-.environment-summary-item strong {
-  color: rgba(243, 239, 228, 0.72);
-  font-size: 12px;
-  font-weight: 560;
-  line-height: 1.25;
 }
 
 .settings-feedback {
