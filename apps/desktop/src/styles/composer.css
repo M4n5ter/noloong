@@ -10,8 +10,8 @@
 
 .composer-capsule {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  grid-template-areas: "input expand actions";
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "input actions";
   grid-template-rows: 38px;
   width: 100%;
   min-width: 0;
@@ -35,6 +35,13 @@
 .composer-input-shell {
   grid-area: input;
   display: grid;
+  --composer-expand-gap: 16px;
+  --composer-expand-inset: 0px;
+  --composer-expand-size: 28px;
+  --composer-expand-top: 5px;
+  --composer-editor-action-space: calc(
+    var(--composer-expand-inset) + var(--composer-expand-size) + var(--composer-expand-gap)
+  );
   height: 38px;
   min-width: 0;
   align-items: center;
@@ -48,7 +55,7 @@
   align-self: center;
   min-width: 0;
   overflow: hidden;
-  padding-right: 36px;
+  padding-right: var(--composer-editor-action-space);
   color: rgba(243, 239, 228, 0.74);
   font-size: 17px;
   line-height: 22px;
@@ -59,6 +66,7 @@
 
 .composer-editor-shell {
   grid-area: 1 / 1;
+  position: relative;
   width: 100%;
   height: 38px;
   min-width: 0;
@@ -70,6 +78,9 @@
   right: 0;
   left: 0;
   z-index: 2;
+  --composer-expand-gap: 13px;
+  --composer-expand-inset: 13px;
+  --composer-expand-top: 13px;
   height: auto;
   overflow: hidden;
   isolation: isolate;
@@ -85,7 +96,7 @@
   right: 1px;
   left: 1px;
   z-index: 2;
-  height: 42px;
+  height: 30px;
   --composer-edge-radius: 0 0 23px 23px;
   --composer-edge-direction: 0deg;
   pointer-events: none;
@@ -98,25 +109,25 @@
   background:
     linear-gradient(
       var(--composer-edge-direction),
-      rgba(243, 239, 228, 0.06),
-      rgba(243, 239, 228, 0) 32%
+      rgba(243, 239, 228, 0.035),
+      rgba(243, 239, 228, 0) 36%
     ),
     linear-gradient(
       var(--composer-edge-direction),
-      rgba(23, 25, 20, 0.98),
-      rgba(23, 25, 20, 0.76) 42%,
+      rgba(23, 25, 20, 0.78),
+      rgba(23, 25, 20, 0.42) 46%,
       rgba(23, 25, 20, 0)
     );
   -webkit-mask-image: linear-gradient(
     var(--composer-edge-direction),
     #000 0%,
-    #000 42%,
+    #000 34%,
     transparent 100%
   );
   mask-image: linear-gradient(
     var(--composer-edge-direction),
     #000 0%,
-    #000 42%,
+    #000 34%,
     transparent 100%
   );
 }
@@ -146,8 +157,8 @@
     backdrop-filter: none;
     background: linear-gradient(
       var(--composer-edge-direction),
-      rgba(23, 25, 20, 0.98),
-      rgba(23, 25, 20, 0.9) 46%,
+      rgba(23, 25, 20, 0.86),
+      rgba(23, 25, 20, 0.62) 48%,
       rgba(23, 25, 20, 0)
     );
   }
@@ -172,7 +183,7 @@
   min-height: 38px;
   max-height: 42px;
   overflow-y: hidden;
-  padding: 8px 36px 8px 0;
+  padding: 8px var(--composer-editor-action-space) 8px 0;
 }
 
 .composer-editor-shell.previewing .composer-input {
@@ -187,7 +198,7 @@
   height: min(224px, 38vh);
   min-height: 128px;
   max-height: min(224px, 38vh);
-  padding: 18px 17px 20px;
+  padding: 18px var(--composer-editor-action-space) 20px 17px;
   overflow-y: auto;
 }
 
@@ -268,13 +279,18 @@
 }
 
 .composer-expand {
-  grid-area: expand;
-  align-self: center;
-  justify-self: center;
-  width: 24px;
-  height: 24px;
+  position: absolute;
+  top: var(--composer-expand-top);
+  right: var(--composer-expand-inset);
+  z-index: 3;
+  width: var(--composer-expand-size);
+  height: var(--composer-expand-size);
   background: rgba(23, 25, 20, 0.28);
   color: rgba(243, 239, 228, 0.42);
+}
+
+.composer-editor-shell.expanded .composer-expand {
+  background: rgba(243, 239, 228, 0.07);
 }
 
 .composer-tool:hover,

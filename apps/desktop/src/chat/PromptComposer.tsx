@@ -197,22 +197,22 @@ export function PromptComposer({
               rows={expanded ? 6 : 1}
               value={text}
             />
+            {canExpand ? (
+              <button
+                aria-label={i18n.t(expanded ? "composer.collapse" : "composer.expand")}
+                className="composer-expand"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setExpanded((current) => !current);
+                }}
+                type="button"
+              >
+                {expanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+              </button>
+            ) : null}
           </div>
         </div>
-        {canExpand ? (
-          <button
-            aria-label={i18n.t(expanded ? "composer.collapse" : "composer.expand")}
-            className="composer-expand"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setExpanded((current) => !current);
-            }}
-            type="button"
-          >
-            {expanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
-          </button>
-        ) : null}
         <div className="composer-actions">
           <button
             aria-label={i18n.t("composer.attach")}
