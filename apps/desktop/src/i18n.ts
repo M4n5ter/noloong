@@ -38,6 +38,7 @@ export type I18nKey =
   | "composer.write"
   | "composer.connecting"
   | "composer.attach"
+  | "composer.send"
   | "composer.expand"
   | "composer.collapse"
   | "composer.removeAttachment"
@@ -150,6 +151,7 @@ const messages = {
     "composer.write": "Write a message...",
     "composer.connecting": "Connecting display stream...",
     "composer.attach": "Attach files",
+    "composer.send": "Send message",
     "composer.expand": "Expand composer",
     "composer.collapse": "Collapse composer",
     "composer.removeAttachment": "Remove {name}",
@@ -260,6 +262,7 @@ const messages = {
     "composer.write": "输入消息...",
     "composer.connecting": "正在连接 Display 流...",
     "composer.attach": "添加附件",
+    "composer.send": "发送消息",
     "composer.expand": "展开输入区",
     "composer.collapse": "收起输入区",
     "composer.removeAttachment": "移除 {name}",

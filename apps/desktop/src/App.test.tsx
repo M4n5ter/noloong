@@ -152,7 +152,7 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     await user.type(composer, "hello from user");
-    await user.click(screen.getByRole("button", { name: "↑" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(screen.getByText("hello from user")).toBeInTheDocument();
     expect(runtime.promptRequests[0]).toMatchObject({
@@ -161,7 +161,7 @@ describe("Noloong app chat regression harness", () => {
     });
   });
 
-  it("reveals the composer expander when measured text overflows the compact capsule", async () => {
+  it("reveals the composer expander when compact input exceeds the short-form threshold", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
     const user = userEvent.setup();
 
@@ -169,14 +169,10 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     expect(screen.queryByRole("button", { name: "Expand composer" })).not.toBeInTheDocument();
-    Object.defineProperties(composer, {
-      clientHeight: { configurable: true, value: 38 },
-      scrollHeight: { configurable: true, value: 64 },
-      clientWidth: { configurable: true, value: 240 },
-      scrollWidth: { configurable: true, value: 240 },
-    });
-
-    fireEvent.change(composer, { target: { value: "wrapped text" } });
+    await user.type(
+      composer,
+      "This is a deliberately long composer input that should move beyond the compact short-form threshold.",
+    );
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Expand composer" })).toBeInTheDocument(),
@@ -184,6 +180,30 @@ describe("Noloong app chat regression harness", () => {
 
     await user.click(screen.getByRole("button", { name: "Expand composer" }));
     expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+  });
+
+  it("keeps multiline composer input editable after expansion", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    const composer = await screen.findByRole("textbox", { name: "Write a message..." });
+    await user.type(composer, "first line{Shift>}{Enter}{/Shift}second line");
+
+    await user.click(await screen.findByRole("button", { name: "Expand composer" }));
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Write a message..." })).toHaveValue(
+      "first line\nsecond line",
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Write a message..." }), " continues");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
+    expect(runtime.promptRequests[0]).toMatchObject({
+      input: { type: "text", text: "first line\nsecond line continues" },
+    });
   });
 
   it("sends attachment prompts as message content blocks", async () => {
@@ -198,7 +218,7 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     await user.type(composer, "inspect this");
-    await user.click(screen.getByRole("button", { name: "↑" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
     expect(runtime.promptRequests[0]).toMatchObject({
@@ -240,7 +260,7 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     await user.type(composer, "text only");
-    await user.click(screen.getByRole("button", { name: "↑" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() => expect(runtime.promptRequests).toHaveLength(1));
     expect(runtime.promptRequests[0]).toMatchObject({
@@ -257,7 +277,7 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     await user.type(composer, "stream please");
-    await user.click(screen.getByRole("button", { name: "↑" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     act(() => runtime.emitAssistantDelta("first"));
     await expectVisibleText("first");
@@ -292,7 +312,7 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     await user.type(composer, "stream please");
-    await user.click(screen.getByRole("button", { name: "↑" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     act(() => runtime.emitAssistantDelta("draft answer"));
     await expectVisibleText("draft answer");
@@ -429,7 +449,7 @@ describe("Noloong app chat regression harness", () => {
 
     const composer = await screen.findByPlaceholderText("Write a message...");
     await user.type(composer, "follow again");
-    await user.click(screen.getByRole("button", { name: "↑" }));
+    await user.click(screen.getByRole("button", { name: "Send message" }));
 
     act(() => runtime.emitAssistantDelta("after-send-follow"));
 

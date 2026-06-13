@@ -80,6 +80,9 @@
 
   .composer {
     width: calc(100% - 20px);
+  }
+
+  .composer-capsule {
     padding-left: 18px;
   }
 }
