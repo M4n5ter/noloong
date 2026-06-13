@@ -7,6 +7,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import {
+  observeDevInteractionRuntimeForTests,
+  resetDevInteractionRuntimeForTests,
+} from "./devInteractionRuntime";
+import {
   completedSessionWithText,
   emptySession,
   FakeInteractionRuntime,
@@ -18,6 +22,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 describe("Noloong app chat regression harness", () => {
   beforeEach(() => {
+    resetDevInteractionRuntimeForTests();
     vi.mocked(open).mockReset();
     let frameTime = 0;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
@@ -71,6 +76,108 @@ describe("Noloong app chat regression harness", () => {
     expect(status).toHaveTextContent("Set up a profile before starting a conversation.");
     expect(within(status).getByRole("button", { name: "Set up environment" })).toBeVisible();
     expect(document.body).not.toHaveTextContent(/runtime|endpoint/i);
+  });
+
+  it("boots the browser development preview into a ready chat runtime", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Choose an environment" })).not.toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText("Write a message..."), "verify dev preview");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("verify dev preview")).toBeInTheDocument();
+    await waitFor(
+      () => expect(document.body).toHaveTextContent("dev interaction runtime"),
+      { timeout: 2000 },
+    );
+  });
+
+  it("keeps default browser preview approvals and sessions panel wired to the dev runtime", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.type(await screen.findByPlaceholderText("Write a message..."), "approval please");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    const approval = await screen.findByRole(
+      "article",
+      { name: "Approval required" },
+      { timeout: 3000 },
+    );
+    expect(within(approval).getByText("Needs your decision")).toBeVisible();
+    expect(within(approval).getByRole("heading", { name: "Run this command?" })).toBeVisible();
+    expect(within(approval).getByRole("button", { name: "Allow" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    const sessionsPanel = await screen.findByRole("dialog", { name: "Sessions" });
+    expect(within(sessionsPanel).getByRole("button", { name: "Create session" })).toBeVisible();
+    expect(within(sessionsPanel).getByText("Desktop Dev needs a decision")).toBeVisible();
+  });
+
+  it("keeps the browser preview stop action from completing an aborted run", async () => {
+    const user = userEvent.setup();
+    const finalEvents: string[] = [];
+    const stopObserving = observeDevInteractionRuntimeForTests({
+      onDisplayEvent(_sessionId, event) {
+        if (event.type === "assistant_message_final") {
+          finalEvents.push(event.message.id);
+        }
+      },
+    });
+
+    try {
+      render(<App />);
+
+      await user.type(await screen.findByPlaceholderText("Write a message..."), "abort preview");
+      await user.click(screen.getByRole("button", { name: "Send message" }));
+      await user.click(await screen.findByRole("button", { name: "Stop" }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument(),
+      );
+
+      expect(finalEvents).toHaveLength(0);
+    } finally {
+      stopObserving();
+    }
+  });
+
+  it("expires browser preview approval actions when a paused run is stopped", async () => {
+    const user = userEvent.setup();
+    const finalEvents: string[] = [];
+    const stopObserving = observeDevInteractionRuntimeForTests({
+      onDisplayEvent(_sessionId, event) {
+        if (event.type === "assistant_message_final") {
+          finalEvents.push(event.message.id);
+        }
+      },
+    });
+
+    try {
+      render(<App />);
+
+      await user.type(await screen.findByPlaceholderText("Write a message..."), "approval please");
+      await user.click(screen.getByRole("button", { name: "Send message" }));
+
+      const approval = await screen.findByRole(
+        "article",
+        { name: "Approval required" },
+        { timeout: 3000 },
+      );
+      await user.click(await screen.findByRole("button", { name: "Stop" }));
+
+      await waitFor(() => expect(within(approval).getByText("Expired")).toBeVisible());
+      expect(within(approval).queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+      expect(within(approval).queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+      expect(finalEvents).toHaveLength(0);
+    } finally {
+      stopObserving();
+    }
   });
 
   it("presents active session state as human context instead of raw status tokens", async () => {

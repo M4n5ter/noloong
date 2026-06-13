@@ -11,6 +11,10 @@ import {
 import { createI18n, resolveUiLocale, type AppI18n } from "./i18n";
 import { SettingsView } from "./settings/SettingsView";
 import { devLaunchOptions, isTauriRuntime } from "./devFallback";
+import {
+  connectDevInteractionDisplayStream,
+  createDevInteractionClient,
+} from "./devInteractionRuntime";
 import { scheduleRenderProbe } from "./renderProbe";
 import "./styles.css";
 
@@ -27,9 +31,14 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
   const [bootstrap, setBootstrap] = useState<BootstrapState>({ status: "loading" });
   const [route, setRoute] = useState<AppRoute>("chat");
   const bootstrapApp = dependencies.bootstrap ?? defaultBootstrap;
-  const createClient = dependencies.createInteractionClient ?? createDefaultInteractionClient;
+  const createClient =
+    dependencies.createInteractionClient ??
+    (isTauriRuntime() ? createDefaultInteractionClient : createDevInteractionClient);
   const connectDisplayStream =
-    dependencies.connectInteractionDisplayStream ?? connectDefaultInteractionDisplayStream;
+    dependencies.connectInteractionDisplayStream ??
+    (isTauriRuntime()
+      ? connectDefaultInteractionDisplayStream
+      : connectDevInteractionDisplayStream);
   const locale = resolveUiLocale(
     bootstrap.status === "ready" ? bootstrap.options.locale ?? "en" : null,
   );

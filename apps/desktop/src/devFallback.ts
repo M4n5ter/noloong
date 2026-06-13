@@ -1,10 +1,17 @@
 import type {
+  AppInteractionEndpoint,
+  AppInteractionStatus,
   AppLaunchOptions,
   AppProfileConfigCompletionSet,
   AppProfileConfigDocument,
   AppProfileConfigValidationResult,
   HostProfileConfig,
 } from "./generated/contracts";
+
+export const DEV_INTERACTION_SERVER_NAME = "noloong-dev-preview";
+export const DEV_INTERACTION_PROTOCOL_VERSION = "dev";
+export const DEV_PROFILE_DISPLAY_NAME = "Desktop Dev";
+export const DEV_PROFILE_ID = "desktop-dev";
 
 export function isTauriRuntime(): boolean {
   return typeof window === "undefined" || "__TAURI_INTERNALS__" in window;
@@ -13,11 +20,26 @@ export function isTauriRuntime(): boolean {
 export function devLaunchOptions(): AppLaunchOptions {
   return {
     appVersion: "web-dev",
-    interactionEndpoint: null,
-    interactionStatus: { status: "unavailable" },
+    interactionEndpoint: devInteractionEndpoint(),
+    interactionStatus: devInteractionStatus(),
     locale: null,
     profileConfigPath: "/tmp/noloong-web-dev-profile.jsonc",
     runtimeControlEndpoint: null,
+  };
+}
+
+export function devInteractionEndpoint(): AppInteractionEndpoint {
+  return {
+    wsUrl: "ws://127.0.0.1:7777/noloong-dev/ws",
+  };
+}
+
+export function devInteractionStatus(): AppInteractionStatus {
+  return {
+    status: "ready",
+    serverName: DEV_INTERACTION_SERVER_NAME,
+    protocolVersion: DEV_INTERACTION_PROTOCOL_VERSION,
+    profiles: [{ profileId: DEV_PROFILE_ID, displayName: DEV_PROFILE_DISPLAY_NAME }],
   };
 }
 
@@ -59,12 +81,12 @@ function devProfileConfigText(): string {
 
 function devProfileConfig(): HostProfileConfig {
   return {
-    defaultProfileId: "desktop-dev",
+    defaultProfileId: DEV_PROFILE_ID,
     registryStore: { type: "memory" },
     profiles: [
       {
-        profileId: "desktop-dev",
-        displayName: "Desktop Dev",
+        profileId: DEV_PROFILE_ID,
+        displayName: DEV_PROFILE_DISPLAY_NAME,
         description: "Browser-only preview profile for visual QA.",
         provider: {
           type: "chatgpt_responses",
