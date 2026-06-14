@@ -95,6 +95,7 @@ export type I18nKey =
   | "settings.profile"
   | "settings.profileId"
   | "settings.fixJsonc"
+  | "settings.fixJsonField"
   | "settings.provider"
   | "settings.plugins"
   | "settings.jsonc"
@@ -224,6 +225,7 @@ const messages = {
     "settings.profileId": "Profile ID",
     "settings.fixJsonc":
       "Fix JSONC errors to restore the typed profile form. The last valid draft is preserved.",
+    "settings.fixJsonField": "Fix the invalid JSON field before saving.",
     "settings.provider": "Provider",
     "settings.plugins": "Plugins",
     "settings.jsonc": "JSONC",
@@ -350,6 +352,7 @@ const messages = {
     "settings.profile": "配置档",
     "settings.profileId": "配置档 ID",
     "settings.fixJsonc": "请先修复 JSONC 错误，表单会保留最后一次有效配置。",
+    "settings.fixJsonField": "请先修复无效的 JSON 字段，然后再保存。",
     "settings.provider": "提供商",
     "settings.plugins": "插件",
     "settings.jsonc": "JSONC",

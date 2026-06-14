@@ -125,6 +125,191 @@ describe("SettingsView", () => {
     await waitFor(() => expect(document.title).toBe("Storage"));
   });
 
+  it("shows save actions as soon as focused JSON field text becomes valid", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+
+    const eventStore = await screen.findByRole("textbox", { name: "Event store" });
+    await user.clear(eventStore);
+    await user.click(eventStore);
+    await user.paste('{ "type": "memory", "scope": "session" }');
+
+    expect(eventStore).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeEnabled();
+  });
+
+  it("blocks saving the last valid JSON draft while the focused field is invalid", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+
+    const eventStore = await screen.findByRole("textbox", { name: "Event store" });
+    await user.clear(eventStore);
+    await user.click(eventStore);
+    await user.paste('{ "type": "memory", "scope": "session" }');
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+
+    await user.clear(eventStore);
+    await user.paste("{");
+
+    expect(eventStore).toHaveFocus();
+    expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
+    expect(screen.getByText(/SyntaxError/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    vi.mocked(saveProfileConfig).mockClear();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(saveProfileConfig).not.toHaveBeenCalled();
+  });
+
+  it("clears a plugin JSON parse error when the invalid item is deleted", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Context" }));
+    await user.click(await screen.findByRole("button", { name: "Add plugin" }));
+
+    const pluginEditor = await screen.findByRole("textbox", { name: "#1" });
+    await user.clear(pluginEditor);
+    await user.click(pluginEditor);
+    await user.paste("{");
+
+    expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Delete plugin" }));
+
+    expect(screen.queryByText("Fix the invalid JSON field before saving.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/SyntaxError/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("keeps a plugin JSON parse error attached to its item when an earlier item is deleted", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Context" }));
+    await user.click(await screen.findByRole("button", { name: "Add plugin" }));
+    await user.click(screen.getByRole("button", { name: "Add plugin" }));
+
+    const secondPluginEditor = await screen.findByRole("textbox", { name: "#2" });
+    await user.clear(secondPluginEditor);
+    await user.click(secondPluginEditor);
+    await user.paste("{");
+
+    expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    const deleteButtons = screen.getAllByRole("button", { name: "Delete plugin" });
+    await user.click(deleteButtons[0]);
+
+    await waitFor(() => expect(screen.getAllByRole("textbox")).toHaveLength(1));
+    const remainingPluginEditor = screen.getAllByRole("textbox")[0];
+    expect(remainingPluginEditor).toHaveValue("{");
+    expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
+    expect(screen.getByText(/SyntaxError/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("does not move a deleted plugin JSON parse error onto the next item", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Context" }));
+    await user.click(await screen.findByRole("button", { name: "Add plugin" }));
+    await user.click(screen.getByRole("button", { name: "Add plugin" }));
+
+    const firstPluginEditor = await screen.findByRole("textbox", { name: "#1" });
+    await user.clear(firstPluginEditor);
+    await user.click(firstPluginEditor);
+    await user.paste("{");
+
+    expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
+    await user.click(screen.getAllByRole("button", { name: "Delete plugin" })[0]);
+
+    expect(screen.queryByText("Fix the invalid JSON field before saving.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/SyntaxError/)).not.toBeInTheDocument();
+    const remainingPluginEditor = (await screen.findByRole("textbox", {
+      name: "#1",
+    })) as HTMLTextAreaElement;
+    expect(() => JSON.parse(String(remainingPluginEditor.value))).not.toThrow();
+    expect(remainingPluginEditor).not.toHaveValue("{");
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("clears field-level JSON errors when discarding settings changes", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+
+    const eventStore = await screen.findByRole("textbox", { name: "Event store" });
+    await user.clear(eventStore);
+    await user.click(eventStore);
+    await user.paste('{ "type": "memory", "scope": "session" }');
+    await user.clear(eventStore);
+    await user.paste("{");
+
+    expect(screen.getByText(/SyntaxError/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+
+    expect(screen.queryByText("Fix the invalid JSON field before saving.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/SyntaxError/)).not.toBeInTheDocument();
+    expect(eventStore).toHaveValue("{\n  \"type\": \"memory\"\n}");
+  });
+
   it("restores the last viewed settings pane", async () => {
     const user = userEvent.setup();
 

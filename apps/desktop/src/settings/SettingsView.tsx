@@ -76,6 +76,7 @@ export function SettingsView({
 }) {
   const [state, setState] = useState<SettingsViewState>({ status: "loading" });
   const [activeNode, setActiveNode] = useState<SettingsNode>(() => readStoredSettingsNode());
+  const [jsonFieldErrors, setJsonFieldErrors] = useState<Record<string, string>>({});
   const validationRevisionRef = useRef(0);
 
   useEffect(() => {
@@ -102,6 +103,18 @@ export function SettingsView({
     );
   }, []);
 
+  const setJsonFieldError = useCallback((key: string, error: string | null) => {
+    setJsonFieldErrors((current) => {
+      const next = { ...current };
+      if (error) {
+        next[key] = error;
+      } else {
+        delete next[key];
+      }
+      return next;
+    });
+  }, []);
+
   const handleJsoncChange = useCallback(
     (text: string) => {
       const revision = validationRevisionRef.current + 1;
@@ -122,7 +135,11 @@ export function SettingsView({
   );
 
   const saveCurrentText = useCallback(async () => {
-    if (state.status !== "ready" || !canSaveSettings(state.draft)) {
+    if (
+      state.status !== "ready" ||
+      Object.keys(jsonFieldErrors).length > 0 ||
+      !canSaveSettings(state.draft)
+    ) {
       return;
     }
     setState({ ...state, draft: setSaving(state.draft, true), notice: null });
@@ -173,7 +190,7 @@ export function SettingsView({
           : current,
       );
     }
-  }, [i18n, launchOptions.runtimeControlEndpoint, onRuntimeRestart, state]);
+  }, [i18n, jsonFieldErrors, launchOptions.runtimeControlEndpoint, onRuntimeRestart, state]);
 
   const completeJsonc = useCallback((text: string, byteOffset: number) => {
     return completeProfileConfig(text, byteOffset);
@@ -199,7 +216,8 @@ export function SettingsView({
   const draft = state.draft;
   const config = draft.config;
   const showSaveActions = draft.dirty || draft.saving;
-  const hasFeedback = state.notice != null || draft.error != null;
+  const saveBlockedByJsonField = Object.keys(jsonFieldErrors).length > 0;
+  const hasFeedback = state.notice != null || draft.error != null || saveBlockedByJsonField;
   const nodes = settingsNodes(i18n, config != null);
 
   return (
@@ -213,6 +231,7 @@ export function SettingsView({
               disabled={!config && node.id !== "jsonc"}
               key={node.id}
               onClick={() => {
+                setJsonFieldErrors({});
                 storeSettingsNode(node.id);
                 setActiveNode(node.id);
               }}
@@ -234,7 +253,10 @@ export function SettingsView({
               <button
                 className="text-button subtle icon-text"
                 disabled={!draft.dirty || draft.saving}
-                onClick={() => updateDraft(discardSettingsChanges)}
+                onClick={() => {
+                  setJsonFieldErrors({});
+                  updateDraft(discardSettingsChanges);
+                }}
                 type="button"
               >
                 <RotateCcw size={15} />
@@ -242,7 +264,7 @@ export function SettingsView({
               </button>
               <button
                 className="text-button primary icon-text"
-                disabled={!canSaveSettings(draft)}
+                disabled={!canSaveSettings(draft) || saveBlockedByJsonField}
                 onClick={() => void saveCurrentText()}
                 type="button"
               >
@@ -256,6 +278,7 @@ export function SettingsView({
           <div className="settings-feedback" aria-live="polite">
             {state.notice ? <p className="settings-notice">{state.notice}</p> : null}
             {draft.error ? <p className="settings-error">{draft.error}</p> : null}
+            {saveBlockedByJsonField ? <p className="settings-error">{i18n.t("settings.fixJsonField")}</p> : null}
           </div>
         ) : null}
         {!config ? (
@@ -274,6 +297,7 @@ export function SettingsView({
               i18n={i18n}
               onJsoncChange={handleJsoncChange}
               completeJsonc={completeJsonc}
+              onJsonFieldErrorChange={setJsonFieldError}
               updateDraft={updateDraft}
             />
           </fieldset>
@@ -295,6 +319,7 @@ function SettingsNodePanel({
   i18n,
   onJsoncChange,
   completeJsonc,
+  onJsonFieldErrorChange,
   updateDraft,
 }: {
   activeNode: SettingsNode;
@@ -303,6 +328,7 @@ function SettingsNodePanel({
   i18n: AppI18n;
   onJsoncChange: (text: string) => void;
   completeJsonc: (text: string, offset: number) => Promise<AppProfileConfigCompletionSet>;
+  onJsonFieldErrorChange: (key: string, error: string | null) => void;
   updateDraft: (update: (draft: SettingsDraftState) => SettingsDraftState) => void;
 }) {
   const profile = selectedProfile(draft);
@@ -325,9 +351,23 @@ function SettingsNodePanel({
     case "provider":
       return <ProviderPane draft={draft} i18n={i18n} updateDraft={updateDraft} />;
     case "storage":
-      return <StoragePane draft={draft} i18n={i18n} updateDraft={updateDraft} />;
+      return (
+        <StoragePane
+          draft={draft}
+          i18n={i18n}
+          onJsonFieldErrorChange={onJsonFieldErrorChange}
+          updateDraft={updateDraft}
+        />
+      );
     case "plugins":
-      return <PluginsPane draft={draft} i18n={i18n} updateDraft={updateDraft} />;
+      return (
+        <PluginsPane
+          draft={draft}
+          i18n={i18n}
+          onJsonFieldErrorChange={onJsonFieldErrorChange}
+          updateDraft={updateDraft}
+        />
+      );
   }
 }
 
@@ -557,10 +597,12 @@ function reasoningEffortOptions(providerType: HostProfileConfig["profiles"][numb
 function StoragePane({
   draft,
   i18n,
+  onJsonFieldErrorChange,
   updateDraft,
 }: {
   draft: SettingsDraftState;
   i18n: AppI18n;
+  onJsonFieldErrorChange: (key: string, error: string | null) => void;
   updateDraft: (update: (draft: SettingsDraftState) => SettingsDraftState) => void;
 }) {
   const profile = selectedProfile(draft);
@@ -571,6 +613,7 @@ function StoragePane({
   return (
     <div className="lens-form">
       <JsonObjectEditor
+        errorKey="storage.eventStore"
         label={i18n.t("settings.eventStore")}
         value={profile.eventStore ?? null}
         fallback={{ type: "memory" } satisfies ProfileEventStoreConfig}
@@ -579,8 +622,10 @@ function StoragePane({
             updateSelectedProfileStorage(current, value, currentCompaction),
           )
         }
+        onParseErrorChange={onJsonFieldErrorChange}
       />
       <JsonObjectEditor
+        errorKey="storage.compaction"
         label={i18n.t("settings.compaction")}
         value={currentCompaction}
         fallback={{ type: "auto" } satisfies ProfileCompactionConfig}
@@ -593,12 +638,15 @@ function StoragePane({
             ),
           )
         }
+        onParseErrorChange={onJsonFieldErrorChange}
       />
       <JsonObjectEditor
+        errorKey="storage.registryStore"
         label={i18n.t("settings.registryStore")}
         value={draft.config?.registryStore ?? null}
         fallback={{ type: "memory" } satisfies RegistryStoreConfig}
         onChange={(value) => updateDraft((current) => updateRegistryStore(current, value))}
+        onParseErrorChange={onJsonFieldErrorChange}
       />
     </div>
   );
@@ -607,10 +655,12 @@ function StoragePane({
 function PluginsPane({
   draft,
   i18n,
+  onJsonFieldErrorChange,
   updateDraft,
 }: {
   draft: SettingsDraftState;
   i18n: AppI18n;
+  onJsonFieldErrorChange: (key: string, error: string | null) => void;
   updateDraft: (update: (draft: SettingsDraftState) => SettingsDraftState) => void;
 }) {
   const profile = selectedProfile(draft);
@@ -623,6 +673,7 @@ function PluginsPane({
       fallback={defaultPlugin()}
       items={plugins}
       onDelete={(index) => updateDraft((current) => deleteSelectedPlugin(current, index))}
+      onParseErrorChange={onJsonFieldErrorChange}
       onUpsert={(item, index) => updateDraft((current) => upsertSelectedPlugin(current, item, index))}
     />
   );
