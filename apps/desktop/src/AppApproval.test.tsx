@@ -63,10 +63,13 @@ describe("approval decisions", () => {
 
     const approval = await screen.findByRole(
       "article",
-      { name: "Approval required" },
+      { name: "Run a local command?" },
       { timeout: 3000 },
     );
     expect(within(approval).getByRole("heading", { name: "Run a local command?" })).toBeVisible();
+    expect(approval).toHaveAccessibleDescription(
+      "Noloong wants to run this command in your project.",
+    );
     expect(within(approval).getByRole("button", { name: "Run Command" })).toBeVisible();
     expect(within(approval).getByRole("button", { name: "Cancel" })).toBeVisible();
     expect(within(approval).queryByText("desktop.preview.change")).not.toBeInTheDocument();
@@ -89,7 +92,7 @@ describe("approval decisions", () => {
 
     const approval = await screen.findByRole(
       "article",
-      { name: "Approval required" },
+      { name: "Run a local command?" },
       { timeout: 3000 },
     );
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
@@ -115,7 +118,7 @@ describe("approval decisions", () => {
 
     await composerReadyForInput();
     const stop = await screen.findByRole("button", { name: "Stop" });
-    expect(screen.queryByRole("article", { name: "Approval required" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("article", { name: "Run a local command?" })).not.toBeInTheDocument();
 
     await user.click(stop);
 
@@ -131,7 +134,7 @@ describe("approval decisions", () => {
     await composerReadyForInput();
     emitApprovalRequest(runtime, "approval-1");
 
-    const card = await screen.findByRole("article", { name: "Approval required" });
+    const card = await screen.findByRole("article", { name: "Run a local command?" });
     expect(within(card).getByRole("heading", { name: "Run a local command?" })).toBeVisible();
     expect(within(card).getByText("pwd && ls -la")).toBeVisible();
     expect(within(card).getByText("Can run a local command.")).toBeVisible();
@@ -161,7 +164,7 @@ describe("approval decisions", () => {
     await composerReadyForInput("输入消息...");
     emitApprovalRequest(runtime, "approval-1");
 
-    const card = await screen.findByRole("article", { name: "需要审批" });
+    const card = await screen.findByRole("article", { name: "运行本地命令？" });
     expect(within(card).getByRole("heading", { name: "运行本地命令？" })).toBeVisible();
     expect(within(card).getByText("等待你决定")).toBeVisible();
     expect(within(card).getByRole("button", { name: "运行命令" })).toBeVisible();
@@ -177,7 +180,7 @@ describe("approval decisions", () => {
     await composerReadyForInput();
     emitApprovalRequest(runtime, "approval-escape");
 
-    await screen.findByRole("article", { name: "Approval required" });
+    await screen.findByRole("article", { name: "Run a local command?" });
     await user.keyboard("{Escape}");
 
     await waitFor(() =>
@@ -201,7 +204,7 @@ describe("approval decisions", () => {
     await composerReadyForInput();
     emitApprovalRequest(runtime, "approval-command-period");
 
-    await screen.findByRole("article", { name: "Approval required" });
+    await screen.findByRole("article", { name: "Run a local command?" });
     await user.keyboard("{Meta>}.{/Meta}");
 
     await waitFor(() =>
@@ -224,7 +227,7 @@ describe("approval decisions", () => {
 
     await composerReadyForInput();
     emitApprovalRequest(runtime, "approval-with-dialog");
-    await screen.findByRole("article", { name: "Approval required" });
+    await screen.findByRole("article", { name: "Run a local command?" });
 
     await user.click(screen.getByRole("button", { name: "Sessions" }));
     expect(screen.getByRole("dialog", { name: "Sessions" })).toBeVisible();

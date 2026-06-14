@@ -1,5 +1,5 @@
 import { ShieldCheck, Settings } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useId, useRef } from "react";
 import type { AppToolPermissionOutcome } from "../generated/contracts";
 import {
   reasoningVisibleText,
@@ -381,10 +381,13 @@ function ApprovalCard({
 }) {
   const pending = approval.status === "pending";
   const decision = approvalDecisionViewModel(approval, i18n);
+  const titleId = useId();
+  const summaryId = useId();
 
   return (
     <article
-      aria-label={i18n.t("approval.required")}
+      aria-labelledby={titleId}
+      aria-describedby={summaryId}
       className={`activity-card approval-card approval-card-${approval.status}`}
     >
       <header className="approval-head">
@@ -393,10 +396,10 @@ function ApprovalCard({
         </span>
         <div>
           <p className="approval-eyebrow">{approvalStatusLabel(approval.status, i18n)}</p>
-          <h2>{decision.title}</h2>
+          <h2 id={titleId}>{decision.title}</h2>
         </div>
       </header>
-      <p className="approval-summary">{decision.summary}</p>
+      <p className="approval-summary" id={summaryId}>{decision.summary}</p>
       {decision.reason ? <p className="approval-reason">{decision.reason}</p> : null}
       {decision.command ? (
         <div className="approval-command-block">
