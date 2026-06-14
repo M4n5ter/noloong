@@ -7,10 +7,10 @@
 
 .lens-header h2 {
   margin: 0;
-  color: rgba(243, 239, 228, 0.88);
-  font-size: 22px;
-  font-weight: 660;
-  line-height: 1.15;
+  color: rgba(243, 239, 228, 0.72);
+  font-size: 15px;
+  font-weight: 620;
+  line-height: 1.2;
 }
 
 .lens-header p {
@@ -29,8 +29,11 @@
 }
 
 .settings-pane-fieldset {
+  display: grid;
   min-width: 0;
   min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
   margin: 0;
   padding: 0;
   border: 0;
@@ -45,16 +48,54 @@
 .json-list {
   display: grid;
   min-height: 0;
-  gap: 14px;
   overflow: auto;
+}
+
+.lens-form {
+  --settings-control-width: 420px;
+  --settings-label-width: 188px;
+  --settings-row-gap: 18px;
+  --settings-control-offset: calc(var(--settings-label-width) + var(--settings-row-gap));
+  align-content: start;
+  gap: 0;
+  padding: 2px 0 16px;
+}
+
+.jsonc-pane,
+.json-list {
+  gap: 14px;
 }
 
 .lens-form label,
 .json-field {
   display: grid;
-  gap: 7px;
+  gap: 8px;
   color: rgba(243, 239, 228, 0.48);
   font-size: 13px;
+}
+
+.lens-form > label:not(.check-row),
+.subsection > label:not(.check-row) {
+  min-height: 48px;
+  grid-template-columns:
+    minmax(132px, var(--settings-label-width))
+    minmax(0, var(--settings-control-width));
+  align-items: center;
+  gap: var(--settings-row-gap);
+  padding: 8px 0;
+  border-top: 1px solid rgba(243, 239, 228, 0.055);
+}
+
+.lens-form > label:first-child {
+  border-top: 0;
+}
+
+.lens-form > label:has(textarea) {
+  align-items: start;
+}
+
+.lens-form > label:has(textarea) > span {
+  padding-top: 10px;
 }
 
 .lens-form input:not([type="checkbox"]),
@@ -101,10 +142,19 @@
   gap: 8px;
 }
 
+.lens-form > .inline-actions {
+  justify-content: flex-start;
+  padding: 12px 0 12px min(var(--settings-control-offset), 30%);
+  border-top: 1px solid rgba(243, 239, 228, 0.055);
+}
+
 .lens-form .check-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 42px;
+  padding: 8px 0 8px min(var(--settings-control-offset), 30%);
+  border-top: 1px solid rgba(243, 239, 228, 0.055);
 }
 
 .lens-form .check-row input[type="checkbox"] {
@@ -122,13 +172,13 @@
 
 .subsection {
   display: grid;
-  gap: 10px;
-  padding: 14px 0 0;
-  border-top: 1px solid rgba(243, 239, 228, 0.07);
+  gap: 0;
+  padding: 16px 0 0;
+  border-top: 1px solid rgba(243, 239, 228, 0.09);
 }
 
 .subsection h3 {
-  margin: 0;
+  margin: 0 0 6px;
   color: rgba(243, 239, 228, 0.62);
   font-size: 13px;
   font-weight: 620;
@@ -136,7 +186,10 @@
 }
 
 .jsonc-pane {
+  height: 100%;
   min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .jsonc-pane > p {
@@ -145,6 +198,7 @@
 }
 
 .cm-editor {
+  height: 100%;
   min-height: 300px;
   max-height: 100%;
   border: 1px solid rgba(243, 239, 228, 0.1);
@@ -162,5 +216,29 @@
 }
 
 .json-field small {
+  grid-column: 2;
   color: #e5d4b3;
+}
+
+@media (max-width: 760px) {
+  .lens-form > label:not(.check-row),
+  .subsection > label:not(.check-row) {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 7px;
+    padding: 10px 0;
+  }
+
+  .lens-form > label:has(textarea) > span {
+    padding-top: 0;
+  }
+
+  .lens-form > .inline-actions,
+  .lens-form .check-row {
+    padding-left: 0;
+  }
+
+  .json-field small {
+    grid-column: 1;
+  }
 }
