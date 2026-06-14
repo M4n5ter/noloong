@@ -45,7 +45,7 @@ export function PromptComposer({
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled && !canAbort;
   const canExpand = expanded || needsExpandedComposer(text);
   const previewingCompactOverflow = canExpand && !expanded;
-  const compactPreview = firstPreviewLine(text);
+  const compactPreview = expanded ? i18n.t("composer.editingDraft") : firstPreviewLine(text);
 
   useEffect(() => {
     disabledRef.current = disabled;

@@ -254,6 +254,32 @@ describe("PromptComposer", () => {
       "true",
     );
   });
+
+  it("keeps expanded draft text out of the compact capsule preview", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const longDraft =
+      "This is a deliberately long composer input that should live in the expanded editor instead of being repeated in the compact capsule.";
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    await user.type(textarea, longDraft);
+    await user.click(await screen.findByRole("button", { name: "Expand composer" }));
+
+    const preview = document.querySelector(".composer-preview");
+    expect(preview).toHaveTextContent("Editing draft");
+    expect(preview).not.toHaveTextContent("deliberately long composer");
+    expect(textarea).toHaveValue(longDraft);
+  });
 });
 
 function setScrollMetrics(
