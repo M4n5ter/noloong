@@ -28,7 +28,7 @@ export type I18nKey =
   | "sessions.empty"
   | "sessionsPanel.title"
   | "sessionsPanel.subtitle"
-  | "sessionsPanel.return"
+  | "sessionsPanel.close"
   | "runtime.disconnected"
   | "runtime.interrupted"
   | "transcript.newSessionTitle"
@@ -155,7 +155,7 @@ const messages = {
     "sessions.empty": "No sessions yet. Send a message to create one.",
     "sessionsPanel.title": "Sessions",
     "sessionsPanel.subtitle": "Switch context or start a clean thread without leaving the chat.",
-    "sessionsPanel.return": "Return",
+    "sessionsPanel.close": "Close sessions",
     "runtime.disconnected": "Display stream disconnected",
     "runtime.interrupted": "Display stream was interrupted.",
     "transcript.newSessionTitle": "What should Noloong think through?",
@@ -281,7 +281,7 @@ const messages = {
     "sessions.empty": "还没有会话。发送消息后会自动创建。",
     "sessionsPanel.title": "会话",
     "sessionsPanel.subtitle": "切换上下文，或在不离开聊天的情况下开始一个干净的新线程。",
-    "sessionsPanel.return": "返回",
+    "sessionsPanel.close": "关闭会话面板",
     "runtime.disconnected": "Display 流已断开",
     "runtime.interrupted": "Display 流已中断。",
     "transcript.newSessionTitle": "想让 Noloong 思考什么？",

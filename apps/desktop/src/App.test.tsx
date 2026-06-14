@@ -359,7 +359,7 @@ describe("Noloong app chat regression harness", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Sessions" });
     expect(dialog).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Return" })).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "Close sessions" })).toHaveFocus();
     expect(within(dialog).getByText("Default environment")).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · idle");
     expect(screen.queryByRole("group", { name: "Session controls" })).not.toBeInTheDocument();
@@ -376,9 +376,25 @@ describe("Noloong app chat regression harness", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Sessions" });
     expect(dialog).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Return" })).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "Close sessions" })).toHaveFocus();
 
     await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();
+    expect(sessionsButton).toHaveFocus();
+  });
+
+  it("closes the sessions panel from the standard close control", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    const sessionsButton = await screen.findByRole("button", { name: "Sessions" });
+    await user.click(sessionsButton);
+
+    const dialog = screen.getByRole("dialog", { name: "Sessions" });
+    await user.click(within(dialog).getByRole("button", { name: "Close sessions" }));
 
     expect(screen.queryByRole("dialog", { name: "Sessions" })).not.toBeInTheDocument();
     expect(sessionsButton).toHaveFocus();

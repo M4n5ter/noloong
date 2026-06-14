@@ -719,6 +719,31 @@
   box-shadow: 0 28px 100px rgba(0, 0, 0, 0.32);
 }
 
+.sessions-panel-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid rgba(243, 239, 228, 0.1);
+  border-radius: 999px;
+  background: rgba(243, 239, 228, 0.035);
+  color: rgba(243, 239, 228, 0.56);
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.sessions-panel-close:hover {
+  border-color: rgba(168, 196, 220, 0.28);
+  background: rgba(58, 84, 107, 0.22);
+  color: rgba(243, 239, 228, 0.8);
+}
+
 .sessions-panel-copy {
   display: grid;
   gap: 8px;
@@ -746,7 +771,7 @@
 .sessions-panel-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
 }
 
