@@ -348,18 +348,25 @@ function ReasoningCard({
 function ToolActivityRow({ i18n, tool }: { i18n: AppI18n; tool: ToolTimelineItem }) {
   const view = toolActivityViewModel(tool, i18n);
   return (
-    <article className={`activity-card tool-card ${tool.isError ? "tool-error" : ""}`}>
-      <div className="activity-title-row">
-        <span className="activity-title-stack">
-          <span>{view.title}</span>
-          {view.auditLabel ? <code>{view.auditLabel}</code> : null}
-        </span>
+    <details
+      className={`tool-activity tool-activity-${tool.status} ${tool.isError ? "tool-error" : ""}`}
+    >
+      <summary>
+        <span className="tool-activity-dot" aria-hidden="true" />
+        <span className="tool-activity-disclosure" aria-hidden="true" />
+        <span className="tool-activity-title">{view.title}</span>
         <span className={`activity-status activity-status-${tool.status}`}>
           {view.statusLabel}
         </span>
-      </div>
-      {view.detail ? <p>{view.detail}</p> : null}
-    </article>
+        {view.detail ? <span className="tool-activity-detail">{view.detail}</span> : null}
+      </summary>
+      {view.auditLabel || view.auditDetail ? (
+        <div className="tool-activity-audit">
+          {view.auditLabel ? <code>{view.auditLabel}</code> : null}
+          {view.auditDetail ? <pre>{view.auditDetail}</pre> : null}
+        </div>
+      ) : null}
+    </details>
   );
 }
 

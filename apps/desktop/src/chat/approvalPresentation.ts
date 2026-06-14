@@ -25,6 +25,7 @@ export type ToolActivityViewModel = {
   title: string;
   auditLabel: string | null;
   detail: string;
+  auditDetail: string;
   statusLabel: string;
 };
 
@@ -52,6 +53,7 @@ export function toolActivityViewModel(
     title: toolTitle(tool.toolName, i18n),
     auditLabel: tool.toolName || null,
     detail: tool.outputText || tool.updates.at(-1) || "",
+    auditDetail: tool.updates.length > 0 ? tool.updates.join("\n") : "",
     statusLabel: tool.status === "running" ? i18n.t("tool.running") : i18n.t("tool.done"),
   };
 }

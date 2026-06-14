@@ -548,6 +548,45 @@ describe("Noloong app chat regression harness", () => {
     await expectVisibleText("first second");
   });
 
+  it("keeps tool audit identifiers hidden until the activity row is expanded", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByPlaceholderText("Write a message...");
+    await composerReadyForInput();
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "tool_started",
+        toolCallId: "tool-1",
+        toolName: "desktop.preview.inspect",
+      });
+      runtime.emitDisplayEvent({
+        type: "tool_updated",
+        toolCallId: "tool-1",
+        update: { content: [{ type: "text", text: "Captured viewport metrics." }] },
+      });
+      runtime.emitDisplayEvent({
+        type: "tool_completed",
+        toolCallId: "tool-1",
+        output: { content: [{ type: "text", text: "Viewport check complete." }] },
+      });
+    });
+
+    expect(screen.getByText("Inspecting preview")).toBeVisible();
+    expect(screen.getByText("Done")).toBeVisible();
+    expect(screen.getByText("Viewport check complete.")).toBeVisible();
+    expect(screen.getByText("desktop.preview.inspect")).not.toBeVisible();
+    expect(screen.getByText("Captured viewport metrics.")).not.toBeVisible();
+
+    await user.click(screen.getByText("Inspecting preview"));
+
+    expect(screen.getByText("desktop.preview.inspect")).toBeVisible();
+    expect(screen.getByText("Captured viewport metrics.")).toBeVisible();
+  });
+
   it("converges to the authoritative session snapshot after run completion", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
 

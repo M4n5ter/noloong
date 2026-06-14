@@ -91,7 +91,7 @@ describe("approval presentation", () => {
     ]);
   });
 
-  it("keeps tool audit identifiers visible outside the approval card", () => {
+  it("keeps tool audit identifiers available for explicit details", () => {
     const view = toolActivityViewModel(
       {
         kind: "tool",
@@ -109,6 +109,7 @@ describe("approval presentation", () => {
       title: "Local command",
       auditLabel: "host.exec.start",
       detail: "running pwd",
+      auditDetail: "running pwd",
       statusLabel: "Running",
     });
   });
