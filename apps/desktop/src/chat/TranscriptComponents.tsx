@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { AppToolPermissionOutcome } from "../generated/contracts";
 import {
   reasoningVisibleText,
+  pendingApprovalIdFromConversation,
   type ApprovalTimelineItem,
   type ConversationState,
   type MessageTimelineItem,
@@ -174,10 +175,12 @@ export function TranscriptView({
     return <CenteredStatus title={i18n.t("chat.failedTitle")} detail={interaction.error} />;
   }
 
-  const canSubmit = interaction.streamStatus === "ready" && !interaction.sending;
+  const waitingForApproval = pendingApprovalIdFromConversation(interaction.conversation) !== null;
+  const canSubmit =
+    interaction.streamStatus === "ready" && !interaction.sending && !waitingForApproval;
   const canAbort =
     interaction.conversation.runStatus === "running" ||
-    interaction.conversation.runStatus === "paused";
+    (interaction.conversation.runStatus === "paused" && !waitingForApproval);
   const selectedMessages = interaction.selectedSession?.state.messages ?? [];
   const title =
     interaction.selectedSession && selectedMessages.length > 0
@@ -187,6 +190,11 @@ export function TranscriptView({
     ? sessionContextLabel(interaction.selectedSession, interaction.initializeResult.profiles, i18n)
     : i18n.t("transcript.newSessionDetail");
   const timelineEmpty = interaction.conversation.timeline.length === 0;
+  const composerPlaceholder = waitingForApproval
+    ? i18n.t("composer.waitingForApproval")
+    : interaction.streamStatus === "ready"
+      ? i18n.t("composer.write")
+      : interaction.streamError ?? i18n.t("composer.connecting");
 
   return (
     <div className="conversation">
@@ -245,11 +253,7 @@ export function TranscriptView({
         onCreateSession={onCreateSession}
         onOpenSessions={onOpenSessions}
         onSubmit={submitPrompt}
-        placeholder={
-          interaction.streamStatus === "ready"
-            ? i18n.t("composer.write")
-            : interaction.streamError ?? i18n.t("composer.connecting")
-        }
+        placeholder={composerPlaceholder}
       />
     </div>
   );

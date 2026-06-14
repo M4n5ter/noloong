@@ -41,6 +41,7 @@ export type I18nKey =
   | "sessionContext.aborted"
   | "message.sending"
   | "composer.write"
+  | "composer.waitingForApproval"
   | "composer.connecting"
   | "composer.attach"
   | "composer.send"
@@ -168,6 +169,7 @@ const messages = {
     "sessionContext.aborted": "{profile} stopped",
     "message.sending": "sending",
     "composer.write": "Write a message...",
+    "composer.waitingForApproval": "Waiting for your approval...",
     "composer.connecting": "Connecting display stream...",
     "composer.attach": "Attach files",
     "composer.send": "Send message",
@@ -294,6 +296,7 @@ const messages = {
     "sessionContext.aborted": "{profile} 已停止",
     "message.sending": "发送中",
     "composer.write": "输入消息...",
+    "composer.waitingForApproval": "等待你审批...",
     "composer.connecting": "正在连接 Display 流...",
     "composer.attach": "添加附件",
     "composer.send": "发送消息",

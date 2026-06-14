@@ -297,6 +297,16 @@ export function markApprovalResolved(
   };
 }
 
+export function pendingApprovalIdFromConversation(conversation: ConversationState): string | null {
+  for (let index = conversation.timeline.length - 1; index >= 0; index -= 1) {
+    const item = conversation.timeline[index];
+    if (item.kind === "approval" && item.status === "pending") {
+      return item.approvalId;
+    }
+  }
+  return null;
+}
+
 export function reasoningVisibleText(thought: ReasoningTimelineItem): string {
   return thought.summaryText || thought.rawText;
 }

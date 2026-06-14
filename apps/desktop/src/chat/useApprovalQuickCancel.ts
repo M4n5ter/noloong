@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import type { AppToolPermissionOutcome } from "../generated/contracts";
-import type { ConversationState } from "../interaction/conversationState";
+import {
+  pendingApprovalIdFromConversation,
+  type ConversationState,
+} from "../interaction/conversationState";
 
 type ApprovalQuickCancelOptions = {
   conversation: ConversationState | null;
@@ -46,14 +49,4 @@ export function useApprovalQuickCancel({
     window.addEventListener("keydown", handleApprovalQuickCancel, { capture: true });
     return () => window.removeEventListener("keydown", handleApprovalQuickCancel, { capture: true });
   }, [conversation, disabled, onResolveApproval]);
-}
-
-function pendingApprovalIdFromConversation(conversation: ConversationState): string | null {
-  for (let index = conversation.timeline.length - 1; index >= 0; index -= 1) {
-    const item = conversation.timeline[index];
-    if (item.kind === "approval" && item.status === "pending") {
-      return item.approvalId;
-    }
-  }
-  return null;
 }

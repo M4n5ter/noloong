@@ -5,10 +5,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import {
-  observeDevInteractionRuntimeForTests,
-  resetDevInteractionRuntimeForTests,
-} from "./devInteractionRuntime";
+import { resetDevInteractionRuntimeForTests } from "./devInteractionRuntime";
 import { emptySession, FakeInteractionRuntime } from "./test/fakeInteractionRuntime";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -73,6 +70,8 @@ describe("approval decisions", () => {
     expect(within(approval).getByRole("button", { name: "Run Command" })).toBeVisible();
     expect(within(approval).getByRole("button", { name: "Cancel" })).toBeVisible();
     expect(within(approval).queryByText("desktop.preview.change")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "Sessions" }));
     const sessionsPanel = await screen.findByRole("dialog", { name: "Sessions" });
@@ -80,37 +79,47 @@ describe("approval decisions", () => {
     expect(within(sessionsPanel).getByText("Desktop Dev needs a decision")).toBeVisible();
   });
 
-  it("expires browser preview approval actions when a paused run is stopped", async () => {
+  it("keeps approval cancellation on the decision card while a run is paused", async () => {
     const user = userEvent.setup();
-    const finalEvents: string[] = [];
-    const stopObserving = observeDevInteractionRuntimeForTests({
-      onDisplayEvent(_sessionId, event) {
-        if (event.type === "assistant_message_final") {
-          finalEvents.push(event.message.id);
-        }
-      },
+
+    render(<App />);
+
+    await user.type(await screen.findByPlaceholderText("Write a message..."), "approval please");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    const approval = await screen.findByRole(
+      "article",
+      { name: "Approval required" },
+      { timeout: 3000 },
+    );
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    await user.click(within(approval).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(within(approval).getByText("Canceled")).toBeVisible());
+    expect(within(approval).queryByRole("button", { name: "Run Command" })).not.toBeInTheDocument();
+    expect(within(approval).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("Approval denied in the dev preview. The flow stopped cleanly."),
+    ).toBeVisible();
+  });
+
+  it("keeps stop available for a restored paused run without an approval card", async () => {
+    const runtime = new FakeInteractionRuntime({
+      ...emptySession(),
+      status: "paused",
     });
+    const user = userEvent.setup();
 
-    try {
-      render(<App />);
+    render(<App dependencies={dependenciesFor(runtime)} />);
 
-      await user.type(await screen.findByPlaceholderText("Write a message..."), "approval please");
-      await user.click(screen.getByRole("button", { name: "Send message" }));
+    await composerReadyForInput();
+    const stop = await screen.findByRole("button", { name: "Stop" });
+    expect(screen.queryByRole("article", { name: "Approval required" })).not.toBeInTheDocument();
 
-      const approval = await screen.findByRole(
-        "article",
-        { name: "Approval required" },
-        { timeout: 3000 },
-      );
-      await user.click(await screen.findByRole("button", { name: "Stop" }));
+    await user.click(stop);
 
-      await waitFor(() => expect(within(approval).getByText("Expired")).toBeVisible());
-      expect(within(approval).queryByRole("button", { name: "Run Command" })).not.toBeInTheDocument();
-      expect(within(approval).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
-      expect(finalEvents).toHaveLength(0);
-    } finally {
-      stopObserving();
-    }
+    expect(runtime.abortRequests).toEqual([expect.objectContaining({ sessionId: "session-1" })]);
   });
 
   it("resolves command approvals from a localized decision card", async () => {

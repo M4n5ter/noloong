@@ -340,8 +340,8 @@
   background: rgba(243, 239, 228, 0.07);
 }
 
-.composer-tool:hover,
-.send-button:hover {
+.composer-tool:not(:disabled):hover,
+.send-button:not(:disabled):hover {
   border-color: rgba(168, 196, 220, 0.42);
 }
 
@@ -354,12 +354,24 @@
 .composer-tool:disabled,
 .send-button:disabled {
   cursor: default;
-  opacity: 0.42;
+  transform: none;
+}
+
+.composer-tool:disabled {
+  border-color: rgba(243, 239, 228, 0.08);
+  background: rgba(23, 25, 20, 0.42);
+  color: rgba(243, 239, 228, 0.34);
 }
 
 .send-button {
   background: #e5d4b3;
   color: #20221b;
+}
+
+.send-button:disabled {
+  border-color: rgba(243, 239, 228, 0.1);
+  background: rgba(23, 25, 20, 0.62);
+  color: rgba(243, 239, 228, 0.42);
 }
 
 .stop-run-button {
