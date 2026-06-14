@@ -1,7 +1,7 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Maximize2, MessageCircle, Minimize2, Paperclip, Plus, Send, Square, X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { AppI18n } from "../i18n";
 import { pathsToAttachments, type PromptAttachment, type PromptSubmission } from "./attachments";
 import {
@@ -37,6 +37,7 @@ export function PromptComposer({
   const [dragging, setDragging] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [scrollFades, setScrollFades] = useState({ top: false, bottom: false });
+  const editorId = useId();
   const formRef = useRef<HTMLFormElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const disabledRef = useRef(disabled);
@@ -244,6 +245,7 @@ export function PromptComposer({
             </span>
           ) : null}
           <div
+            id={editorId}
             className={[
               "composer-editor-shell",
               expanded ? "expanded" : "",
@@ -273,6 +275,8 @@ export function PromptComposer({
             />
             {canExpand ? (
               <button
+                aria-controls={editorId}
+                aria-expanded={expanded}
                 aria-label={i18n.t(expanded ? "composer.collapse" : "composer.expand")}
                 className="composer-expand"
                 onClick={(event) => {

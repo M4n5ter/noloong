@@ -32,11 +32,16 @@
   background: rgba(58, 84, 107, 0.54);
 }
 
+.composer:has(.composer-editor-shell.expanded) .composer-capsule {
+  border-color: rgba(243, 239, 228, 0.11);
+  background: rgba(23, 25, 20, 0.76);
+  box-shadow: 0 18px 62px rgba(0, 0, 0, 0.22);
+}
+
 .composer-input-shell {
   grid-area: input;
   display: grid;
-  --composer-editor-surface: rgba(17, 19, 15, 0.985);
-  --composer-editor-surface-solid: #11130f;
+  --composer-editor-surface-solid: #171914;
   --composer-expand-gap: 16px;
   --composer-expand-inset: 0px;
   --composer-expand-size: 28px;
@@ -112,12 +117,14 @@
   height: auto;
   overflow: hidden;
   isolation: isolate;
-  border: 1px solid rgba(243, 239, 228, 0.13);
-  border-radius: 24px;
-  -webkit-backdrop-filter: blur(18px) saturate(1.04);
-  backdrop-filter: blur(18px) saturate(1.04);
-  background: var(--composer-editor-surface);
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(243, 239, 228, 0.1);
+  border-radius: 26px;
+  -webkit-backdrop-filter: blur(16px) saturate(1.03);
+  backdrop-filter: blur(16px) saturate(1.03);
+  background:
+    linear-gradient(180deg, rgba(37, 40, 31, 0.78), rgba(17, 19, 15, 0.88)),
+    rgba(23, 25, 20, 0.84);
+  box-shadow: 0 16px 52px rgba(0, 0, 0, 0.26);
 }
 
 .composer-editor-shell.expanded::before,
@@ -126,7 +133,7 @@
   right: 1px;
   left: 1px;
   z-index: 2;
-  height: 30px;
+  height: 42px;
   --composer-edge-radius: 0 0 23px 23px;
   --composer-edge-direction: 0deg;
   pointer-events: none;
@@ -134,30 +141,22 @@
   opacity: 0;
   transition: opacity 160ms ease;
   border-radius: var(--composer-edge-radius);
-  -webkit-backdrop-filter: blur(10px) saturate(1.06);
-  backdrop-filter: blur(10px) saturate(1.06);
-  background:
-    linear-gradient(
-      var(--composer-edge-direction),
-      rgba(243, 239, 228, 0.035),
-      rgba(243, 239, 228, 0) 36%
-    ),
-    linear-gradient(
-      var(--composer-edge-direction),
-      rgba(23, 25, 20, 0.78),
-      rgba(23, 25, 20, 0.42) 46%,
-      rgba(23, 25, 20, 0)
-    );
+  background: linear-gradient(
+    var(--composer-edge-direction),
+    rgba(23, 25, 20, 0.9),
+    rgba(23, 25, 20, 0.62) 44%,
+    rgba(23, 25, 20, 0)
+  );
   -webkit-mask-image: linear-gradient(
     var(--composer-edge-direction),
     #000 0%,
-    #000 34%,
+    #000 42%,
     transparent 100%
   );
   mask-image: linear-gradient(
     var(--composer-edge-direction),
     #000 0%,
-    #000 34%,
+    #000 42%,
     transparent 100%
   );
 }
@@ -242,6 +241,7 @@
   max-height: min(224px, 38vh);
   padding: 18px var(--composer-editor-action-space) 20px 17px;
   overflow-y: auto;
+  scrollbar-color: rgba(243, 239, 228, 0.18) transparent;
 }
 
 .composer-input::placeholder {
