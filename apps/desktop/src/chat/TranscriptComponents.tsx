@@ -186,9 +186,6 @@ export function TranscriptView({
     interaction.selectedSession && selectedMessages.length > 0
       ? sessionTitle(interaction.selectedSession)
       : i18n.t("transcript.newSessionTitle");
-  const subtitle = interaction.selectedSession
-    ? sessionContextLabel(interaction.selectedSession, interaction.initializeResult.profiles, i18n)
-    : i18n.t("transcript.newSessionDetail");
   const timelineEmpty = interaction.conversation.timeline.length === 0;
   const composerPlaceholder = waitingForApproval
     ? i18n.t("composer.waitingForApproval")
@@ -226,7 +223,6 @@ export function TranscriptView({
           {timelineEmpty ? (
             <div className="empty-session-heading">
               <h1 data-render-heading>{title}</h1>
-              <p>{subtitle}</p>
             </div>
           ) : null}
           {timelineEmpty ? (

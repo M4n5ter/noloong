@@ -32,7 +32,6 @@ export type I18nKey =
   | "runtime.disconnected"
   | "runtime.interrupted"
   | "transcript.newSessionTitle"
-  | "transcript.newSessionDetail"
   | "transcript.empty"
   | "sessionContext.environment"
   | "sessionContext.running"
@@ -159,9 +158,8 @@ const messages = {
     "sessionsPanel.close": "Close sessions",
     "runtime.disconnected": "Display stream disconnected",
     "runtime.interrupted": "Display stream was interrupted.",
-    "transcript.newSessionTitle": "What should Noloong think through?",
-    "transcript.newSessionDetail": "Send a message to create a session.",
-    "transcript.empty": "Start with a decision, draft, plan, or problem.",
+    "transcript.newSessionTitle": "Start with a question.",
+    "transcript.empty": "Decision, draft, plan, or problem.",
     "sessionContext.environment": "{profile} environment",
     "sessionContext.running": "{profile} is thinking",
     "sessionContext.paused": "{profile} needs a decision",
@@ -286,9 +284,8 @@ const messages = {
     "sessionsPanel.close": "关闭会话面板",
     "runtime.disconnected": "Display 流已断开",
     "runtime.interrupted": "Display 流已中断。",
-    "transcript.newSessionTitle": "想让 Noloong 思考什么？",
-    "transcript.newSessionDetail": "发送消息后会自动创建会话。",
-    "transcript.empty": "从一个决定、草稿、计划或问题开始。",
+    "transcript.newSessionTitle": "从一个问题开始。",
+    "transcript.empty": "决定、草稿、计划或问题都可以。",
     "sessionContext.environment": "{profile} 环境",
     "sessionContext.running": "{profile} 正在思考",
     "sessionContext.paused": "{profile} 需要你决定",

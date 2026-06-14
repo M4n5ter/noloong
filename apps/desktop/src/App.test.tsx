@@ -77,8 +77,9 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    expect(await screen.findByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
-    expect(screen.getByText("Default environment")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Start with a question." })).toBeInTheDocument();
+    expect(screen.getByText("Decision, draft, plan, or problem.")).toBeInTheDocument();
+    expect(screen.queryByText("Default environment")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · idle");
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
   });
@@ -118,7 +119,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
+    await composerReadyForInput();
     expect(screen.queryByRole("heading", { name: "Choose an environment" })).not.toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText("Write a message..."), "verify dev preview");
@@ -164,7 +165,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "What should Noloong think through?" });
+    await composerReadyForInput();
 
     act(() => {
       runtime.emitDisplayEvent({
@@ -173,7 +174,8 @@ describe("Noloong app chat regression harness", () => {
       });
     });
 
-    expect(await screen.findByText("Default is thinking")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeVisible();
+    expect(screen.queryByText("Default is thinking")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · running");
   });
 
@@ -183,7 +185,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "What should Noloong think through?" });
+    await composerReadyForInput();
     await user.keyboard("{Meta>},{/Meta}");
 
     expect(window.open).toHaveBeenCalledWith(
@@ -191,7 +193,7 @@ describe("Noloong app chat regression harness", () => {
       "noloong-settings",
       "width=920,height=720",
     );
-    expect(screen.getByRole("heading", { name: "What should Noloong think through?" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Write a message..." })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();
   });
 
@@ -201,7 +203,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "What should Noloong think through?" });
+    await composerReadyForInput();
     await user.keyboard("{Control>},{/Control}");
 
     expect(window.open).toHaveBeenCalledWith(
@@ -291,7 +293,7 @@ describe("Noloong app chat regression harness", () => {
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     expect(await screen.findByRole("heading", { name: "Provider" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "What should Noloong think through?" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Start with a question." })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back to chat" })).not.toBeInTheDocument();
   });
 
@@ -311,7 +313,7 @@ describe("Noloong app chat regression harness", () => {
       />,
     );
 
-    await screen.findByRole("heading", { name: "What should Noloong think through?" });
+    await composerReadyForInput();
     expect(createInteractionClient).toHaveBeenCalledWith({
       wsUrl: "ws://127.0.0.1:7777/jsonrpc/ws",
     });
@@ -348,7 +350,7 @@ describe("Noloong app chat regression harness", () => {
 
     render(<App dependencies={dependenciesFor(runtime)} />);
 
-    await screen.findByRole("heading", { name: "What should Noloong think through?" });
+    await composerReadyForInput();
     const sessionControls = screen.getByRole("group", { name: "Session controls" });
 
     expect(within(sessionControls).getByRole("button", { name: "Sessions" })).toBeInTheDocument();
