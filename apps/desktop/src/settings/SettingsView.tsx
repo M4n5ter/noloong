@@ -238,7 +238,7 @@ export function SettingsView({
               type="button"
             >
               <node.icon size={18} />
-              <span>{node.label}</span>
+              <span>{node.navigationLabel ?? node.label}</span>
             </button>
           ))}
         </nav>
@@ -690,9 +690,15 @@ function JsoncPane({
   i18n: AppI18n;
   onChange: (text: string) => void;
 }) {
+  const statusText = draft.validating
+    ? i18n.t("settings.validating")
+    : draft.dirty
+      ? i18n.t("settings.unsaved")
+      : null;
+
   return (
-    <div className="jsonc-pane">
-      <p>{draft.validating ? i18n.t("settings.validating") : draft.dirty ? i18n.t("settings.unsaved") : i18n.t("settings.savedState")}</p>
+    <div className={statusText ? "jsonc-pane has-status" : "jsonc-pane"}>
+      {statusText ? <p>{statusText}</p> : null}
       <JsoncEditor complete={completeJsonc} onChange={onChange} readOnly={draft.saving} value={draft.text} />
     </div>
   );
@@ -711,13 +717,34 @@ function settingsNodes(i18n: AppI18n, includeTypedPanes: boolean) {
   return [
     ...(includeTypedPanes
       ? [
-          { id: "profile" as const, label: i18n.t("settings.profile"), icon: Settings2 },
-          { id: "provider" as const, label: i18n.t("settings.provider"), icon: Server },
-          { id: "storage" as const, label: i18n.t("settings.storage"), icon: Database },
-          { id: "plugins" as const, label: i18n.t("settings.context"), icon: Plug },
+          {
+            id: "profile" as const,
+            label: i18n.t("settings.profile"),
+            icon: Settings2,
+          },
+          {
+            id: "provider" as const,
+            label: i18n.t("settings.provider"),
+            icon: Server,
+          },
+          {
+            id: "storage" as const,
+            label: i18n.t("settings.storage"),
+            icon: Database,
+          },
+          {
+            id: "plugins" as const,
+            label: i18n.t("settings.context"),
+            icon: Plug,
+          },
         ]
       : []),
-    { id: "jsonc" as const, label: i18n.t("settings.advancedJsonc"), icon: Braces },
+    {
+      id: "jsonc" as const,
+      label: i18n.t("settings.advancedJsonc"),
+      navigationLabel: i18n.t("settings.advanced"),
+      icon: Braces,
+    },
   ];
 }
 

@@ -99,7 +99,6 @@ export type I18nKey =
   | "settings.jsonc"
   | "settings.validating"
   | "settings.unsaved"
-  | "settings.savedState"
   | "settings.noProfile"
   | "settings.activeProfile"
   | "settings.name"
@@ -124,6 +123,7 @@ export type I18nKey =
   | "settings.deletePlugin"
   | "settings.noPlugins"
   | "settings.context"
+  | "settings.advanced"
   | "settings.advancedJsonc"
   | "settings.providerReasoningTitle";
 
@@ -227,7 +227,6 @@ const messages = {
     "settings.jsonc": "JSONC",
     "settings.validating": "Validating...",
     "settings.unsaved": "Unsaved changes",
-    "settings.savedState": "Saved",
     "settings.noProfile": "No profile exists.",
     "settings.activeProfile": "Active profile",
     "settings.name": "Name",
@@ -252,6 +251,7 @@ const messages = {
     "settings.deletePlugin": "Delete plugin",
     "settings.noPlugins": "No plugins in this profile.",
     "settings.context": "Context",
+    "settings.advanced": "Advanced",
     "settings.advancedJsonc": "Advanced JSONC",
     "settings.providerReasoningTitle": "Reasoning",
   },
@@ -352,7 +352,6 @@ const messages = {
     "settings.jsonc": "JSONC",
     "settings.validating": "正在检查...",
     "settings.unsaved": "有未保存修改",
-    "settings.savedState": "已保存",
     "settings.noProfile": "还没有配置档。",
     "settings.activeProfile": "当前配置档",
     "settings.name": "名称",
@@ -377,6 +376,7 @@ const messages = {
     "settings.deletePlugin": "删除插件",
     "settings.noPlugins": "当前配置档没有插件。",
     "settings.context": "上下文",
+    "settings.advanced": "高级",
     "settings.advancedJsonc": "高级 JSONC",
     "settings.providerReasoningTitle": "推理",
   },
