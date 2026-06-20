@@ -330,24 +330,28 @@ export function PromptComposer({
       </div>
       {attachments.length > 0 ? (
         <div className="attachment-strip">
-          {attachments.map((attachment) => (
-            <span className="attachment-pill" key={attachment.path} title={attachment.path}>
-              <span className="attachment-name">{attachment.name}</span>
-              <button
-                aria-label={i18n.t("composer.removeAttachment", { name: attachment.name })}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setAttachments((current) =>
-                    current.filter((item) => item.path !== attachment.path),
-                  );
-                }}
-                type="button"
-              >
-                <X size={12} />
-              </button>
-            </span>
-          ))}
+          {attachments.map((attachment) => {
+            const removeLabel = i18n.t("composer.removeAttachment", { name: attachment.name });
+            return (
+              <span className="attachment-pill" key={attachment.path} title={attachment.path}>
+                <span className="attachment-name">{attachment.name}</span>
+                <button
+                  aria-label={removeLabel}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setAttachments((current) =>
+                      current.filter((item) => item.path !== attachment.path),
+                    );
+                  }}
+                  title={removeLabel}
+                  type="button"
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            );
+          })}
         </div>
       ) : null}
     </form>

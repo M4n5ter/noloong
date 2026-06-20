@@ -3,6 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createI18n } from "../i18n";
 import { dispatchConversationCommand } from "./conversationCommands";
@@ -96,6 +97,32 @@ describe("PromptComposer", () => {
     );
 
     expect(screen.getByRole("button", { name: "Stop" })).toHaveAttribute("title", "Stop");
+  });
+
+  it("gives attachment removal native hover help", async () => {
+    const user = userEvent.setup();
+    vi.mocked(open).mockResolvedValue(["/tmp/design reference.png"]);
+
+    render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Attach files" }));
+
+    expect(await screen.findByText("design reference.png")).toBeVisible();
+    const remove = screen.getByRole("button", { name: "Remove design reference.png" });
+    expect(remove).toHaveAttribute("title", "Remove design reference.png");
+
+    await user.click(remove);
+
+    await waitFor(() => expect(screen.queryByText("design reference.png")).not.toBeInTheDocument());
   });
 
   it("reports command availability without knowing about the native menu", async () => {
