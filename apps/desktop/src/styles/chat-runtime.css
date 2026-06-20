@@ -68,6 +68,11 @@
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 16px;
   --empty-state-composer-clearance: clamp(64px, 10vh, 92px);
+  --empty-state-reading-offset: clamp(128px, 24vh, 200px);
+}
+
+.conversation:has(.composer-editor-shell.expanded) {
+  --empty-state-reading-offset: clamp(20px, 6vh, 56px);
 }
 
 .transcript {
@@ -90,8 +95,9 @@
 }
 
 .transcript-content-empty {
-  align-content: end;
+  align-content: start;
   min-height: 100%;
+  padding-top: var(--empty-state-reading-offset);
   padding-bottom: var(--empty-state-composer-clearance);
 }
 
