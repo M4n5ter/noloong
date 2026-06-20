@@ -1,4 +1,7 @@
 :root {
+  --focus-border: rgba(206, 225, 239, 0.72);
+  --focus-ring-soft: rgba(188, 212, 232, 0.38);
+  --focus-ring-muted: rgba(188, 212, 232, 0.34);
   color: #f3efe4;
   background: #20221b;
   font-family: "Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
@@ -31,6 +34,11 @@ textarea {
 
 button {
   color: inherit;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 3px;
 }
 
 .app-shell {

@@ -27,15 +27,23 @@
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.24);
 }
 
-.composer.dragging .composer-capsule {
-  border-color: rgba(168, 196, 220, 0.58);
-  background: rgba(58, 84, 107, 0.54);
+.composer-capsule:has(.composer-editor-shell:not(.expanded) .composer-input:focus) {
+  border-color: var(--focus-border);
+  box-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.24),
+    0 0 0 3px var(--focus-ring-soft);
 }
 
 .composer:has(.composer-editor-shell.expanded) .composer-capsule {
   border-color: rgba(243, 239, 228, 0.11);
   background: rgba(23, 25, 20, 0.76);
   box-shadow: 0 18px 62px rgba(0, 0, 0, 0.22);
+}
+
+.composer.dragging .composer-capsule,
+.composer.dragging:has(.composer-editor-shell.expanded) .composer-capsule {
+  border-color: rgba(168, 196, 220, 0.58);
+  background: rgba(58, 84, 107, 0.54);
 }
 
 .composer-input-shell {
@@ -130,6 +138,13 @@
     linear-gradient(180deg, rgba(37, 40, 31, 0.78), rgba(17, 19, 15, 0.88)),
     rgba(23, 25, 20, 0.84);
   box-shadow: 0 16px 52px rgba(0, 0, 0, 0.26);
+}
+
+.composer-editor-shell.expanded:has(.composer-input:focus) {
+  border-color: var(--focus-border);
+  box-shadow:
+    0 16px 52px rgba(0, 0, 0, 0.26),
+    0 0 0 3px var(--focus-ring-muted);
 }
 
 .composer-editor-shell.expanded::before,
