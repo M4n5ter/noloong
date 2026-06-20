@@ -267,7 +267,7 @@ Reduce Transparency 下，透明材料必须退化为不透明的深色表面；
 
 Reasoning 不是日志面板。思考中只显示一个稳定、低噪音状态；不出现两条等价 thinking row；完成后收束为短 inline 状态；详情默认折叠，用户主动展开才显示。
 
-Tool activity 是嵌在阅读流里的审计线索。默认视图是一句人类语言、低对比、位置稳定；展开视图再展示 command、cwd、file scope、raw id、stdout 和结构化审计内容。正在思考期间触发的 tool activity 是 reasoning 的下属活动，不是第二条同级 thinking 状态。不要把 tool events 渲染成 dashboard、终端模拟器或重卡片堆。
+Tool activity 是嵌在阅读流里的审计线索。默认视图是一句人类语言、低对比、位置稳定；展开视图再展示 command、cwd、file scope、raw id、stdout 和结构化审计内容。正在思考期间触发的 tool activity 是 reasoning 的下属活动，不是第二条同级 thinking 状态。失败的 tool activity 必须用明确的失败标签和更高对比的错误 affordance，不能显示成完成。不要把 tool events 渲染成 dashboard、终端模拟器或重卡片堆。
 
 Human approval 是安全关键路径。它必须说明将要发生什么、在哪里发生、为什么需要确认，并用人类语言说明风险。破坏性或高风险动作必须提供 Cancel。Escape 和 Command-Period 取消当前前景 approval。按钮、label、错误和权限文案必须走 i18n。主文案不暴露 raw tool id；技术 id 可以放进展开的审计详情。
 

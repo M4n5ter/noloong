@@ -113,6 +113,26 @@ describe("approval presentation", () => {
       statusLabel: "Running",
     });
   });
+
+  it("labels failed tool activity explicitly", () => {
+    const view = toolActivityViewModel(
+      {
+        kind: "tool",
+        toolCallId: "call-1",
+        toolName: "host.exec.start",
+        status: "completed",
+        updates: [],
+        outputText: "Permission denied.",
+        isError: true,
+      } satisfies ToolTimelineItem,
+      i18n,
+    );
+
+    expect(view).toMatchObject({
+      detail: "Permission denied.",
+      statusLabel: "Failed",
+    });
+  });
 });
 
 function approval(

@@ -49,12 +49,18 @@ export function toolActivityViewModel(
   tool: ToolTimelineItem,
   i18n: AppI18n,
 ): ToolActivityViewModel {
+  const statusLabel = tool.isError
+    ? i18n.t("tool.failed")
+    : tool.status === "running"
+      ? i18n.t("tool.running")
+      : i18n.t("tool.done");
+
   return {
     title: toolTitle(tool.toolName, i18n),
     auditLabel: tool.toolName || null,
     detail: tool.outputText || tool.updates.at(-1) || "",
     auditDetail: tool.updates.length > 0 ? tool.updates.join("\n") : "",
-    statusLabel: tool.status === "running" ? i18n.t("tool.running") : i18n.t("tool.done"),
+    statusLabel,
   };
 }
 

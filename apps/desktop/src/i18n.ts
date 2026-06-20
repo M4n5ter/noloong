@@ -50,6 +50,7 @@ export type I18nKey =
   | "composer.removeAttachment"
   | "tool.running"
   | "tool.done"
+  | "tool.failed"
   | "tool.genericTitle"
   | "tool.previewTitle"
   | "tool.commandTitle"
@@ -179,6 +180,7 @@ const messages = {
     "composer.removeAttachment": "Remove {name}",
     "tool.running": "Running",
     "tool.done": "Done",
+    "tool.failed": "Failed",
     "tool.genericTitle": "Using a local tool",
     "tool.previewTitle": "Inspecting preview",
     "tool.commandTitle": "Local command",
@@ -307,6 +309,7 @@ const messages = {
     "composer.removeAttachment": "移除 {name}",
     "tool.running": "运行中",
     "tool.done": "完成",
+    "tool.failed": "失败",
     "tool.genericTitle": "正在使用本地工具",
     "tool.previewTitle": "正在检查预览",
     "tool.commandTitle": "本地命令",

@@ -648,6 +648,8 @@ describe("Noloong app chat regression harness", () => {
     expect(toolRows[0]).toHaveClass("tool-activity-subordinate");
     expect(toolRows[1]).toHaveClass("tool-activity-subordinate");
     expect(toolRows[2]).not.toHaveClass("tool-activity-subordinate");
+    expect(toolRows[2]).toHaveTextContent("Failed");
+    expect(toolRows[2]).not.toHaveTextContent("Done");
   });
 
   it("converges to the authoritative session snapshot after run completion", async () => {
