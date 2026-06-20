@@ -1,741 +1,290 @@
-# 温和智能界面设计准则
-
-这套视觉语言追求亲和、克制、沉浸、连续和带有温度的智能体验，但不甜腻、不装饰化、不像传统 SaaS 面板。
-
-如果一个新界面读完这份文档后仍然做成普通暗色 dashboard、卡片网格、工具栏堆叠或表单后台，那么它没有理解这套设计。
-
-## 一句话原则
-
-界面应该像一个安静、可信、会呼吸的思考空间，而不是一个功能容器。
-
-用户首先感受到的是“我正在和一个温和但聪明的系统相处”，然后才意识到这里有导航、工具、输入、历史、配置、状态和控制。
-
-## 平台优先级
-
-这份设计语言服从 Apple Human Interface Guidelines。只要本设计语言与 macOS HIG 在窗口行为、菜单、Settings、键盘可达性、可访问性、系统颜色、按钮角色、状态反馈或系统控件语义上冲突，就以 HIG 为准，并修改本设计语言或界面实现。
-
-具体裁决：
-
-- 品牌表达不能覆盖平台熟悉度；不要用品牌、logo、口号或自定义 title bar 占据只用于身份展示的空间。
-- 自定义视觉材料不能破坏系统窗口行为；主窗口和自定义内容窗口应保持可移动、可调整、可全屏，并正确呈现 active / inactive 状态。Settings 这类 HIG 特殊窗口按对应平台规则处理。
-- 关键命令不能只存在于自定义胶囊、浮层或图标按钮里；macOS 上重要动作必须能通过菜单栏、键盘或系统预期路径访问。
-- 任何 icon-only 控件都必须有可访问名称；macOS 上还应提供 hover tooltip / help tag 解释动作，但 tooltip 不能替代 VoiceOver 或 Voice Control 可用的名称。
-- macOS 默认文本不低于 13pt，最小不低于 10pt；macOS 控件默认命中区域按 28×28pt 设计，最小不低于 20×20pt。
-- 颜色、透明度和材料必须在 Dark Mode、Increase Contrast、Reduce Transparency 下保持可读；不要依赖颜色单独表达状态。
-- 动效必须尊重 Reduce Motion；状态变化可以有呼吸感，但不能靠重复、强 blur 或大尺度位移表达基本功能。
-
-## 设计目标
-
-这套设计追求以下效果：
-
-- 亲和：界面像一个可以靠近的对象，而不是冷冰冰的控制台。
-- 智性：文字、层级和节奏要有编辑感，不能只是组件拼装。
-- 沉浸：主任务占据空间中心，控制只在边缘轻轻出现。
-- 连续：状态之间像同一空间的形变，而不是页面跳转。
-- 克制：颜色、边框、图标、按钮都少而准确。
-- 触感：底部胶囊、液态浮层、半透明块要像真实材料，不像 CSS 装饰。
-
-## 反目标
-
-以下方向必须主动避免：
-
-- 不要做成 SaaS dashboard。
-- 不要做成 IDE 面板集合。
-- 不要做成“左侧导航 + 顶部栏 + 中央表单 + 右侧工具栏”的默认模板。
-- 不要用大量卡片解释功能。
-- 不要把每个区域都加边框。
-- 不要让图标、按钮、标签抢走正文注意力。
-- 不要用强品牌色填满界面。
-- 不要把空状态做成营销落地页。
-- 不要让设置页看起来像数据库记录编辑器。
-- 不要用渐变球、光斑、玻璃拟态堆出廉价科技感。
-
-## 核心观察
-
-这套界面真正有价值的地方不在某个具体控件，而在它如何组织注意力。
-
-### 1. 主界面是阅读面
-
-核心状态不是“聊天 app”，而是一个沉浸式阅读面。正文像文章一样存在：有段落、有标题、有引用感、有滚动位置，也有足够安静的留白。
-
-阅读面上的文字不是附属于气泡的内容，而是界面的主体。
-
-因此：
-
-- 长回答应当以正文流呈现，而不是一连串卡片。
-- 标题可以有 editorial 气质，允许更大、更慢、更有存在感。
-- 回复区域不应被明显边框包起来。
-- 内容区的边界可以靠空间、透明度和滚动关系表达，而不是靠线框。
-
-### 2. 控制是贴底的液态物
-
-底部控制胶囊是视觉锚点。它不是普通 toolbar，而像一块轻轻浮在内容上的材料。
-
-它通常具备这些特征：
-
-- 贴近底部，但不贴死窗口边缘。
-- 背景深于内容面，但边界非常柔。
-- 圆角接近胶囊形态。
-- 按钮数量很少，每个按钮必须有明确意义。
-- 图标低对比，激活态也不过度发亮。
-- 中央可以是当前活动、模式、输入意图或上下文标签。
-
-控制胶囊不是功能入口大全。它只承载当前最关键的动作。
-
-### 3. 状态是同一空间的形变
-
-聊天、辅助、液态控制、分支、滑动、输入状态之间不是不同页面，而是同一个空间在不同局部条件下的形变。
-
-因此：
-
-- 打开输入不应该把用户带离当前阅读面。
-- 展开辅助状态不应该用全屏 modal 打断正文。
-- 选择、引用、分支应当在原文附近产生局部强调。
-- 导航和工具应当从边缘浮现，而不是占据中心。
-
-好的状态切换像“焦点移动”，差的状态切换像“页面替换”。
-
-### 4. 信息层级靠透明度，而不是靠边框
-
-这套视觉语言大量使用同色系透明度控制层级。
-
-典型层级：
-
-- 主背景：接近黑绿、黑橄榄、暖黑，而不是纯黑。
-- 内容主文字：白色或暖白，70%-90% 不透明度。
-- 正文：白色 60%-70% 不透明度。
-- 辅助说明：白色 40%-55% 不透明度。
-- 禁用/背景图标：白色 10%-25% 不透明度。
-- 面板材料：比背景略深或略浅 4%-10%，不要形成强卡片。
-
-边框只用于让材料边界“可感知”，不是让每个模块“被框住”。
-
-### 5. 彩色是情绪，不是系统色
-
-彩色块必须很少，而且应当半透明、局部、带主题意味。
-
-彩色可以用于：
-
-- topic tile 的背景情绪。
-- 某个状态的微弱强调。
-- 品牌字符或高价值符号。
-- 图标的局部温度。
-
-彩色不应该用于：
-
-- 大面积 primary button。
-- 整页渐变背景。
-- 每个 section 的区分色。
-- 生硬的状态红黄绿。
-
-颜色应该像纸张上的水渍、热量、阴影或局部材料，而不是像设计系统 token 展示。
-
-## 视觉语言
-
-### 背景
-
-背景必须是有温度的深色或暖浅色，不使用纯黑、纯白、纯灰。
-
-推荐方向：
-
-- 深色主背景：黑橄榄、暖黑、深苔藓色。
-- 深色辅助面：略暗或略亮的同色系块。
-- 浅色品牌页：暖米色、纸张色、低饱和奶油色。
-
-不要使用：
-
-- 高饱和蓝紫渐变。
-- 纯 slate / navy dashboard 背景。
-- 冷白背景上堆深色卡片。
-- 大面积玻璃毛玻璃模糊。
-
-### 形状
-
-圆角要大，但不能幼稚。
-
-使用方式：
-
-- 主容器：大圆角，像设备或对象。
-- 底部控制：胶囊圆角。
-- 小按钮：圆形或软胶囊。
-- topic tile：大圆角矩形，边缘柔和。
-- 文本引用：用细竖线或局部强调，不要用完整卡片。
-
-避免：
-
-- 所有卡片统一 8px 圆角。
-- 每个输入框都是普通长方形。
-- 过多嵌套卡片。
-- 用圆角替代层级设计。
-
-### 边框
-
-边框应当低对比，像材料边缘，不像组件轮廓。
-
-正确用法：
-
-- 边框与背景只差一点点。
-- 用于暗色材料边缘、底部胶囊、轻浮层。
-- 与阴影、透明度、留白一起表达边界。
-
-错误用法：
-
-- 每个表单项都有明显描边。
-- 卡片网格靠边框分隔。
-- 使用高亮边框表达普通 hover。
-- 同一个视图里出现太多不同边框颜色。
-
-### 阴影和发光
-
-阴影应该让对象“浮在空间里”，不是制造彩色光效。
-
-建议：
-
-- 大面积柔阴影。
-- 内部暗角。
-- 低透明度环境色。
-- 只在浮层、底部胶囊、临时控制上使用明显阴影。
-
-禁止：
-
-- 霓虹 glow。
-- 蓝紫科技光。
-- 装饰性光球。
-- 到处使用 box-shadow。
-
-## 排版
-
-### 字体气质
-
-这套设计有明显 editorial 气质。它不完全依赖系统无衬线。
-
-可使用两类字体角色：
-
-- 无衬线：用于正文、控制、导航、说明，保持清晰。
-- 衬线或类衬线 display：用于大标题、空状态、品牌语句、关键提问。
-
-如果项目没有衬线字体，也要用字号、行高和权重模拟编辑感，而不是让所有文字都像表单 label。
-
-### 字号层级
-
-典型层级：
-
-- 巨大品牌/空状态标题：32-64，根据画布大小调整。
-- 主要段落标题：20-28。
-- 正文：16-18。
-- 辅助说明：13-15。
-- 控制标签：11-14。
-- 背景符号/状态：可低透明度处理，不靠小字号硬塞。
-
-不要让所有文字停在 14-16。那会立刻变成后台系统。
-
-### 文本颜色
-
-文字层级优先靠透明度，而不是靠颜色跳变。
-
-推荐：
-
-- 主标题：暖白 80%-90%。
-- 正文：暖白 60%-75%。
-- 次级信息：暖白或灰绿 40%-55%。
-- 隐性状态：暖白 10%-25%。
-
-禁止：
-
-- 大量纯白正文。
-- 大量纯灰说明文字。
-- 对正文使用强彩色。
-- 用红色/绿色硬编码普通状态。
-
-### 文案布局
-
-文案要像被编辑过。
-
-要求：
-
-- 标题有明确句意，不只是名词。
-- 段落宽度可读，不要横跨整个桌面。
-- 大问题可以放在视觉下方或空间中心，形成悬念。
-- 同一屏里不要同时出现太多解释性文字。
-- 空状态不是“功能介绍”，而是一个邀请用户行动的问题。
-
-## 布局
-
-### 注意力模型
-
-布局必须先决定“用户现在应该看哪里”。
-
-优先级：
-
-1. 当前内容或当前问题。
-2. 当前输入或下一步动作。
-3. 当前状态。
-4. 导航和上下文。
-5. 设置和低频工具。
-
-任何时候，如果导航、工具、配置比内容更显眼，就是失败。
-
-### 主内容
-
-主内容应当占据视觉中心，但不要被重型容器包住。
-
-在桌面上：
-
-- 主阅读列可以比传统聊天更宽，但正文行长仍要受控。
-- 左右辅助区域要像边缘材料，而不是主要面板。
-- 中央留白可以多，尤其是空状态和思考状态。
-- 滚动内容不要被顶部栏和底部栏夹得太窄。
-
-### 导航
-
-导航应该是记忆，而不是菜单。
-
-好的导航：
-
-- 轻、低对比。
-- 只展示当前上下文需要的少量信息。
-- 可以折叠成符号或小胶囊。
-- 在展开时仍不抢中心内容。
-
-差的导航：
-
-- 永久大型侧边栏。
-- 一堆等宽菜单项。
-- 图标和文字都高亮。
-- 把配置分类当成主要体验。
-
-### 窗口和标题栏
-
-macOS 窗口不是品牌画布，也不是网页 chrome。
-
-要求：
-
-- 窗口标题提供当前窗口或当前 pane 的有用定位信息，不重复应用名，不显示 profile path、runtime id、debug state 或实现细节。
-- 主窗口、Settings 窗口和辅助窗口的标题策略要不同：主窗口可使用当前会话或当前任务，Settings 使用 active pane，辅助窗口使用具体任务名。
-- 自定义 title bar 只能用于视觉整合，不能破坏系统窗口控制、拖拽区域、active / inactive 外观、全屏和多窗口行为。
-- toolbar 如果存在，必须承载内容动作或窗口导航；不要放 Settings 这类低频入口，也不要把 logo、口号或状态灯放进 toolbar。
-- toolbar item 应有菜单栏等价命令；用户隐藏、忽略或无法点击 toolbar 时，核心功能仍然可达。
-- running / idle、profile、provider、连接端口、配置路径和调试标记都不是窗口标题或 title bar 内容。它们只在对当前任务有帮助时出现在内容邻近处，并且要使用人类语言。
-
-避免：
-
-- title bar 像状态栏，持续显示 running、idle、profile、provider 或调试路径。
-- title bar 颜色与内容面割裂，像一条贴上去的网页 header。
-- 用自绘窗口控件替代系统窗口行为。
-
-### 工具
-
-工具应该像从边缘出现的能力。
-
-建议：
-
-- 用浮动短栏或小型胶囊组。
-- 默认只显示 2-4 个高频入口。
-- 低频入口放入更多菜单或上下文 sheet。
-- 工具状态必须和当前内容有关。
-
-不要创建全局工具墙。
-
-### 设置
-
-设置不应当像表单数据库。
-
-在 macOS 上，HIG 的 Settings 模型优先级高于本设计语言：
-
-- 设置应通过 App menu / Command-Comma 进入，而不是作为 chat 工作面的常驻工具按钮。
-- 设置窗口应是稳定、可预期的多 pane 结构；导航可以被视觉重塑，但行为上要像系统 Settings。
-- Settings navigation 应使用稳定的 toolbar-based multi-pane 模型；toolbar 不可自定义，并应始终可见。这里的 toolbar 是窗口顶部的 pane 切换，不是左侧永久 sidebar，也不是主 chat 的工具入口。
-- 设置窗口标题应表达当前 pane，不重复应用名，不暴露配置路径或调试状态。
-- Settings 窗口下次打开应恢复上次 pane；关闭、重新打开和 Command-Comma 的行为都要一致。
-- Settings 窗口不应把最小化、最大化当作核心路径；如果平台能力允许，应弱化或禁用不必要的窗口控制。
-- 主 chat 的 toolbar、边缘工具和底部胶囊不能把 Settings 当作高频内容动作；环境损坏或首次配置时可以提供上下文入口。
-- Save、Discard、validation feedback 这类关键动作和反馈必须贴近当前 pane 的标题或具体字段；不要固定在窗口底部，因为 macOS 窗口底部经常被移出屏幕。
-
-在这个前提下，设置内容应该被设计成“环境编辑器”：
-
-- 配置项按用户意图组织，而不是按 JSON 字段顺序。
-- Provider、reasoning、context、storage 这类强相关项应该在一个环境里看见。
-- 低频、高风险或结构化配置可以进入当前 Settings pane 内的 disclosure、附属编辑区或专家 JSON editor。
-- JSON 是专家通道，不是主要界面。
-- 保存和验证反馈要温和、短暂、可信。
-
-## 组件语法
-
-### 底部控制胶囊
-
-底部控制胶囊是这套设计最重要的组件之一。
-
-在 macOS 上，它是当前阅读面的可见输入焦点和局部控制提示，不是系统 toolbar，也不是 status bar。HIG 要求避免把 controls 或 critical info 放在窗口底部，因此底部胶囊不能成为关键输入、关键动作或关键信息的唯一路径，也不应成为这些动作的主要语义归属；发送、停止、打开 Settings、切换 pane、复制、清除、撤销等重要动作必须有菜单栏、快捷键、focus composer、系统 toolbar 或内容邻近控件作为主路径。
-
-它应该：
-
-- 位于底部安全区域上方。
-- 宽度由内容决定，不必横向铺满。
-- 左侧可放更多按钮或上下文入口。
-- 中间放当前活动、输入模式或对象名称。
-- 右侧放语音、发送、暂停或确认。
-- 背景与主背景同色系，只略微更深。
-- 允许文字和图标低透明度存在。
-
-它不应该：
-
-- 看起来像普通 input。
-- 变成整排 toolbar。
-- 使用强 primary 色。
-- 包含所有可能动作。
-- 承载持久 running / idle / profile path / debug state 这类状态标签。
-- 承载关键确认、破坏性动作或必须阅读的错误信息；这类内容应出现在内容附近、alert/sheet 或符合 HIG 的窗口区域。
-- 在窗口变矮或内容增长时被挤出可见区域；需要通过窗口最小尺寸、内部滚动和贴底布局保证可用。
-
-### 输入框
-
-输入框不是白色表单框，而是底部材料的一部分。
-
-要求：
-
-- 未输入时低对比。
-- 输入后可以略微抬升或变清晰。
-- 默认输入区保持一行横向长胶囊；多行内容不应把默认状态撑成方形卡片。
-- 只有检测到内容溢出、换行或长文本时，输入区右上角才出现低对比的小展开按钮。
-- 点击展开后，底部胶囊本身保持稳定高度；长文本应作为附着在胶囊上方的滚动文本视图展开，像向上拉出的编辑卷轴，而不是把胶囊撑成方形卡片。
-- 展开态仍然属于底部材料本身，不能变成全屏 modal、独立编辑页或遮挡上下文的 sheet。
-- 单行态使用 text field 语义；展开态使用 multiline text view 语义。长文本可滚动、可选择、可复制，不能牺牲键盘导航。
-- 多行内容在未展开时需要清楚表达“这里还有内容”：上下滚动边缘可以使用低对比渐隐，但不能像装饰光效。
-- 占位、错误和约束文案必须短且具体；错误靠近输入区域呈现，不使用责备或玩笑语气。
-- 发送按钮可以从材料中浮出，但不能变成刺眼按钮。
-- 输入法、键盘、语音状态要像底部系统的一部分。
-
-### Chat 工作面
-
-Chat 界面首先是工作面，不是 hero page。
-
-设计稿里的大问题、大副标题和概念文案可以用于品牌探索、空态探索或单独的展示画板，但不能直接占据默认 chat 工作区。进入 chat 后，用户最需要的是：
-
-1. 足够大的对话/阅读区域。
-2. 稳定、贴底、横向的输入胶囊。
-3. 低干扰的状态和上下文入口。
-
-因此：
-
-- 顶部只能保留轻量 masthead 或当前会话名，不要同时出现大标题和副标题口号。
-- 进入 ready chat 后，外层 hero、runtime banner 和重复会话标题都应停止存在；只保留一个能定位当前内容的标题层。
-- 桌面标题栏不是品牌展示位，也不是调试状态栏；不要重复 logo/app name，不要暴露原始配置路径。
-- 空态可以有一句邀请，但不能像 landing page 一样解释产品。
-- 默认 composer 应该是横向长条胶囊，接近一行高度；附件可以增加一行附件带，但长文本不能让默认胶囊继续长高。
-- composer 不应做成方形卡片，也不应因为快捷键、说明文字或工具按钮挤压输入区。
-- 真实对话区要优先占据垂直空间，顶部文案和底部控制都不能把中间工作区压扁。
-
-### 阅读正文
-
-正文应当以内容为中心。
-
-要求：
-
-- 段落之间有呼吸。
-- 引用或选择用细线、局部透明块、局部色条表达。
-- 不把每条消息都做成气泡。
-- 用户输入可以是胶囊或轻浮层，但回答应该更像正文流。
-- 思考、工具、引用、分支都应当嵌入正文附近。
-
-### 思考状态
-
-思考状态不能像日志输出。
-
-它应该：
-
-- 在内容上方或内容内部轻轻出现。
-- 使用低对比标题或状态点。
-- 推理摘要优先于原文。
-- 完成后收束为一条短状态，例如“Thought for 2 seconds”。
-- 在 macOS 阅读面里，完成态 reasoning 默认应是低对比的 inline 状态行，而不是 activity card；只有用户显式展开详情时，才显示摘要或原文。
-- 可展开，但默认不占据太多空间。
-- 进行中状态应是短暂、准确、位置稳定的进度反馈；如果无法判断耗时，使用低噪音的 indeterminate spinner 或状态点。
-- macOS 上不要给小 spinner 加重复文字标签；用户已经触发了动作，状态文案只在能提供额外信息时出现。
-- running / idle 这种内部状态不应作为持久 UI 元素出现；发送按钮、停止按钮、流式输出、短状态行已经足够表达当前状态。
-
-它不应该：
-
-- 变成大块调试面板。
-- 使用强边框和满屏代码样式。
-- 和最终回答视觉层级相同。
-- 出现两条等价“正在思考”状态。
-- 露出原始工具名、调试路径或执行日志，除非用户显式打开详情。
-
-### 人类审批
-
-需要人类确认的内容是安全关键路径，不是普通信息卡片。
-
-它应该：
-
-- 使用清晰的人类语言解释将要发生什么、为什么需要确认、风险是什么。
-- 操作按钮使用明确动词，并按角色区分 normal / primary / cancel / destructive；破坏性动作不能使用 primary 样式。
-- 默认按钮只给最可能且安全的动作；Cancel 永远不能是 default。
-- 出现 destructive action 时必须同时提供 Cancel；Escape 和 Command-Period 应触发快速取消。
-- Escape 和 Command-Period 只取消当前最前的上下文。若 Sessions、Settings、popover、menu、sheet 或 alert 正在前台，快捷取消应先关闭或处理这些前台上下文，不能越过它们去拒绝后台审批。
-- 拒绝、取消或返回必须同样容易找到，并且文案要说明取消的是哪件事。
-- 所有按钮、状态和错误都必须走 i18n 文案；不能把英文调试字符串、tool id、JSON path 或后端 enum 直接作为主文案显示给用户。
-- 审批主文案不展示原始 tool id；命令、工作目录、文件范围、权限描述和风险原因必须可读、可复制、可审计。
-- 未知插件、MCP 或扩展权限不能被泛化到“本地访问”而丢失语义；优先显示后端提供的 description。只有没有 description 时才用低层级能力名作为 fallback。
-- 工具执行行可以用低对比技术标签保留审计线索，例如 tool id；审批卡主区域不使用这些技术标签来解释决策。
-- 视觉上可以比工具状态更明确，但不能像 dashboard card 一样抢走整段回答的层级。
-
-它不应该：
-
-- 用 “Approve / Deny” 这类孤立词替代具体动作。
-- 把权限、命令和风险混在一大段低可读文本里。
-- 依赖颜色单独表达危险、允许或完成。
-
-### 工具活动
-
-工具活动是阅读流里的临时进度和审计线索，不是日志面板，也不是审批卡片。
-
-它应该：
-
-- 默认嵌入正文附近，使用低对比 inline 状态行。
-- 用人类语言说明正在做什么或刚完成什么。
-- 保留一条简短结果，避免把 stdout、JSON、tool id 或调试路径直接摊在主阅读流里。
-- 只有用户显式展开详情时，才展示原始 tool id、执行更新或审计文本。
-- 进行中和完成状态必须用形状、文字和位置共同表达，不能只靠颜色。
-
-它不应该：
-
-- 默认显示 `host.exec.start`、`desktop.preview.inspect` 这类内部标识。
-- 看起来比 assistant 正文更像主要内容。
-- 用完整卡片、强边框或大块代码样式模拟终端日志。
-
-### Topic tile
-
-Topic tile 是菜单/项目入口的主要形式。
-
-它应该：
-
-- 大圆角。
-- 暗色材料底。
-- 局部彩色或图形块制造主题感。
-- 标题短，说明更短。
-- 图标小、柔和、放在角落。
-- 网格可以不完全规整，允许轻微视觉变化。
-
-它不应该：
-
-- 像 SaaS metric card。
-- 每张卡都有同样边框和同样结构。
-- 使用亮色背景和长说明。
-
-### Sheet / Drawer
-
-Sheet 或 drawer 应当像从当前空间生长出来。
-
-要求：
-
-- 保留当前内容背景，让用户知道自己没离开。
-- 可以有轻微遮罩，但不要完全黑屏。
-- 宽度由任务决定。
-- 只承载当前任务所需字段。
-- 关闭后回到原空间，没有页面跳跃感。
-
-## 动效原则
-
-即使静态设计稿也必须为动效留出结构。
-
-### 连续性
-
-动效应当表达“同一对象变成另一个状态”。
-
-适合：
-
-- 胶囊扩张为输入区。
-- 底部控制上浮。
-- 侧边上下文轻轻展开。
-- 选中文本旁出现局部操作。
-- 思考块完成后折叠为状态行。
-
-不适合：
-
-- 整页 fade out / fade in。
-- 大面积弹窗跳出。
-- 机械 slide panel。
-- 过度弹性动画。
-
-### 节奏
-
-动效要慢半拍，但不能拖沓。
-
-建议：
-
-- 微交互：120-180ms。
-- 浮层展开：180-280ms。
-- 状态形变：240-360ms。
-- 大结构变换：320-480ms。
-
-缓动应当柔和，避免机械 linear 和夸张 bounce。
-
-### 流式输出
-
-流式输出是设计体验的一部分，不是渲染细节。
-
-要求：
-
-- 文字出现要连续，不要长时间空白后整段出现。
-- 思考和回答可以有不同节奏。
-- Markdown 结构出现时要保持排版稳定。
-- 滚动跟随要尊重用户：用户停在底部才自动跟随。
-- 长内容生成时底部控制仍然稳定，不被内容推走。
-
-## 颜色准则
-
-### 基础色板
-
-可以从以下方向建立 token：
-
-- `ink`: 暖白，用于主文字。
-- `ink-muted`: 暖白低透明度，用于正文。
-- `ink-faint`: 暖白极低透明度，用于背景符号。
-- `ground`: 深橄榄黑。
-- `ground-deep`: 更深的胶囊/底部控制。
-- `surface`: 略亮的材料面。
-- `surface-soft`: 更轻的浮层或 tile。
-- `warm-accent`: 暖橙、陶土、肉桂色。
-- `cool-accent`: 灰蓝、苔绿、低饱和青。
-- `paper`: 暖米色，用于品牌或大标题探索。
-
-### 透明度比颜色更重要
-
-不要急着创建很多色值。
-
-先设计透明度层级：
-
-- 0.9：极少数主标题。
-- 0.7：正文和普通标题。
-- 0.5：次级正文。
-- 0.2：图标、控制、弱状态。
-- 0.1：背景符号、材料叠影。
-- 0.05：几乎不可见的结构提示。
-
-## 桌面适配
-
-这套语言源自移动稿，但不能把移动界面简单放大。
-
-桌面应当保留：
-
-- 沉浸式阅读面。
-- 底部胶囊控制。
-- 边缘浮现的上下文工具。
-- 大标题/大问题的 editorial 质感。
-- 低对比、低噪音、少组件。
-
-桌面必须重构：
-
-- 会话历史从页面列表变成轻量记忆层。
-- 设置从移动 sheet 变成符合 macOS HIG 的多 pane Settings 窗口；“环境编辑器”是 Settings 内容模型，不是主 chat 内的页面替换。
-- 工具从底部少量控制扩展为边缘上下文层。
-- 长文本阅读列要控制行长，不能铺满全屏。
-- 多窗口/多会话状态要保持安静，不要变成 IDE。
-
-桌面上最危险的是过度利用空间。空间变大不代表控件要变多。
-
-## 质量标准
-
-一个符合这套设计的界面，应当满足以下检查：
-
-### 第一眼
-
-- 是否像一个安静的智能空间，而不是后台管理系统？
-- 用户是否立刻知道当前主要内容在哪里？
-- 是否存在一个明确的视觉锚点，例如底部胶囊、中心问题或主阅读列？
-- 是否避免了大量同权重卡片？
-
-### 内容
-
-- 正文是否可读？
-- 标题是否有编辑感？
-- 段落是否有呼吸？
-- 空状态是否提出了一个好问题，而不是解释功能？
-
-### 控制
-
-- 控制是否在边缘或底部，而不是占据中心？
-- 高频动作是否少而明确？
-- 低频工具是否隐藏在合适层级？
-- 输入状态是否像从当前空间生长出来？
-
-### 材质
-
-- 背景是否有温度？
-- 面板是否过度描边？
-- 圆角是否统一但不机械？
-- 彩色是否克制？
-- 是否存在廉价光效或装饰性渐变？
-
-### 状态
-
-- 状态变化是否连续？
-- 思考状态是否能收束？
-- 分支、引用、选择是否在原文附近局部表达？
-- 是否避免了全屏 modal 和硬切页面？
-
-## 严格禁止清单
-
-以下情况出现一个，就应当重做相关区域：
-
-- 主界面像 dashboard。
-- 设置页像 JSON 表单皮肤。
-- 聊天回复全部是气泡。
-- 每个模块都有强边框。
-- 控制栏横向铺满且按钮很多。
-- 页面上同时有多个同权重面板。
-- 使用蓝紫科技渐变作为主视觉。
-- 用营销 hero 替代真实工作界面。
-- 空状态写“你可以使用以下功能”。
-- 大量图标在同一屏幕抢注意力。
-- 流式输出期间页面布局跳动。
-- 思考过程像调试日志。
-
-## 可接受的偏离
-
-这不是像素级复刻规范。以下偏离可以接受：
-
-- 产品可以有自己的品牌色，但只能低频、局部使用。
-- 字体可以不同，但必须保留 editorial 层级。
-- 桌面可以有更多信息，但不能破坏主阅读空间。
-- 设置可以更结构化，但不能退化成数据库表单。
-- 工具可以更多，但必须通过上下文层级隐藏。
-
-## 设计流程
-
-每次设计新界面，按以下顺序：
-
-1. 写出当前屏幕的一句话任务。
-2. 决定用户第一眼应该看哪里。
-3. 放置主内容或主问题。
-4. 放置底部或边缘控制。
-5. 只加入当前任务必要的辅助信息。
-6. 用透明度和空间建立层级。
-7. 最后才添加边框、图标、色彩和装饰。
-
-如果第 7 步之前界面已经不清楚，说明结构错了，不要靠视觉细节补救。
-
-## 对设计稿的审查问题
-
-审查时必须尖锐地问：
-
-- 这是不是只是换了皮的常规 app？
-- 去掉颜色后层级还成立吗？
-- 去掉边框后结构还成立吗？
-- 控件是否太多？
-- 内容是否真的在中心？
-- 是否有一个足够强的情绪或品牌瞬间？
-- 状态之间是否能自然动起来？
-- 这个界面是否让用户更安静，还是更焦虑？
-
-只有这些问题都能通过，才算接近这套设计语言。
-
-## 最终判断
-
-这套设计的价值不是“暗色、圆角、玻璃、胶囊、卡片”。
-
-真正的价值是：
-
-> 用极少的控件、极低的视觉噪音、极强的排版节奏和连续空间感，把一个智能系统设计成可亲近、可停留、可信任的对象。
-
-使用这份准则时必须记住：它首先是一种态度，其次才是组件样式。
+---
+version: alpha
+name: Noloong Warm Intelligence
+description: >
+  Noloong desktop 的温和智能设计语言。
+colors:
+  primary: "#20221b"
+  primary-deep: "#171914"
+  primary-dark: "#11130f"
+  secondary: "#f3efe4"
+  secondary-muted: "rgba(243, 239, 228, 0.74)"
+  secondary-subtle: "rgba(243, 239, 228, 0.50)"
+  secondary-faint: "rgba(243, 239, 228, 0.30)"
+  tertiary: "#a8c4dc"
+  tertiary-warm: "#e5d4b3"
+  neutral: "rgba(23, 25, 20, 0.82)"
+  neutral-soft: "rgba(23, 25, 20, 0.42)"
+  border: "rgba(243, 239, 228, 0.13)"
+  border-subtle: "rgba(243, 239, 228, 0.075)"
+  focus: "rgba(206, 225, 239, 0.72)"
+  success: "#a4d17d"
+  warning: "#e5d4b3"
+  error: "#d89373"
+typography:
+  display:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 32px
+    fontWeight: 590
+    lineHeight: 38px
+    letterSpacing: 0px
+  title-lg:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 22px
+    fontWeight: 590
+    lineHeight: 26px
+    letterSpacing: 0px
+  title-md:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 17px
+    fontWeight: 620
+    lineHeight: 22px
+    letterSpacing: 0px
+  body-lg:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 17px
+    fontWeight: 400
+    lineHeight: 22px
+    letterSpacing: 0px
+  body-md:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 16px
+    fontWeight: 400
+    lineHeight: 26px
+    letterSpacing: 0px
+  body-sm:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 14px
+    fontWeight: 400
+    lineHeight: 20px
+    letterSpacing: 0px
+  label-md:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 13px
+    fontWeight: 500
+    lineHeight: 16px
+    letterSpacing: 0px
+  label-sm:
+    fontFamily: '"Inter Tight Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: 12px
+    fontWeight: 500
+    lineHeight: 16px
+    letterSpacing: 0px
+rounded:
+  sm: 16px
+  md: 22px
+  lg: 26px
+  xl: 28px
+  full: 9999px
+spacing:
+  xs: 4px
+  sm: 8px
+  md: 16px
+  lg: 24px
+  xl: 32px
+  xxl: 56px
+  transcript-width: 760px
+  app-max-width: 1040px
+  composer-width: 760px
+components:
+  app-shell:
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.secondary}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.xl}"
+    padding: 24px
+  surface:
+    backgroundColor: "{colors.primary-deep}"
+    textColor: "{colors.secondary-muted}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.md}"
+    padding: 16px
+  surface-dark:
+    backgroundColor: "{colors.primary-dark}"
+    textColor: "{colors.secondary-muted}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.md}"
+    padding: 16px
+  divider:
+    backgroundColor: "{colors.border}"
+    width: 1px
+    height: 1px
+  divider-subtle:
+    backgroundColor: "{colors.border-subtle}"
+    width: 1px
+    height: 1px
+  metadata:
+    backgroundColor: transparent
+    textColor: "{colors.secondary-subtle}"
+    typography: "{typography.label-sm}"
+    rounded: "{rounded.full}"
+    padding: 4px
+  faint-icon:
+    backgroundColor: transparent
+    textColor: "{colors.secondary-faint}"
+    typography: "{typography.label-sm}"
+    rounded: "{rounded.full}"
+    padding: 4px
+    size: 28px
+  focus-indicator:
+    backgroundColor: "{colors.focus}"
+    textColor: "{colors.primary-dark}"
+    rounded: "{rounded.full}"
+    size: 4px
+  status-success:
+    backgroundColor: "{colors.success}"
+    textColor: "{colors.primary-dark}"
+    typography: "{typography.label-md}"
+    rounded: "{rounded.full}"
+    padding: 8px
+  status-warning:
+    backgroundColor: "{colors.warning}"
+    textColor: "{colors.primary-dark}"
+    typography: "{typography.label-md}"
+    rounded: "{rounded.full}"
+    padding: 8px
+  approval-chip:
+    backgroundColor: "{colors.tertiary-warm}"
+    textColor: "{colors.primary-dark}"
+    typography: "{typography.label-md}"
+    rounded: "{rounded.full}"
+    padding: 8px
+  button-secondary:
+    backgroundColor: "{colors.neutral}"
+    textColor: "{colors.secondary-muted}"
+    typography: "{typography.label-md}"
+    rounded: "{rounded.full}"
+    padding: 8px
+    height: 36px
+  button-primary:
+    backgroundColor: "rgba(58, 84, 107, 0.72)"
+    textColor: "{colors.secondary}"
+    typography: "{typography.label-md}"
+    rounded: "{rounded.full}"
+    padding: 8px
+    height: 36px
+  button-danger:
+    backgroundColor: "{colors.error}"
+    textColor: "{colors.primary-dark}"
+    typography: "{typography.label-md}"
+    rounded: "{rounded.full}"
+    padding: 8px
+    height: 36px
+  input:
+    backgroundColor: "{colors.neutral-soft}"
+    textColor: "{colors.secondary}"
+    typography: "{typography.body-sm}"
+    rounded: "{rounded.sm}"
+    padding: 12px
+    height: 36px
+  composer-capsule:
+    backgroundColor: "{colors.neutral}"
+    textColor: "{colors.secondary-muted}"
+    typography: "{typography.body-lg}"
+    rounded: "{rounded.full}"
+    padding: 8px
+    height: 68px
+  composer-expanded:
+    backgroundColor: "rgba(37, 40, 31, 0.78)"
+    textColor: "{colors.secondary}"
+    typography: "{typography.body-lg}"
+    rounded: "{rounded.lg}"
+    padding: 18px
+    height: 224px
+---
+
+# Noloong Warm Intelligence
+
+## Overview
+
+Noloong desktop 的界面应该像一个安静、可信、可停留的本地 agent 工作空间。用户来到这里是为了阅读、思考、转向、审批和继续工作，不是为了浏览品牌页、管理后台或 IDE 面板。
+
+本设计语言的核心判断是：通过减少可见机器感，让 agent 显得亲近、清楚、可信。界面应该先呈现当前内容和下一步动作，再呈现导航、状态和配置。
+
+Apple Human Interface Guidelines 是更高优先级。只要本文与 macOS 的窗口行为、Settings、菜单、键盘可达性、可访问性、系统颜色、焦点、破坏性确认冲突，就按 HIG 修改本文或实现。macOS 默认文本不低于 13pt，最小文本不低于 10pt；默认控制目标按 28x28pt 设计，最小不低于 20x20pt。
+
+项目没有历史兼容负担。任何不再服务当前产品状态的旧概念、旧文案、旧布局和旧文档都应该删除，不要为了历史惯性保留。
+
+## Colors
+
+色彩是温度和状态，不是装饰。主色 `primary` 是深橄榄黑，承载整个空间；`secondary` 是暖白，用于正文和主要信息；`tertiary` 是低饱和灰蓝，用于链接、焦点邻近提示和少量选中边缘；`tertiary-warm` 是安静琥珀，用于审批、warning 和温和注意。
+
+- **Primary (`#20221b`)：** 主背景，避免纯黑和 slate dashboard 感。
+- **Primary deep / dark：** 底部胶囊、编辑器、浮层和暗部材料。
+- **Secondary：** 暖白文字。通过 `secondary-muted`、`secondary-subtle`、`secondary-faint` 建立信息层级。
+- **Tertiary：** 克制的冷色，只用于链接、焦点相关边缘和少量高价值强调。
+- **Tertiary warm：** 审批、警告、风险提示和需要温度的状态。
+- **Error / warning / success：** 必须配合文字或形状，不单靠颜色表达状态。
+
+禁止蓝紫科技渐变、装饰性 glow、光斑、渐变球、大面积 primary button 填色，以及同一个颜色在不同 pane 中表达不同含义。
+
+## Typography
+
+排版应该像被编辑过的软件，而不是组件旁边自动生成的说明。默认使用系统无衬线栈，保持清晰和 macOS 熟悉感。
+
+- **Display：** 只用于空态、当前会话问题或非常少的 editorial 时刻。
+- **Title lg / md：** 用于当前 pane、当前任务和紧凑 section 标题。
+- **Body lg：** 用于 composer 输入。它应该显得可触达，不像后台表单。
+- **Body md：** 用于 assistant 正文和长阅读。
+- **Body sm：** 用于 helper text 和次级说明。
+- **Label md / sm：** 用于控制、metadata 和轻量 title context。
+
+不要让整个界面停留在 14px label。那会立刻变成配置后台。`letterSpacing` 保持 0，不用负字距模仿营销页。
+
+## Layout
+
+布局从注意力开始，不从组件开始。
+
+优先级是：当前 transcript、当前回答或当前问题；当前输入和下一步动作；对人有意义的状态；导航和上下文；Settings 和低频工具。桌面空间要用来提升阅读，而不是展示更多 chrome。
+
+Chat 工作面是阅读面。assistant 输出是正文流，不是一堆卡片；user message 可以轻量区分，但不做大气泡；空态可以问一句简短问题，但不能变成产品 hero。顶部 copy 必须轻，不能用大标题和副标题口号挤占工作区。
+
+Composer 是阅读面的可见输入焦点。默认是稳定横向胶囊，单行 text field 语义，prompt 变长时不继续撑高。长文本、换行或溢出时，显示小的展开控制，在胶囊上方打开附着的 multiline editor；胶囊本身保持高度不变，展开 editor 内部滚动，并只在确实有更多内容时显示轻微上下渐隐。
+
+Title bar 是 macOS 窗口结构，不是状态栏。不要展示品牌、logo、口号、running / idle、profile path、provider、runtime id、config path 或 debug state。
+
+Settings 是 macOS Settings 窗口，可以视觉重塑，但行为必须熟悉。通过 App menu 和 Command-Comma 打开，重新打开时恢复上次 pane。Save、Discard、validation 和 restart feedback 靠近 pane 标题或具体字段，不固定在窗口底部。JSONC 和 raw JSON editor 是专家界面，不是默认设置体验。
+
+## Elevation & Depth
+
+层级主要靠色调、透明度、间距和排版，不靠重阴影。边框只让材料边缘可感知，不应该把每个区域都框成卡片。
+
+底部 composer capsule 可以有最明显的浮动感，因为它是输入焦点。临时浮层、展开 editor、approval 可以使用柔和阴影。正文、tool activity、reasoning state 不应使用 dashboard card 式强阴影。
+
+Reduce Transparency 下，透明材料必须退化为不透明的深色表面；Reduce Motion 下，状态仍要清楚，只移除非必要过渡。
+
+## Shapes
+
+形状要柔和但不幼稚。胶囊使用 `rounded.full`，普通字段使用 `rounded.sm`，浮层和编辑器使用 `rounded.md` / `rounded.lg`。
+
+圆角不能代替层级设计。不要把所有内容都做成圆角卡片，不要在同一视图里混用过多圆角体系，也不要用方形输入框破坏底部材料的连续性。
+
+## Components
+
+按钮必须用明确动作和对象。好的文案是 `Save Changes`、`Discard Changes`、`Stop Run`、`Delete Plugin`；差的文案是 `OK`、`Confirm`、`Submit`，以及没有上下文的 `Approve` / `Deny`。每个局部上下文最多一个视觉 primary；破坏性动作不是 primary，必须有取消路径。
+
+字段是安静材料面。label 稳定且短，helper text 只在解释约束时出现，validation 靠近字段，focus 必须有可见 ring。multiline text view 超过目标高度时内部滚动。
+
+Reasoning 不是日志面板。思考中只显示一个稳定、低噪音状态；不出现两条等价 thinking row；完成后收束为短 inline 状态；详情默认折叠，用户主动展开才显示。
+
+Tool activity 是嵌在阅读流里的审计线索。默认视图是一句人类语言、低对比、位置稳定；展开视图再展示 command、cwd、file scope、raw id、stdout 和结构化审计内容。不要把 tool events 渲染成 dashboard、终端模拟器或重卡片堆。
+
+Human approval 是安全关键路径。它必须说明将要发生什么、在哪里发生、为什么需要确认，并用人类语言说明风险。破坏性或高风险动作必须提供 Cancel。Escape 和 Command-Period 取消当前前景 approval。按钮、label、错误和权限文案必须走 i18n。主文案不暴露 raw tool id；技术 id 可以放进展开的审计详情。
+
+Icon-only 控件必须有可访问名称，并提供 macOS hover help。关键动作不能只存在于自定义浮动控件；发送、停止、聚焦 composer、清空和审批相关动作需要合适的键盘、菜单或系统路径。
+
+## Do's and Don'ts
+
+- Do 让当前内容或当前问题成为第一视觉对象。
+- Do 先用透明度、间距和排版建立层级，再考虑边框。
+- Do 保持 composer 胶囊稳定，长文本向上展开附着 editor。
+- Do 让 Save、Discard、validation、approval 和 error 靠近上下文。
+- Do 把 JSON 当成专家模式，而不是默认设置体验。
+- Do 用真实 desktop、窄窗口、长 prompt、流式输出、approval、Settings、Reduce Transparency 和 Reduce Motion 验证界面。
+- Don't 做 SaaS dashboard、IDE 面板布局或 landing-page hero。
+- Don't 把 running / idle 做成持久 chrome。
+- Don't 把 title bar 做成 debug/status strip。
+- Don't 出现两条等价 thinking 状态。
+- Don't 单靠颜色表达状态。
+- Don't 加装饰性 glow、蓝紫渐变、光斑或视觉噪音。
+- Don't 因为测试通过就认为界面质量合格；UI 改动必须有渲染证据。
