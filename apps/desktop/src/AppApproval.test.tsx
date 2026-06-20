@@ -73,7 +73,7 @@ describe("approval decisions", () => {
     expect(within(approval).getByRole("button", { name: "Run Local Command" })).toBeVisible();
     expect(within(approval).getByRole("button", { name: "Cancel" })).toBeVisible();
     expect(within(approval).queryByText("desktop.preview.change")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop Run" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "Sessions" }));
@@ -95,7 +95,7 @@ describe("approval decisions", () => {
       { name: "Run a local command?" },
       { timeout: 3000 },
     );
-    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop Run" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
     await user.click(within(approval).getByRole("button", { name: "Cancel" }));
 
@@ -117,7 +117,7 @@ describe("approval decisions", () => {
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     await composerReadyForInput();
-    const stop = await screen.findByRole("button", { name: "Stop" });
+    const stop = await screen.findByRole("button", { name: "Stop Run" });
     expect(screen.queryByRole("article", { name: "Run a local command?" })).not.toBeInTheDocument();
 
     await user.click(stop);

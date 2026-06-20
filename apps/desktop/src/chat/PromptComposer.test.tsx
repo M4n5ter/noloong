@@ -42,7 +42,7 @@ describe("PromptComposer", () => {
       />,
     );
 
-    const stop = screen.getByRole("button", { name: "Stop" });
+    const stop = screen.getByRole("button", { name: "Stop Run" });
     expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
 
     await user.click(stop);
@@ -96,7 +96,7 @@ describe("PromptComposer", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Stop" })).toHaveAttribute("title", "Stop");
+    expect(screen.getByRole("button", { name: "Stop Run" })).toHaveAttribute("title", "Stop Run");
   });
 
   it("gives attachment removal native hover help", async () => {

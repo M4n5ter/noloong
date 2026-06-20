@@ -148,10 +148,10 @@ describe("Noloong app chat regression harness", () => {
 
       await user.type(await screen.findByPlaceholderText("Write a message..."), "abort preview");
       await user.click(screen.getByRole("button", { name: "Send message" }));
-      await user.click(await screen.findByRole("button", { name: "Stop" }));
+      await user.click(await screen.findByRole("button", { name: "Stop Run" }));
 
       await waitFor(() =>
-        expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument(),
+        expect(screen.queryByRole("button", { name: "Stop Run" })).not.toBeInTheDocument(),
       );
 
       expect(finalEvents).toHaveLength(0);
@@ -174,7 +174,7 @@ describe("Noloong app chat regression harness", () => {
       });
     });
 
-    expect(await screen.findByRole("button", { name: "Stop" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Stop Run" })).toBeVisible();
     expect(screen.queryByText("Default is thinking")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · running");
   });
