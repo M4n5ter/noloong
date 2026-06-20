@@ -1,6 +1,8 @@
 import { autocompletion, type CompletionContext } from "@codemirror/autocomplete";
 import { json } from "@codemirror/lang-json";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment } from "@codemirror/state";
+import { tags } from "@lezer/highlight";
 import { basicSetup, EditorView } from "codemirror";
 import { useEffect, useRef } from "react";
 import type { AppProfileConfigCompletionSet } from "../generated/contracts";
@@ -35,6 +37,7 @@ export function JsoncEditor({ value, readOnly = false, complete, onChange }: Jso
       extensions: [
         basicSetup,
         json(),
+        syntaxHighlighting(jsoncHighlightStyle),
         EditorView.lineWrapping,
         editableCompartmentRef.current.of(EditorView.editable.of(!readOnly)),
         EditorView.updateListener.of((update) => {
@@ -50,7 +53,8 @@ export function JsoncEditor({ value, readOnly = false, complete, onChange }: Jso
           "&": {
             height: "100%",
             backgroundColor: "transparent",
-            color: "#e5edf7",
+            color: "#f3efe4",
+            caretColor: "#f3efe4",
             fontSize: "13px",
           },
           ".cm-scroller": {
@@ -59,19 +63,22 @@ export function JsoncEditor({ value, readOnly = false, complete, onChange }: Jso
             lineHeight: "1.65",
           },
           ".cm-gutters": {
-            backgroundColor: "rgba(3, 8, 14, 0.52)",
-            color: "rgba(220, 230, 243, 0.42)",
-            borderRight: "1px solid rgba(139, 162, 189, 0.12)",
+            backgroundColor: "rgba(17, 19, 15, 0.72)",
+            color: "rgba(243, 239, 228, 0.34)",
+            borderRight: "1px solid rgba(243, 239, 228, 0.08)",
           },
           ".cm-activeLine": {
-            backgroundColor: "rgba(113, 160, 255, 0.08)",
+            backgroundColor: "rgba(168, 196, 220, 0.07)",
           },
           ".cm-activeLineGutter": {
-            backgroundColor: "rgba(113, 160, 255, 0.08)",
+            backgroundColor: "rgba(168, 196, 220, 0.07)",
+          },
+          ".cm-selectionLayer .cm-selectionBackground": {
+            backgroundColor: "rgba(168, 196, 220, 0.24) !important",
           },
           ".cm-tooltip": {
-            backgroundColor: "#070d14",
-            border: "1px solid rgba(139, 162, 189, 0.24)",
+            backgroundColor: "#171914",
+            border: "1px solid rgba(243, 239, 228, 0.13)",
             borderRadius: "12px",
             overflow: "hidden",
           },
@@ -140,6 +147,19 @@ export function JsoncEditor({ value, readOnly = false, complete, onChange }: Jso
 
   return <div className="jsonc-editor" ref={containerRef} />;
 }
+
+const jsoncHighlightStyle = HighlightStyle.define([
+  { tag: tags.propertyName, color: "rgba(243, 239, 228, 0.88)" },
+  { tag: tags.string, color: "rgba(229, 212, 179, 0.82)" },
+  { tag: tags.number, color: "rgba(168, 196, 220, 0.84)" },
+  { tag: tags.bool, color: "rgba(168, 196, 220, 0.84)" },
+  { tag: tags.null, color: "rgba(243, 239, 228, 0.5)" },
+  { tag: tags.comment, color: "rgba(243, 239, 228, 0.38)", fontStyle: "italic" },
+  { tag: tags.punctuation, color: "rgba(243, 239, 228, 0.42)" },
+  { tag: tags.brace, color: "rgba(243, 239, 228, 0.5)" },
+  { tag: tags.squareBracket, color: "rgba(243, 239, 228, 0.5)" },
+  { tag: tags.separator, color: "rgba(243, 239, 228, 0.34)" },
+]);
 
 function completionTriggerBefore(context: CompletionContext): boolean {
   const before = context.matchBefore(/[A-Za-z0-9_"-]*$/);
