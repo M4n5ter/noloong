@@ -228,13 +228,14 @@ export function TranscriptView({
           {timelineEmpty ? (
             <p className="transcript-empty-prompt">{i18n.t("transcript.empty")}</p>
           ) : (
-            interaction.conversation.timeline.map((item) => (
+            interaction.conversation.timeline.map((item, index, timeline) => (
               <TimelineItemView
                 i18n={i18n}
                 item={item}
                 key={timelineItemKey(item)}
                 onResolveApproval={onResolveApproval}
                 onToggleReasoning={onToggleReasoning}
+                subordinateToReasoning={isSubordinateActivity(item, timeline, index)}
               />
             ))
           )}
@@ -260,11 +261,13 @@ function TimelineItemView({
   item,
   onResolveApproval,
   onToggleReasoning,
+  subordinateToReasoning = false,
 }: {
   i18n: AppI18n;
   item: TimelineItem;
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
+  subordinateToReasoning?: boolean;
 }) {
   switch (item.kind) {
     case "message":
@@ -274,7 +277,13 @@ function TimelineItemView({
         <ReasoningCard i18n={i18n} thought={item} onToggleReasoning={onToggleReasoning} />
       );
     case "tool":
-      return <ToolActivityRow i18n={i18n} tool={item} />;
+      return (
+        <ToolActivityRow
+          i18n={i18n}
+          subordinateToReasoning={subordinateToReasoning}
+          tool={item}
+        />
+      );
     case "approval":
       return <ApprovalCard approval={item} i18n={i18n} onResolveApproval={onResolveApproval} />;
   }
@@ -345,11 +354,26 @@ function ReasoningCard({
   );
 }
 
-function ToolActivityRow({ i18n, tool }: { i18n: AppI18n; tool: ToolTimelineItem }) {
+function ToolActivityRow({
+  i18n,
+  subordinateToReasoning,
+  tool,
+}: {
+  i18n: AppI18n;
+  subordinateToReasoning: boolean;
+  tool: ToolTimelineItem;
+}) {
   const view = toolActivityViewModel(tool, i18n);
   return (
     <details
-      className={`tool-activity tool-activity-${tool.status} ${tool.isError ? "tool-error" : ""}`}
+      className={[
+        "tool-activity",
+        `tool-activity-${tool.status}`,
+        subordinateToReasoning ? "tool-activity-subordinate" : "",
+        tool.isError ? "tool-error" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
       <summary>
         <span className="tool-activity-dot" aria-hidden="true" />
@@ -481,4 +505,25 @@ function timelineItemKey(item: TimelineItem): string {
     case "approval":
       return `approval:${item.approvalId}`;
   }
+}
+
+function isSubordinateActivity(item: TimelineItem, timeline: TimelineItem[], index: number): boolean {
+  if (item.kind !== "tool" || item.isError) {
+    return false;
+  }
+  const parent = nearestPreviousNonToolActivity(timeline, index);
+  return parent?.kind === "reasoning" && parent.status === "running";
+}
+
+function nearestPreviousNonToolActivity(
+  timeline: TimelineItem[],
+  index: number,
+): TimelineItem | undefined {
+  for (let itemIndex = index - 1; itemIndex >= 0; itemIndex -= 1) {
+    const item = timeline[itemIndex];
+    if (item?.kind !== "tool") {
+      return item;
+    }
+  }
+  return undefined;
 }

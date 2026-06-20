@@ -413,6 +413,17 @@
   line-height: 1.45;
 }
 
+.tool-activity-subordinate {
+  width: min(540px, 100%);
+  margin-top: -12px;
+  margin-left: 15px;
+  padding: 0 0 3px 14px;
+  border-left-color: rgba(229, 212, 179, 0.08);
+  color: rgba(243, 239, 228, 0.34);
+  font-size: 12px;
+  line-height: 1.38;
+}
+
 .tool-activity summary {
   display: flex;
   min-width: 0;
@@ -422,6 +433,11 @@
   color: rgba(243, 239, 228, 0.52);
   cursor: pointer;
   list-style: none;
+}
+
+.tool-activity-subordinate summary {
+  gap: 6px;
+  color: rgba(243, 239, 228, 0.38);
 }
 
 .tool-activity summary::-webkit-details-marker {
@@ -443,6 +459,10 @@
   background: rgba(168, 196, 220, 0.36);
 }
 
+.tool-activity-subordinate .tool-activity-dot {
+  display: none;
+}
+
 .tool-activity-disclosure {
   flex: none;
   width: 6px;
@@ -451,6 +471,12 @@
   border-bottom: 1px solid rgba(243, 239, 228, 0.34);
   transform: rotate(-45deg);
   transform-origin: center;
+}
+
+.tool-activity-subordinate .tool-activity-disclosure {
+  width: 5px;
+  height: 5px;
+  border-color: rgba(243, 239, 228, 0.24);
 }
 
 .tool-activity[open] .tool-activity-disclosure {
@@ -470,9 +496,18 @@
   display: none;
 }
 
+.tool-activity-subordinate .activity-status {
+  color: rgba(243, 239, 228, 0.3);
+  font-size: 11px;
+}
+
 .tool-activity-detail {
   flex-basis: 100%;
   color: rgba(243, 239, 228, 0.58);
+}
+
+.tool-activity-subordinate .tool-activity-detail {
+  color: rgba(243, 239, 228, 0.4);
 }
 
 .tool-activity-audit {

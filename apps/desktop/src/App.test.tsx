@@ -605,6 +605,51 @@ describe("Noloong app chat regression harness", () => {
     expect(screen.getByText("Captured viewport metrics.")).toBeVisible();
   });
 
+  it("renders successful tools during active reasoning as subordinate activity", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await screen.findByPlaceholderText("Write a message...");
+    await composerReadyForInput();
+
+    act(() => {
+      runtime.emitDisplayEvent({
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      });
+      runtime.emitDisplayEvent({
+        type: "thought_delta",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        kind: "summary",
+        text: "Reading the current UI state.",
+      });
+      runtime.emitDisplayEvent({
+        type: "tool_started",
+        toolCallId: "tool-1",
+        toolName: "desktop.preview.inspect",
+      });
+      runtime.emitDisplayEvent({
+        type: "tool_started",
+        toolCallId: "tool-2",
+        toolName: "host.exec.start",
+      });
+      runtime.emitDisplayEvent({
+        type: "tool_completed",
+        toolCallId: "tool-3",
+        output: { content: [{ type: "text", text: "Permission denied." }], isError: true },
+      });
+    });
+
+    const toolRows = document.querySelectorAll(".tool-activity");
+    expect(toolRows).toHaveLength(3);
+    expect(toolRows[0]).toHaveClass("tool-activity-subordinate");
+    expect(toolRows[1]).toHaveClass("tool-activity-subordinate");
+    expect(toolRows[2]).not.toHaveClass("tool-activity-subordinate");
+  });
+
   it("converges to the authoritative session snapshot after run completion", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
 
