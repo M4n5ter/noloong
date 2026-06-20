@@ -354,7 +354,11 @@ class DevInteractionRuntime {
         toolCall: {
           id: `tool-${runId}`,
           name: "desktop.preview.change",
-          arguments: { command: "apply visual update", cwd: "/Users/m4n5ter/rust/noloong" },
+          arguments: {
+            command: "apply visual update",
+            cwd: "/Users/m4n5ter/rust/noloong",
+            targetPaths: ["apps/desktop/src/styles/chat-runtime.css"],
+          },
         },
         request: {
           prompt: "Apply this preview-only visual change?",

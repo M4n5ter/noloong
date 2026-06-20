@@ -53,6 +53,7 @@ export type ApprovalTimelineItem = {
   reason: string;
   command: string | null;
   cwd: string | null;
+  targetPaths: string[];
   permissions: AppToolPermissionRequirement[];
   status: "pending" | "approved" | "denied" | "expired";
 };
@@ -577,6 +578,7 @@ function approvalFromRequest(approval: AppToolApprovalRequest): ApprovalTimeline
     reason: approval.request.reason ?? "",
     command: details.command,
     cwd: details.cwd,
+    targetPaths: details.targetPaths,
     permissions: approval.permissions ?? [],
     status: "pending",
   };
@@ -585,12 +587,14 @@ function approvalFromRequest(approval: AppToolApprovalRequest): ApprovalTimeline
 function approvalRequestDetails(approval: AppToolApprovalRequest): {
   command: string | null;
   cwd: string | null;
+  targetPaths: string[];
 } {
   const metadata = recordValue(approval.request.metadata);
   const args = recordValue(approval.toolCall.arguments);
   return {
     command: stringValue(metadata?.command) ?? stringValue(args?.command),
     cwd: stringValue(metadata?.cwd) ?? stringValue(args?.cwd),
+    targetPaths: stringArrayValue(metadata?.targetPaths) ?? stringArrayValue(args?.targetPaths) ?? [],
   };
 }
 
@@ -602,6 +606,14 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function stringArrayValue(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const strings = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+  return strings.length > 0 ? strings : null;
 }
 
 function appendAssistantDelta(

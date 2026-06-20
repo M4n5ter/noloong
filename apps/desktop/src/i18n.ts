@@ -59,6 +59,7 @@ export type I18nKey =
   | "approval.actionTitle"
   | "approval.commandTitle"
   | "approval.commandSummary"
+  | "approval.projectWriteSummary"
   | "approval.actionSummary"
   | "approval.pending"
   | "approval.approved"
@@ -66,6 +67,7 @@ export type I18nKey =
   | "approval.expired"
   | "approval.command"
   | "approval.workingFolder"
+  | "approval.affectedFiles"
   | "approval.reason"
   | "approval.permissions"
   | "approval.runCommand"
@@ -184,6 +186,7 @@ const messages = {
     "approval.actionTitle": "Review this action",
     "approval.commandTitle": "Run a local command?",
     "approval.commandSummary": "Noloong wants to run this command in your project.",
+    "approval.projectWriteSummary": "This action can change files in your project.",
     "approval.actionSummary": "Noloong needs your permission before continuing.",
     "approval.pending": "Waiting for your decision",
     "approval.approved": "Approved",
@@ -191,6 +194,7 @@ const messages = {
     "approval.expired": "Expired",
     "approval.command": "Command",
     "approval.workingFolder": "Working folder",
+    "approval.affectedFiles": "Affected files",
     "approval.reason": "Why",
     "approval.permissions": "Access",
     "approval.runCommand": "Run Local Command",
@@ -308,6 +312,7 @@ const messages = {
     "approval.actionTitle": "确认这次操作",
     "approval.commandTitle": "运行本地命令？",
     "approval.commandSummary": "Noloong 想在你的项目里运行这条命令。",
+    "approval.projectWriteSummary": "这次操作可以修改你的项目文件。",
     "approval.actionSummary": "Noloong 需要你的许可后才能继续。",
     "approval.pending": "等待你决定",
     "approval.approved": "已同意",
@@ -315,6 +320,7 @@ const messages = {
     "approval.expired": "已过期",
     "approval.command": "命令",
     "approval.workingFolder": "工作目录",
+    "approval.affectedFiles": "受影响文件",
     "approval.reason": "原因",
     "approval.permissions": "权限",
     "approval.runCommand": "运行本地命令",

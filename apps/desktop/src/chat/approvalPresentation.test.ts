@@ -28,6 +28,10 @@ describe("approval presentation", () => {
       { id: "host.cwd", label: "Uses the selected working folder.", detail: null },
       { id: "write", label: "Can change files in the project.", detail: null },
     ]);
+    expect(view).toMatchObject({
+      confirmTone: "caution",
+      summary: "This action can change files in your project.",
+    });
   });
 
   it("keeps non-redundant details for known permissions", () => {
@@ -49,6 +53,36 @@ describe("approval presentation", () => {
         label: "Can run a local command.",
         detail: "Runs inside the active project shell.",
       },
+    ]);
+    expect(view.confirmTone).toBe("normal");
+  });
+
+  it("uses project write risk presentation for file edit actions without commands", () => {
+    const view = approvalDecisionViewModel(
+      approval({
+        command: null,
+        targetPaths: [
+          " apps/desktop/src/chat/TranscriptComponents.tsx ",
+          "apps/desktop/src/chat/TranscriptComponents.tsx",
+        ],
+        permissions: [
+          {
+            capability: "host.file.write",
+            description: "Modify local project files.",
+          },
+        ],
+      }),
+      i18n,
+    );
+
+    expect(view).toMatchObject({
+      confirmLabel: "Continue",
+      confirmTone: "caution",
+      summary: "This action can change files in your project.",
+      targetPaths: ["apps/desktop/src/chat/TranscriptComponents.tsx"],
+    });
+    expect(view.permissions).toEqual([
+      { id: "host.file.write", label: "Can change files in the project.", detail: null },
     ]);
   });
 
@@ -147,6 +181,7 @@ function approval(
     reason: "Needs approval.",
     command: "pwd",
     cwd: "/Users/m4n5ter/rust/noloong",
+    targetPaths: [],
     permissions: [],
     status: "pending",
     ...overrides,

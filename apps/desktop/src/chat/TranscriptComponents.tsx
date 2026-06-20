@@ -455,6 +455,20 @@ function ApprovalCard({
             </dd>
           </div>
         ) : null}
+        {decision.targetPaths.length > 0 ? (
+          <div>
+            <dt>{i18n.t("approval.affectedFiles")}</dt>
+            <dd>
+              <ul className="approval-file-list">
+                {decision.targetPaths.map((path) => (
+                  <li key={path}>
+                    <code>{path}</code>
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </div>
+        ) : null}
         {decision.permissions.length > 0 ? (
           <div>
             <dt>{i18n.t("approval.permissions")}</dt>
@@ -482,7 +496,7 @@ function ApprovalCard({
             {i18n.t("approval.cancel")}
           </button>
           <button
-            className="approval-confirm"
+            className={`approval-confirm approval-confirm-${decision.confirmTone}`}
             disabled={resolving}
             onClick={() => void onResolveApproval(approval.approvalId, "allow")}
             type="button"

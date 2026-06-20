@@ -68,7 +68,7 @@ describe("approval decisions", () => {
     );
     expect(within(approval).getByRole("heading", { name: "Run a local command?" })).toBeVisible();
     expect(approval).toHaveAccessibleDescription(
-      "Noloong wants to run this command in your project.",
+      "This action can change files in your project.",
     );
     expect(within(approval).getByRole("button", { name: "Run Local Command" })).toBeVisible();
     expect(within(approval).getByRole("button", { name: "Cancel" })).toBeVisible();
@@ -137,6 +137,8 @@ describe("approval decisions", () => {
     const card = await screen.findByRole("article", { name: "Run a local command?" });
     expect(within(card).getByRole("heading", { name: "Run a local command?" })).toBeVisible();
     expect(within(card).getByText("pwd && ls -la")).toBeVisible();
+    expect(within(card).getByText("Affected files")).toBeVisible();
+    expect(within(card).getByText("apps/desktop/src/chat/TranscriptComponents.tsx")).toBeVisible();
     expect(within(card).getByText("Can run a local command.")).toBeVisible();
     expect(within(card).getByText("Runs inside the active project shell.")).toBeVisible();
     expect(within(card).getByText("Uses the selected working folder.")).toBeVisible();
@@ -205,6 +207,7 @@ describe("approval decisions", () => {
     const card = await screen.findByRole("article", { name: "运行本地命令？" });
     expect(within(card).getByRole("heading", { name: "运行本地命令？" })).toBeVisible();
     expect(within(card).getByText("等待你决定")).toBeVisible();
+    expect(within(card).getByText("受影响文件")).toBeVisible();
     expect(within(card).getByRole("button", { name: "运行本地命令" })).toBeVisible();
     expect(within(card).getByRole("button", { name: "取消" })).toBeVisible();
   });
@@ -314,6 +317,7 @@ function emitApprovalRequest(runtime: FakeInteractionRuntime, approvalId: string
           metadata: {
             command: "pwd && ls -la",
             cwd: "/Users/m4n5ter/rust/noloong",
+            targetPaths: ["apps/desktop/src/chat/TranscriptComponents.tsx"],
           },
         },
         permissions: [

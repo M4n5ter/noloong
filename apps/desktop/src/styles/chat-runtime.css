@@ -666,6 +666,7 @@
   overflow-wrap: anywhere;
 }
 
+.approval-file-list,
 .approval-permission-list {
   display: grid;
   gap: 4px;
@@ -673,6 +674,7 @@
   padding-left: 16px;
 }
 
+.approval-file-list li,
 .approval-permission-list li {
   min-width: 0;
 }
@@ -724,6 +726,12 @@
   border-color: rgba(168, 196, 220, 0.34);
   background: rgba(58, 84, 107, 0.5);
   color: rgba(243, 239, 228, 0.88);
+}
+
+.approval-actions .approval-confirm-caution {
+  border-color: rgba(229, 212, 179, 0.38);
+  background: rgba(114, 82, 48, 0.58);
+  color: rgba(243, 239, 228, 0.9);
 }
 
 .approval-actions .approval-cancel {

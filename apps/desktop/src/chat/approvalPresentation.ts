@@ -11,9 +11,13 @@ export type ApprovalDecisionViewModel = {
   reason: string;
   command: string | null;
   cwd: string | null;
+  targetPaths: string[];
   permissions: ApprovalPermissionViewModel[];
   confirmLabel: string;
+  confirmTone: "normal" | "caution";
 };
+
+type ApprovalRisk = "normal" | "project-write";
 
 export type ApprovalPermissionViewModel = {
   id: string;
@@ -34,15 +38,31 @@ export function approvalDecisionViewModel(
   i18n: AppI18n,
 ): ApprovalDecisionViewModel {
   const prompt = approval.prompt.trim();
+  const risk = approvalRisk(approval.permissions);
   return {
     title: approval.command ? i18n.t("approval.commandTitle") : i18n.t("approval.actionTitle"),
-    summary: approval.command ? i18n.t("approval.commandSummary") : i18n.t("approval.actionSummary"),
+    summary: approvalSummary(approval.command != null, risk, i18n),
     reason: approval.reason || (approval.command ? "" : prompt),
     command: approval.command,
     cwd: approval.cwd,
+    targetPaths: uniqueNonEmptyStrings(approval.targetPaths),
     permissions: permissionViewModels(approval.permissions, i18n),
     confirmLabel: approval.command ? i18n.t("approval.runCommand") : i18n.t("approval.continue"),
+    confirmTone: risk === "project-write" ? "caution" : "normal",
   };
+}
+
+function approvalRisk(permissions: AppToolPermissionRequirement[]): ApprovalRisk {
+  return permissions.some((permission) => isProjectWritePermission(permission.capability))
+    ? "project-write"
+    : "normal";
+}
+
+function approvalSummary(hasCommand: boolean, risk: ApprovalRisk, i18n: AppI18n): string {
+  if (risk === "project-write") {
+    return i18n.t("approval.projectWriteSummary");
+  }
+  return hasCommand ? i18n.t("approval.commandSummary") : i18n.t("approval.actionSummary");
 }
 
 export function toolActivityViewModel(
@@ -146,7 +166,12 @@ function isWorkingDirectoryPermission(capability: string): boolean {
 
 function isProjectWritePermission(capability: string): boolean {
   const normalized = capability.toLowerCase();
-  return normalized === "write" || normalized === "host.write" || normalized === "file.write";
+  return (
+    normalized === "write" ||
+    normalized === "host.write" ||
+    normalized === "file.write" ||
+    normalized === "host.file.write"
+  );
 }
 
 function nonRedundantDetail(description: string, redundantDescriptions: string[]): string | null {
@@ -161,4 +186,17 @@ function nonRedundantDetail(description: string, redundantDescriptions: string[]
 
 function normalizeDescription(description: string): string {
   return description.trim().replace(/[.。]+$/, "").toLowerCase();
+}
+
+function uniqueNonEmptyStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const strings: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (trimmed.length > 0 && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      strings.push(trimmed);
+    }
+  }
+  return strings;
 }

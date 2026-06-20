@@ -177,6 +177,7 @@ describe("conversation timeline reducer", () => {
           metadata: {
             command: "pwd && ls -la",
             cwd: "/Users/m4n5ter/rust/noloong",
+            targetPaths: ["apps/desktop/src/App.tsx", ""],
           },
         },
         permissions: [
@@ -198,6 +199,7 @@ describe("conversation timeline reducer", () => {
         reason: "Needs host access.",
         command: "pwd && ls -la",
         cwd: "/Users/m4n5ter/rust/noloong",
+        targetPaths: ["apps/desktop/src/App.tsx"],
         permissions: [
           {
             capability: "host.command",
