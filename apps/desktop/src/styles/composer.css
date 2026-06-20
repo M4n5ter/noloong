@@ -118,6 +118,24 @@
   min-width: 0;
 }
 
+.composer-editor-shell.previewing::after {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  inset-inline-end: 0;
+  bottom: 0;
+  width: calc(var(--composer-editor-action-space) + var(--composer-preview-fade));
+  border-start-end-radius: 999px;
+  border-end-end-radius: 999px;
+  background: linear-gradient(90deg, rgba(23, 25, 20, 0), rgba(23, 25, 20, 0.94) 36%);
+  content: "";
+  pointer-events: none;
+}
+
+:dir(rtl) .composer-editor-shell.previewing::after {
+  background: linear-gradient(270deg, rgba(23, 25, 20, 0), rgba(23, 25, 20, 0.94) 36%);
+}
+
 .composer-editor-shell.expanded {
   position: absolute;
   bottom: calc(100% + 20px);
@@ -246,10 +264,13 @@
   min-height: 38px;
   max-height: 42px;
   overflow-y: hidden;
-  padding: 8px var(--composer-editor-action-space) 8px 0;
+  padding-block: 8px;
+  padding-inline: 0 var(--composer-editor-action-space);
 }
 
 .composer-editor-shell.previewing .composer-input {
+  position: relative;
+  z-index: 2;
   caret-color: #f3efe4;
   color: transparent;
 }
@@ -350,12 +371,18 @@
 .composer-expand {
   position: absolute;
   top: var(--composer-expand-top);
-  right: var(--composer-expand-inset);
+  inset-inline-end: var(--composer-expand-inset);
   z-index: 3;
   width: var(--composer-expand-size);
   height: var(--composer-expand-size);
   background: rgba(23, 25, 20, 0.28);
   color: rgba(243, 239, 228, 0.42);
+}
+
+.composer-editor-shell.previewing .composer-expand {
+  border-color: rgba(243, 239, 228, 0.11);
+  background: rgba(23, 25, 20, 0.86);
+  color: rgba(243, 239, 228, 0.52);
 }
 
 .composer-editor-shell.expanded .composer-expand {
