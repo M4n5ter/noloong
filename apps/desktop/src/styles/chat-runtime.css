@@ -68,7 +68,7 @@
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 16px;
   --empty-state-composer-clearance: clamp(64px, 10vh, 92px);
-  --empty-state-reading-offset: clamp(128px, 24vh, 200px);
+  --empty-state-reading-offset: clamp(172px, 31vh, 252px);
 }
 
 .conversation:has(.composer-editor-shell.expanded) {
@@ -102,26 +102,19 @@
 }
 
 .empty-session-heading {
+  width: fit-content;
   min-width: 0;
-  max-width: 420px;
+  max-width: min(360px, 100%);
 }
 
 .empty-session-heading h1 {
   margin: 0;
-  color: rgba(243, 239, 228, 0.7);
-  font-size: 22px;
-  font-weight: 590;
+  color: rgba(243, 239, 228, 0.52);
+  font-size: 17px;
+  font-weight: 540;
   letter-spacing: 0;
-  line-height: 1.18;
+  line-height: 22px;
   overflow-wrap: anywhere;
-}
-
-.transcript-empty-prompt {
-  max-width: 420px;
-  margin: -4px 0 0;
-  color: rgba(243, 239, 228, 0.4);
-  font-size: 14px;
-  line-height: 1.45;
 }
 
 .message {

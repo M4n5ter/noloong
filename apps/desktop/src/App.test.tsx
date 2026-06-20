@@ -78,7 +78,6 @@ describe("Noloong app chat regression harness", () => {
     render(<App dependencies={dependenciesFor(runtime)} />);
 
     expect(await screen.findByRole("heading", { name: "Start with a question." })).toBeInTheDocument();
-    expect(screen.getByText("Decision, draft, plan, or problem.")).toBeInTheDocument();
     expect(screen.queryByText("Default environment")).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent("default · idle");
     expect(screen.queryByRole("button", { name: "Open settings" })).not.toBeInTheDocument();

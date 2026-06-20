@@ -226,9 +226,6 @@ export function TranscriptView({
             <div className="empty-session-heading">
               <h1 data-render-heading>{title}</h1>
             </div>
-          ) : null}
-          {timelineEmpty ? (
-            <p className="transcript-empty-prompt">{i18n.t("transcript.empty")}</p>
           ) : (
             interaction.conversation.timeline.map((item, index, timeline) => (
               <TimelineItemView

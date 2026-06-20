@@ -26,7 +26,6 @@ export type I18nKey =
   | "runtime.disconnected"
   | "runtime.interrupted"
   | "transcript.newSessionTitle"
-  | "transcript.empty"
   | "sessionContext.environment"
   | "sessionContext.running"
   | "sessionContext.paused"
@@ -164,7 +163,6 @@ const messages = {
     "runtime.disconnected": "Display stream disconnected",
     "runtime.interrupted": "Display stream was interrupted.",
     "transcript.newSessionTitle": "Start with a question.",
-    "transcript.empty": "Decision, draft, plan, or problem.",
     "sessionContext.environment": "{profile} environment",
     "sessionContext.running": "{profile} is thinking",
     "sessionContext.paused": "{profile} needs a decision",
@@ -301,7 +299,6 @@ const messages = {
     "runtime.disconnected": "Display 流已断开",
     "runtime.interrupted": "Display 流已中断。",
     "transcript.newSessionTitle": "从一个问题开始。",
-    "transcript.empty": "决定、草稿、计划或问题都可以。",
     "sessionContext.environment": "{profile} 环境",
     "sessionContext.running": "{profile} 正在思考",
     "sessionContext.paused": "{profile} 需要你决定",
