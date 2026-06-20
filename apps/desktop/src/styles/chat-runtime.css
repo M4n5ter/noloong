@@ -91,7 +91,7 @@
   max-width: 760px;
   min-width: 0;
   margin: 0 auto;
-  padding: 0;
+  padding: clamp(38px, 8vh, 68px) 0 0;
 }
 
 .transcript-content-empty {
