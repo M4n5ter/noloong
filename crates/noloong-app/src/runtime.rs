@@ -124,16 +124,16 @@ fn set_menu_item_enabled_in_items<R: tauri::Runtime>(
     enabled: bool,
 ) -> tauri::Result<bool> {
     for item in items {
-        if item.id().as_ref() == id {
-            if let Some(menu_item) = item.as_menuitem() {
-                menu_item.set_enabled(enabled)?;
-                return Ok(true);
-            }
+        if item.id().as_ref() == id
+            && let Some(menu_item) = item.as_menuitem()
+        {
+            menu_item.set_enabled(enabled)?;
+            return Ok(true);
         }
-        if let tauri::menu::MenuItemKind::Submenu(submenu) = item {
-            if set_menu_item_enabled_in_items(submenu.items()?, id, enabled)? {
-                return Ok(true);
-            }
+        if let tauri::menu::MenuItemKind::Submenu(submenu) = item
+            && set_menu_item_enabled_in_items(submenu.items()?, id, enabled)?
+        {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -275,7 +275,7 @@ fn app_menu<R: tauri::Runtime>(
 
         let help_submenu = Submenu::with_items(app_handle, "Help", true, &[])?;
 
-        return Menu::with_items(
+        Menu::with_items(
             app_handle,
             &[
                 &app_submenu,
@@ -286,7 +286,7 @@ fn app_menu<R: tauri::Runtime>(
                 &window_submenu,
                 &help_submenu,
             ],
-        );
+        )
     }
 
     #[cfg(not(target_os = "macos"))]
