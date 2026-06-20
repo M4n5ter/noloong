@@ -70,7 +70,7 @@ describe("approval decisions", () => {
     expect(approval).toHaveAccessibleDescription(
       "Noloong wants to run this command in your project.",
     );
-    expect(within(approval).getByRole("button", { name: "Run Command" })).toBeVisible();
+    expect(within(approval).getByRole("button", { name: "Run Local Command" })).toBeVisible();
     expect(within(approval).getByRole("button", { name: "Cancel" })).toBeVisible();
     expect(within(approval).queryByText("desktop.preview.change")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
@@ -100,7 +100,7 @@ describe("approval decisions", () => {
     await user.click(within(approval).getByRole("button", { name: "Cancel" }));
 
     await waitFor(() => expect(within(approval).getByText("Canceled")).toBeVisible());
-    expect(within(approval).queryByRole("button", { name: "Run Command" })).not.toBeInTheDocument();
+    expect(within(approval).queryByRole("button", { name: "Run Local Command" })).not.toBeInTheDocument();
     expect(within(approval).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     expect(
       await screen.findByText("Approval denied in the dev preview. The flow stopped cleanly."),
@@ -143,7 +143,7 @@ describe("approval decisions", () => {
     expect(within(card).getByText("Call MCP tool search from the design server.")).toBeVisible();
     expect(within(card).queryByText("host.exec.start")).not.toBeInTheDocument();
 
-    await user.click(within(card).getByRole("button", { name: "Run Command" }));
+    await user.click(within(card).getByRole("button", { name: "Run Local Command" }));
 
     await waitFor(() =>
       expect(runtime.approvalResolveRequests).toEqual([
@@ -167,7 +167,7 @@ describe("approval decisions", () => {
     const card = await screen.findByRole("article", { name: "运行本地命令？" });
     expect(within(card).getByRole("heading", { name: "运行本地命令？" })).toBeVisible();
     expect(within(card).getByText("等待你决定")).toBeVisible();
-    expect(within(card).getByRole("button", { name: "运行命令" })).toBeVisible();
+    expect(within(card).getByRole("button", { name: "运行本地命令" })).toBeVisible();
     expect(within(card).getByRole("button", { name: "取消" })).toBeVisible();
   });
 
