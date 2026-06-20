@@ -284,6 +284,13 @@ describe("Noloong app chat regression harness", () => {
     expect(runtime.promptRequests[0]).toMatchObject({
       input: { type: "text", text: "send from native menu" },
     });
+
+    await user.type(composer, "draft to clear");
+    act(() => {
+      listener({ payload: "clear-composer" });
+    });
+
+    expect(composer).toHaveValue("");
   });
 
   it("renders settings as a dedicated surface without a return-to-chat control", async () => {

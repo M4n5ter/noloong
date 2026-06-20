@@ -10,6 +10,7 @@ describe("conversation commands", () => {
     expect(conversationCommandFromPayload("focus-composer")).toBe("focus-composer");
     expect(conversationCommandFromPayload("send-message")).toBe("send-message");
     expect(conversationCommandFromPayload("stop-response")).toBe("stop-response");
+    expect(conversationCommandFromPayload("clear-composer")).toBe("clear-composer");
     expect(conversationCommandFromPayload("delete-session")).toBeNull();
     expect(conversationCommandFromPayload(null)).toBeNull();
   });
@@ -19,6 +20,7 @@ describe("conversation commands", () => {
       canFocusComposer: true,
       canSendMessage: true,
       canStopResponse: false,
+      canClearComposer: true,
     };
 
     expect(

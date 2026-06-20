@@ -42,7 +42,9 @@ export function PromptComposer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const disabledRef = useRef(disabled);
   const canAbort = Boolean(onAbortRun);
+  const hasDraft = text.length > 0 || attachments.length > 0;
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled && !canAbort;
+  const canClear = hasDraft && !disabled && !canAbort;
   const canExpand = expanded || needsExpandedComposer(text);
   const previewingCompactOverflow = canExpand && !expanded;
   const compactPreview = expanded ? i18n.t("composer.editingDraft") : firstPreviewLine(text);
@@ -67,8 +69,9 @@ export function PromptComposer({
       canFocusComposer: !disabled,
       canSendMessage: canSend,
       canStopResponse: canAbort,
+      canClearComposer: canClear,
     });
-  }, [canAbort, canSend, disabled, onCommandAvailabilityChange]);
+  }, [canAbort, canClear, canSend, disabled, onCommandAvailabilityChange]);
 
   const updateScrollFades = useCallback(() => {
     const textarea = textareaRef.current;
@@ -83,17 +86,29 @@ export function PromptComposer({
     updateScrollFades();
   }, [expanded, text, updateScrollFades]);
 
+  const resetDraft = useCallback(() => {
+    setText("");
+    setAttachments([]);
+    setExpanded(false);
+  }, []);
+
   const submit = useCallback(async () => {
     if (!canSend) {
       return;
     }
     const submitted = text;
     const submittedAttachments = attachments;
-    setText("");
-    setAttachments([]);
-    setExpanded(false);
+    resetDraft();
     await onSubmit({ text: submitted, attachments: submittedAttachments });
-  }, [attachments, canSend, onSubmit, text]);
+  }, [attachments, canSend, onSubmit, resetDraft, text]);
+
+  const clearComposer = useCallback(() => {
+    if (!canClear) {
+      return;
+    }
+    resetDraft();
+    textareaRef.current?.focus();
+  }, [canClear, resetDraft]);
 
   useEffect(() => {
     function handleConversationCommand(event: Event) {
@@ -110,6 +125,9 @@ export function PromptComposer({
             void onAbortRun?.();
           }
           break;
+        case "clear-composer":
+          clearComposer();
+          break;
       }
     }
 
@@ -117,7 +135,7 @@ export function PromptComposer({
     return () => {
       window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand);
     };
-  }, [canAbort, onAbortRun, submit]);
+  }, [canAbort, clearComposer, onAbortRun, submit]);
 
   const addPaths = useCallback((paths: string[]) => {
     if (disabledRef.current) {

@@ -6,9 +6,52 @@ const OPEN_SETTINGS_MENU_ID: &str = "open-settings";
 const FOCUS_COMPOSER_MENU_ID: &str = "focus-composer";
 const SEND_MESSAGE_MENU_ID: &str = "send-message";
 const STOP_RESPONSE_MENU_ID: &str = "stop-response";
+const CLEAR_COMPOSER_MENU_ID: &str = "clear-composer";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
 const MAIN_WINDOW_LABEL: &str = "main";
 const CONVERSATION_MENU_COMMAND_EVENT: &str = "noloong-conversation-menu-command";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversationMenuEntry {
+    Command(ConversationMenuCommandSpec),
+    Separator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ConversationMenuCommandSpec {
+    id: &'static str,
+    title: &'static str,
+    accelerator: Option<&'static str>,
+    initially_enabled: bool,
+}
+
+const CONVERSATION_MENU_ENTRIES: [ConversationMenuEntry; 5] = [
+    ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+        id: FOCUS_COMPOSER_MENU_ID,
+        title: "Focus Composer",
+        accelerator: Some("CmdOrCtrl+L"),
+        initially_enabled: true,
+    }),
+    ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+        id: SEND_MESSAGE_MENU_ID,
+        title: "Send Message",
+        accelerator: Some("CmdOrCtrl+Enter"),
+        initially_enabled: false,
+    }),
+    ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+        id: STOP_RESPONSE_MENU_ID,
+        title: "Stop Response",
+        accelerator: Some("Esc"),
+        initially_enabled: false,
+    }),
+    ConversationMenuEntry::Separator,
+    ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+        id: CLEAR_COMPOSER_MENU_ID,
+        title: "Clear Composer",
+        accelerator: None,
+        initially_enabled: false,
+    }),
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +59,7 @@ struct ConversationMenuState {
     can_focus_composer: bool,
     can_send_message: bool,
     can_stop_response: bool,
+    can_clear_composer: bool,
 }
 
 #[derive(Clone)]
@@ -61,7 +105,7 @@ pub fn run_app(options: AppLaunchOptions) -> Result<(), AppError> {
             OPEN_SETTINGS_MENU_ID => {
                 let _ = open_settings_window(app);
             }
-            FOCUS_COMPOSER_MENU_ID | SEND_MESSAGE_MENU_ID | STOP_RESPONSE_MENU_ID => {
+            command if is_conversation_menu_command(command) => {
                 let _ = app.emit_to(
                     MAIN_WINDOW_LABEL,
                     CONVERSATION_MENU_COMMAND_EVENT,
@@ -104,7 +148,8 @@ fn update_conversation_menu_state<R: tauri::Runtime>(
 ) -> tauri::Result<()> {
     set_menu_item_enabled(app, FOCUS_COMPOSER_MENU_ID, state.can_focus_composer)?;
     set_menu_item_enabled(app, SEND_MESSAGE_MENU_ID, state.can_send_message)?;
-    set_menu_item_enabled(app, STOP_RESPONSE_MENU_ID, state.can_stop_response)
+    set_menu_item_enabled(app, STOP_RESPONSE_MENU_ID, state.can_stop_response)?;
+    set_menu_item_enabled(app, CLEAR_COMPOSER_MENU_ID, state.can_clear_composer)
 }
 
 fn set_menu_item_enabled<R: tauri::Runtime>(
@@ -137,6 +182,70 @@ fn set_menu_item_enabled_in_items<R: tauri::Runtime>(
         }
     }
     Ok(false)
+}
+
+fn is_conversation_menu_command(id: &str) -> bool {
+    conversation_menu_command_specs()
+        .iter()
+        .any(|spec| spec.id == id)
+}
+
+fn conversation_menu_command_specs() -> Vec<ConversationMenuCommandSpec> {
+    CONVERSATION_MENU_ENTRIES
+        .iter()
+        .filter_map(|entry| match entry {
+            ConversationMenuEntry::Command(spec) => Some(*spec),
+            ConversationMenuEntry::Separator => None,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn conversation_menu_command_item<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    spec: ConversationMenuCommandSpec,
+) -> tauri::Result<tauri::menu::MenuItem<R>> {
+    let mut builder =
+        tauri::menu::MenuItemBuilder::with_id(spec.id, spec.title).enabled(spec.initially_enabled);
+    if let Some(accelerator) = spec.accelerator {
+        builder = builder.accelerator(accelerator);
+    }
+    builder.build(app_handle)
+}
+
+#[cfg(target_os = "macos")]
+enum BuiltConversationMenuEntry<R: tauri::Runtime> {
+    Command(tauri::menu::MenuItem<R>),
+    Separator(tauri::menu::PredefinedMenuItem<R>),
+}
+
+#[cfg(target_os = "macos")]
+impl<R: tauri::Runtime> BuiltConversationMenuEntry<R> {
+    fn as_menu_item(&self) -> &dyn tauri::menu::IsMenuItem<R> {
+        match self {
+            BuiltConversationMenuEntry::Command(item) => item,
+            BuiltConversationMenuEntry::Separator(item) => item,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn conversation_menu_entries<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> tauri::Result<Vec<BuiltConversationMenuEntry<R>>> {
+    CONVERSATION_MENU_ENTRIES
+        .iter()
+        .map(|entry| match entry {
+            ConversationMenuEntry::Command(spec) => {
+                conversation_menu_command_item(app_handle, *spec)
+                    .map(BuiltConversationMenuEntry::Command)
+            }
+            ConversationMenuEntry::Separator => {
+                tauri::menu::PredefinedMenuItem::separator(app_handle)
+                    .map(BuiltConversationMenuEntry::Separator)
+            }
+        })
+        .collect()
 }
 
 fn open_settings_window<R: tauri::Runtime>(
@@ -216,28 +325,13 @@ fn app_menu<R: tauri::Runtime>(
             &[&PredefinedMenuItem::close_window(app_handle, None)?],
         )?;
 
-        let focus_composer_item =
-            MenuItemBuilder::with_id(FOCUS_COMPOSER_MENU_ID, "Focus Composer")
-                .accelerator("CmdOrCtrl+L")
-                .build(app_handle)?;
-        let send_message_item = MenuItemBuilder::with_id(SEND_MESSAGE_MENU_ID, "Send Message")
-            .enabled(false)
-            .accelerator("CmdOrCtrl+Enter")
-            .build(app_handle)?;
-        let stop_response_item = MenuItemBuilder::with_id(STOP_RESPONSE_MENU_ID, "Stop Response")
-            .enabled(false)
-            .accelerator("Esc")
-            .build(app_handle)?;
-        let conversation_submenu = Submenu::with_items(
-            app_handle,
-            "Conversation",
-            true,
-            &[
-                &focus_composer_item,
-                &send_message_item,
-                &stop_response_item,
-            ],
-        )?;
+        let conversation_menu_entries = conversation_menu_entries(app_handle)?;
+        let conversation_menu_refs = conversation_menu_entries
+            .iter()
+            .map(|entry| entry.as_menu_item())
+            .collect::<Vec<&dyn tauri::menu::IsMenuItem<R>>>();
+        let conversation_submenu =
+            Submenu::with_items(app_handle, "Conversation", true, &conversation_menu_refs)?;
 
         let edit_submenu = Submenu::with_items(
             app_handle,
@@ -319,5 +413,58 @@ mod tests {
             payload.profile_config_path.as_deref(),
             Some("/tmp/profile.jsonc")
         );
+    }
+
+    #[test]
+    fn conversation_menu_command_specs_are_discoverable_and_actionable() {
+        assert_eq!(
+            CONVERSATION_MENU_ENTRIES,
+            [
+                ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+                    id: FOCUS_COMPOSER_MENU_ID,
+                    title: "Focus Composer",
+                    accelerator: Some("CmdOrCtrl+L"),
+                    initially_enabled: true,
+                }),
+                ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+                    id: SEND_MESSAGE_MENU_ID,
+                    title: "Send Message",
+                    accelerator: Some("CmdOrCtrl+Enter"),
+                    initially_enabled: false,
+                }),
+                ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+                    id: STOP_RESPONSE_MENU_ID,
+                    title: "Stop Response",
+                    accelerator: Some("Esc"),
+                    initially_enabled: false,
+                }),
+                ConversationMenuEntry::Separator,
+                ConversationMenuEntry::Command(ConversationMenuCommandSpec {
+                    id: CLEAR_COMPOSER_MENU_ID,
+                    title: "Clear Composer",
+                    accelerator: None,
+                    initially_enabled: false,
+                }),
+            ],
+        );
+
+        assert_eq!(
+            conversation_menu_command_specs()
+                .iter()
+                .map(|spec| spec.id)
+                .collect::<Vec<_>>(),
+            [
+                FOCUS_COMPOSER_MENU_ID,
+                SEND_MESSAGE_MENU_ID,
+                STOP_RESPONSE_MENU_ID,
+                CLEAR_COMPOSER_MENU_ID,
+            ],
+        );
+
+        assert!(is_conversation_menu_command(FOCUS_COMPOSER_MENU_ID));
+        assert!(is_conversation_menu_command(SEND_MESSAGE_MENU_ID));
+        assert!(is_conversation_menu_command(STOP_RESPONSE_MENU_ID));
+        assert!(is_conversation_menu_command(CLEAR_COMPOSER_MENU_ID));
+        assert!(!is_conversation_menu_command(OPEN_SETTINGS_MENU_ID));
     }
 }

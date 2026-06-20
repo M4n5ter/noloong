@@ -147,6 +147,7 @@ describe("PromptComposer", () => {
         canFocusComposer: true,
         canSendMessage: false,
         canStopResponse: false,
+        canClearComposer: false,
       }),
     );
 
@@ -156,6 +157,7 @@ describe("PromptComposer", () => {
         canFocusComposer: true,
         canSendMessage: true,
         canStopResponse: false,
+        canClearComposer: true,
       }),
     );
 
@@ -177,6 +179,7 @@ describe("PromptComposer", () => {
         canFocusComposer: false,
         canSendMessage: false,
         canStopResponse: true,
+        canClearComposer: false,
       }),
     );
   });
@@ -225,6 +228,36 @@ describe("PromptComposer", () => {
 
     act(() => dispatchConversationCommand("stop-response"));
     await waitFor(() => expect(onAbortRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("clears draft text and attachments through the conversation command path", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(open).mockResolvedValue(["/tmp/context.txt"]);
+
+    render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={onSubmit}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    await user.type(textarea, "draft text");
+    await user.click(screen.getByRole("button", { name: "Attach files" }));
+
+    expect(await screen.findByText("context.txt")).toBeVisible();
+
+    act(() => dispatchConversationCommand("clear-composer"));
+
+    expect(textarea).toHaveValue("");
+    expect(textarea).toHaveFocus();
+    expect(screen.queryByText("context.txt")).not.toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("routes the composer return shortcut through the command dispatcher", async () => {

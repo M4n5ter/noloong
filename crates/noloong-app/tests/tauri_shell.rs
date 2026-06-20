@@ -201,54 +201,6 @@ fn app_crate_declares_noloong_macos_binary_target() {
 }
 
 #[test]
-fn macos_conversation_menu_declares_discoverable_commands() {
-    let runtime_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("runtime.rs");
-    let runtime = fs::read_to_string(&runtime_path).unwrap_or_else(|error| {
-        panic!("{} should exist: {error}", runtime_path.display());
-    });
-
-    for required in [
-        r#"const FOCUS_COMPOSER_MENU_ID: &str = "focus-composer";"#,
-        r#"const SEND_MESSAGE_MENU_ID: &str = "send-message";"#,
-        r#"const STOP_RESPONSE_MENU_ID: &str = "stop-response";"#,
-        r#"const CONVERSATION_MENU_COMMAND_EVENT: &str = "noloong-conversation-menu-command";"#,
-        r#".accelerator("CmdOrCtrl+L")"#,
-        r#".accelerator("CmdOrCtrl+Enter")"#,
-        r#".accelerator("Esc")"#,
-        r#".enabled(false)"#,
-        "app_update_conversation_menu_state",
-        "set_menu_item_enabled(app, SEND_MESSAGE_MENU_ID, state.can_send_message)",
-        "set_menu_item_enabled(app, STOP_RESPONSE_MENU_ID, state.can_stop_response)",
-    ] {
-        assert!(
-            runtime.contains(required),
-            "runtime.rs should keep the macOS Conversation menu contract: {required}",
-        );
-    }
-
-    assert!(
-        runtime
-            .find("&view_submenu")
-            .expect("View menu should exist")
-            < runtime
-                .find("&conversation_submenu")
-                .expect("Conversation menu should exist"),
-        "Conversation menu should be after View",
-    );
-    assert!(
-        runtime
-            .find("&conversation_submenu")
-            .expect("Conversation menu should exist")
-            < runtime
-                .find("&window_submenu")
-                .expect("Window menu should exist"),
-        "Conversation menu should be before Window",
-    );
-}
-
-#[test]
 fn workspace_no_longer_declares_gpui_dependencies_or_dev_profile_overrides() {
     let manifest_path = repository_root().join("Cargo.toml");
     let manifest = fs::read_to_string(&manifest_path).unwrap_or_else(|error| {

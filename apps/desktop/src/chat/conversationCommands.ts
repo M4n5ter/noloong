@@ -4,6 +4,7 @@ export const CONVERSATION_COMMANDS = [
   "focus-composer",
   "send-message",
   "stop-response",
+  "clear-composer",
 ] as const;
 
 export type ConversationCommand = (typeof CONVERSATION_COMMANDS)[number];
@@ -14,12 +15,14 @@ export type ConversationMenuState = {
   canFocusComposer: boolean;
   canSendMessage: boolean;
   canStopResponse: boolean;
+  canClearComposer: boolean;
 };
 
 export const DISABLED_CONVERSATION_MENU_STATE: ConversationMenuState = {
   canFocusComposer: false,
   canSendMessage: false,
   canStopResponse: false,
+  canClearComposer: false,
 };
 
 export function conversationMenuStateForChatSurface({
