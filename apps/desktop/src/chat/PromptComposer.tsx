@@ -46,6 +46,8 @@ export function PromptComposer({
   const canExpand = expanded || needsExpandedComposer(text);
   const previewingCompactOverflow = canExpand && !expanded;
   const compactPreview = expanded ? i18n.t("composer.editingDraft") : firstPreviewLine(text);
+  const expandLabel = i18n.t(expanded ? "composer.collapse" : "composer.expand");
+  const sendLabel = canAbort ? i18n.t("run.stop") : i18n.t("composer.send");
 
   useEffect(() => {
     disabledRef.current = disabled;
@@ -277,13 +279,14 @@ export function PromptComposer({
               <button
                 aria-controls={editorId}
                 aria-expanded={expanded}
-                aria-label={i18n.t(expanded ? "composer.collapse" : "composer.expand")}
+                aria-label={expandLabel}
                 className="composer-expand"
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
                   setExpanded((current) => !current);
                 }}
+                title={expandLabel}
                 type="button"
               >
                 {expanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
@@ -300,12 +303,13 @@ export function PromptComposer({
               event.stopPropagation();
               void pickFiles();
             }}
+            title={i18n.t("composer.attach")}
             type="button"
           >
             <Paperclip size={16} />
           </button>
           <button
-            aria-label={canAbort ? i18n.t("run.stop") : i18n.t("composer.send")}
+            aria-label={sendLabel}
             className={canAbort ? "send-button stop-run-button" : "send-button"}
             disabled={!canSend && !canAbort}
             onClick={
@@ -317,6 +321,7 @@ export function PromptComposer({
                   }
                 : undefined
             }
+            title={sendLabel}
             type={canAbort ? "button" : "submit"}
           >
             {canAbort ? <Square size={14} /> : <Send size={16} />}

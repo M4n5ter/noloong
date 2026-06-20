@@ -50,6 +50,54 @@ describe("PromptComposer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("gives icon-only composer controls native hover help", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Attach files" })).toHaveAttribute(
+      "title",
+      "Attach files",
+    );
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveAttribute(
+      "title",
+      "Send message",
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
+    const expand = await screen.findByRole("button", { name: "Expand composer" });
+    expect(expand).toHaveAttribute("title", "Expand composer");
+
+    await user.click(expand);
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toHaveAttribute(
+      "title",
+      "Collapse composer",
+    );
+
+    rerender(
+      <PromptComposer
+        disabled
+        i18n={createI18n("en")}
+        onAbortRun={vi.fn().mockResolvedValue(undefined)}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Stop" })).toHaveAttribute("title", "Stop");
+  });
+
   it("reports command availability without knowing about the native menu", async () => {
     const user = userEvent.setup();
     const onCommandAvailabilityChange = vi.fn();
