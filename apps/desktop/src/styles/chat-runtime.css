@@ -544,17 +544,17 @@
 }
 
 .approval-card {
-  width: min(600px, 100%);
-  gap: 13px;
-  padding: 18px;
+  width: min(580px, 100%);
+  gap: 12px;
+  padding: 17px 18px;
   border-color: rgba(229, 212, 179, 0.16);
-  border-radius: 22px;
+  border-radius: 20px;
   background:
-    linear-gradient(135deg, rgba(229, 212, 179, 0.07), rgba(168, 196, 220, 0.018)),
-    rgba(18, 20, 16, 0.7);
+    linear-gradient(135deg, rgba(229, 212, 179, 0.052), rgba(168, 196, 220, 0.014)),
+    rgba(18, 20, 16, 0.66);
   box-shadow:
     inset 0 1px 0 rgba(243, 239, 228, 0.04),
-    0 20px 60px rgba(0, 0, 0, 0.18);
+    0 18px 48px rgba(0, 0, 0, 0.15);
 }
 
 .approval-head {
@@ -601,7 +601,7 @@
 .approval-command-block {
   display: grid;
   min-width: 0;
-  gap: 7px;
+  gap: 6px;
 }
 
 .approval-command-block span {
@@ -612,10 +612,10 @@
 
 .approval-command-block code {
   margin: 0;
-  padding: 9px 11px;
-  border: 1px solid rgba(243, 239, 228, 0.075);
-  border-radius: 13px;
-  background: rgba(243, 239, 228, 0.042);
+  padding: 8px 10px;
+  border: 1px solid rgba(243, 239, 228, 0.065);
+  border-radius: 12px;
+  background: rgba(243, 239, 228, 0.034);
   color: rgba(243, 239, 228, 0.76);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 13px;
@@ -633,8 +633,10 @@
 .approval-impact {
   display: grid;
   min-width: 0;
-  gap: 8px;
-  margin: 0;
+  gap: 0;
+  margin: 1px 0 0;
+  border-top: 1px solid rgba(243, 239, 228, 0.075);
+  border-bottom: 1px solid rgba(243, 239, 228, 0.055);
   color: rgba(243, 239, 228, 0.7);
   font-size: 13px;
   line-height: 1.45;
@@ -642,14 +644,15 @@
 
 .approval-impact div {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 14px;
   min-width: 0;
   align-items: start;
-  padding: 9px 10px;
-  border: 1px solid rgba(243, 239, 228, 0.075);
-  border-radius: 14px;
-  background: rgba(243, 239, 228, 0.032);
+  padding: 9px 1px;
+}
+
+.approval-impact div + div {
+  border-top: 1px solid rgba(243, 239, 228, 0.055);
 }
 
 .approval-impact dt {
@@ -677,7 +680,8 @@
   display: grid;
   gap: 4px;
   margin: 0;
-  padding-left: 16px;
+  padding: 0;
+  list-style: none;
 }
 
 .approval-file-list li,

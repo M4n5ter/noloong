@@ -139,6 +139,7 @@ describe("approval decisions", () => {
     expect(within(card).getByText("pwd && ls -la")).toBeVisible();
     expect(within(card).getByText("Affected files")).toBeVisible();
     expect(within(card).getByText("apps/desktop/src/chat/TranscriptComponents.tsx")).toBeVisible();
+    expect(within(card).getAllByRole("list")).toHaveLength(2);
     expect(within(card).getByText("Can run a local command.")).toBeVisible();
     expect(within(card).getByText("Runs inside the active project shell.")).toBeVisible();
     expect(within(card).getByText("Uses the selected working folder.")).toBeVisible();

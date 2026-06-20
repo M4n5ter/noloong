@@ -459,7 +459,7 @@ function ApprovalCard({
           <div>
             <dt>{i18n.t("approval.affectedFiles")}</dt>
             <dd>
-              <ul className="approval-file-list">
+              <ul className="approval-file-list" role="list">
                 {decision.targetPaths.map((path) => (
                   <li key={path}>
                     <code>{path}</code>
@@ -473,7 +473,7 @@ function ApprovalCard({
           <div>
             <dt>{i18n.t("approval.permissions")}</dt>
             <dd>
-              <ul className="approval-permission-list">
+              <ul className="approval-permission-list" role="list">
                 {decision.permissions.map((permission) => (
                   <li key={permission.id}>
                     <span>{permission.label}</span>
