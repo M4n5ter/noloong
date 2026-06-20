@@ -2,7 +2,7 @@ import {
   connectInteractionDisplayStream as connectDefaultInteractionDisplayStream,
   createInteractionClient as createDefaultInteractionClient,
 } from "../interaction/client";
-import { MessageCircle, Plus, Settings, X } from "lucide-react";
+import { Plus, Settings, X } from "lucide-react";
 import type { AppLaunchOptions } from "../generated/contracts";
 import type { AppI18n } from "../i18n";
 import { CenteredStatus } from "./CenteredStatus";
@@ -251,31 +251,30 @@ function InteractionCanvas({
           role="dialog"
           tabIndex={-1}
         >
-          <button
-            aria-label={i18n.t("sessionsPanel.close")}
-            className="sessions-panel-close"
-            onClick={closeSessionsPanel}
-            ref={sessionsPanelCloseRef}
-            title={i18n.t("sessionsPanel.close")}
-            type="button"
-          >
-            <X size={15} />
-          </button>
-          <div className="sessions-panel-copy">
-            <MessageCircle size={20} />
+          <div className="sessions-panel-header">
             <h2 data-render-heading>{i18n.t("sessionsPanel.title")}</h2>
-            <p>{i18n.t("sessionsPanel.subtitle")}</p>
-          </div>
-          <div className="sessions-panel-actions">
-            <button
-              className="text-button primary icon-text"
-              disabled={runtime.interaction.status !== "ready"}
-              onClick={() => void runtime.createSession().then(closeSessionsPanel)}
-              type="button"
-            >
-              <Plus size={16} />
-              <span>{i18n.t("sessions.create")}</span>
-            </button>
+            <div className="sessions-panel-tools">
+              <button
+                aria-label={i18n.t("sessions.create")}
+                className="sessions-panel-tool"
+                disabled={runtime.interaction.status !== "ready"}
+                onClick={() => void runtime.createSession().then(closeSessionsPanel)}
+                title={i18n.t("sessions.create")}
+                type="button"
+              >
+                <Plus size={16} />
+              </button>
+              <button
+                aria-label={i18n.t("sessionsPanel.close")}
+                className="sessions-panel-tool"
+                onClick={closeSessionsPanel}
+                ref={sessionsPanelCloseRef}
+                title={i18n.t("sessionsPanel.close")}
+                type="button"
+              >
+                <X size={15} />
+              </button>
+            </div>
           </div>
           <div className="sessions-panel-stack">
             <SessionList
