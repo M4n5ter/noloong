@@ -116,8 +116,20 @@ export type I18nKey =
   | "settings.reasoningSummary"
   | "settings.storage"
   | "settings.eventStore"
+  | "settings.eventStoreJson"
   | "settings.compaction"
+  | "settings.compactionJson"
   | "settings.registryStore"
+  | "settings.registryStoreJson"
+  | "settings.storageDefault"
+  | "settings.storageMemory"
+  | "settings.storageSqlite"
+  | "settings.storagePostgres"
+  | "settings.storageObjectMemory"
+  | "settings.storageObjectFs"
+  | "settings.compactionAuto"
+  | "settings.compactionNone"
+  | "settings.compactionOpenaiResponses"
   | "settings.addPlugin"
   | "settings.deletePlugin"
   | "settings.noPlugins"
@@ -243,8 +255,20 @@ const messages = {
     "settings.reasoningSummary": "Summary",
     "settings.storage": "Storage",
     "settings.eventStore": "Event store",
+    "settings.eventStoreJson": "Event store JSON",
     "settings.compaction": "Compaction",
+    "settings.compactionJson": "Compaction JSON",
     "settings.registryStore": "Registry store",
+    "settings.registryStoreJson": "Registry store JSON",
+    "settings.storageDefault": "Default state database",
+    "settings.storageMemory": "Memory",
+    "settings.storageSqlite": "SQLite",
+    "settings.storagePostgres": "Postgres",
+    "settings.storageObjectMemory": "Object memory",
+    "settings.storageObjectFs": "Object filesystem",
+    "settings.compactionAuto": "Automatic",
+    "settings.compactionNone": "Disabled",
+    "settings.compactionOpenaiResponses": "OpenAI Responses",
     "settings.addPlugin": "Add plugin",
     "settings.deletePlugin": "Delete plugin",
     "settings.noPlugins": "No plugins in this profile.",
@@ -367,8 +391,20 @@ const messages = {
     "settings.reasoningSummary": "推理摘要",
     "settings.storage": "存储",
     "settings.eventStore": "事件存储",
+    "settings.eventStoreJson": "事件存储 JSON",
     "settings.compaction": "上下文压缩",
+    "settings.compactionJson": "上下文压缩 JSON",
     "settings.registryStore": "Registry 存储",
+    "settings.registryStoreJson": "Registry 存储 JSON",
+    "settings.storageDefault": "默认状态数据库",
+    "settings.storageMemory": "内存",
+    "settings.storageSqlite": "SQLite",
+    "settings.storagePostgres": "Postgres",
+    "settings.storageObjectMemory": "对象内存",
+    "settings.storageObjectFs": "对象文件系统",
+    "settings.compactionAuto": "自动",
+    "settings.compactionNone": "关闭",
+    "settings.compactionOpenaiResponses": "OpenAI Responses",
     "settings.addPlugin": "新增插件",
     "settings.deletePlugin": "删除插件",
     "settings.noPlugins": "当前配置档没有插件。",

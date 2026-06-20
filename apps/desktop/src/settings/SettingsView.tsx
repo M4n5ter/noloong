@@ -19,9 +19,6 @@ import type {
   AppProfileConfigDocument,
   AppRuntimeRestartResult,
   HostProfileConfig,
-  ProfileCompactionConfig,
-  ProfileEventStoreConfig,
-  RegistryStoreConfig,
 } from "../generated/contracts";
 import { isTauriRuntime } from "../devFallback";
 import type { AppI18n } from "../i18n";
@@ -32,7 +29,7 @@ import {
   saveProfileConfig,
   validateProfileConfig,
 } from "./api";
-import { JsonListEditor, JsonObjectEditor } from "./JsonEditors";
+import { JsonListEditor } from "./JsonEditors";
 import { JsoncEditor } from "./JsoncEditor";
 import {
   addProfile,
@@ -50,11 +47,10 @@ import {
   setSaving,
   settingsDraftFromDocument,
   type SettingsDraftState,
-  updateRegistryStore,
   updateSelectedProfile,
-  updateSelectedProfileStorage,
   upsertSelectedPlugin,
 } from "./store";
+import { StoragePane } from "./StoragePane";
 
 type SettingsNode =
   | "profile"
@@ -592,64 +588,6 @@ function reasoningEffortOptions(providerType: HostProfileConfig["profiles"][numb
     return ["low", "medium", "high", "xhigh"];
   }
   return ["minimal", "low", "medium", "high", "xhigh"];
-}
-
-function StoragePane({
-  draft,
-  i18n,
-  onJsonFieldErrorChange,
-  updateDraft,
-}: {
-  draft: SettingsDraftState;
-  i18n: AppI18n;
-  onJsonFieldErrorChange: (key: string, error: string | null) => void;
-  updateDraft: (update: (draft: SettingsDraftState) => SettingsDraftState) => void;
-}) {
-  const profile = selectedProfile(draft);
-  if (!profile) {
-    return null;
-  }
-  const currentCompaction = (profile.compaction ?? { type: "auto" }) satisfies ProfileCompactionConfig;
-  return (
-    <div className="lens-form">
-      <JsonObjectEditor
-        errorKey="storage.eventStore"
-        label={i18n.t("settings.eventStore")}
-        value={profile.eventStore ?? null}
-        fallback={{ type: "memory" } satisfies ProfileEventStoreConfig}
-        onChange={(value) =>
-          updateDraft((current) =>
-            updateSelectedProfileStorage(current, value, currentCompaction),
-          )
-        }
-        onParseErrorChange={onJsonFieldErrorChange}
-      />
-      <JsonObjectEditor
-        errorKey="storage.compaction"
-        label={i18n.t("settings.compaction")}
-        value={currentCompaction}
-        fallback={{ type: "auto" } satisfies ProfileCompactionConfig}
-        onChange={(value) =>
-          updateDraft((current) =>
-            updateSelectedProfileStorage(
-              current,
-              profile.eventStore ?? null,
-              value ?? currentCompaction,
-            ),
-          )
-        }
-        onParseErrorChange={onJsonFieldErrorChange}
-      />
-      <JsonObjectEditor
-        errorKey="storage.registryStore"
-        label={i18n.t("settings.registryStore")}
-        value={draft.config?.registryStore ?? null}
-        fallback={{ type: "memory" } satisfies RegistryStoreConfig}
-        onChange={(value) => updateDraft((current) => updateRegistryStore(current, value))}
-        onParseErrorChange={onJsonFieldErrorChange}
-      />
-    </div>
-  );
 }
 
 function PluginsPane({

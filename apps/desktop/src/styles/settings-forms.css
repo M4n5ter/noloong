@@ -75,7 +75,8 @@
 }
 
 .lens-form > label:not(.check-row),
-.subsection > label:not(.check-row) {
+.subsection > label:not(.check-row),
+.lens-form > .json-field {
   min-height: 48px;
   grid-template-columns:
     minmax(132px, var(--settings-label-width))
@@ -94,7 +95,8 @@
   align-items: start;
 }
 
-.lens-form > label:has(textarea) > span {
+.lens-form > label:has(textarea) > span,
+.lens-form > .json-field > span {
   padding-top: 10px;
 }
 
@@ -226,14 +228,16 @@
 
 @media (max-width: 760px) {
   .lens-form > label:not(.check-row),
-  .subsection > label:not(.check-row) {
+  .subsection > label:not(.check-row),
+  .lens-form > .json-field {
     grid-template-columns: 1fr;
     align-items: stretch;
     gap: 7px;
     padding: 10px 0;
   }
 
-  .lens-form > label:has(textarea) > span {
+  .lens-form > label:has(textarea) > span,
+  .lens-form > .json-field > span {
     padding-top: 0;
   }
 

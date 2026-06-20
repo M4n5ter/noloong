@@ -239,12 +239,18 @@ export function updateRegistryStore(
   return replaceConfig(state, { ...state.config, registryStore });
 }
 
-export function updateSelectedProfileStorage(
+export function updateSelectedProfileEventStore(
   state: SettingsDraftState,
   eventStore: ProfileEventStoreConfig | null,
+): SettingsDraftState {
+  return updateSelectedProfileObject(state, (profile) => ({ ...profile, eventStore }));
+}
+
+export function updateSelectedProfileCompaction(
+  state: SettingsDraftState,
   compaction: ProfileCompactionConfig,
 ): SettingsDraftState {
-  return updateSelectedProfileObject(state, (profile) => ({ ...profile, eventStore, compaction }));
+  return updateSelectedProfileObject(state, (profile) => ({ ...profile, compaction }));
 }
 
 export function upsertSelectedPlugin(
@@ -292,12 +298,24 @@ function patchProfile(
   patch: ProfileFormPatch,
 ): RuntimeProfileConfig {
   const provider = patchProvider(profile.provider, patch);
+  const compaction = normalizeCompactionForProvider(profile.compaction ?? { type: "auto" }, provider);
   return {
     ...profile,
     displayName: patch.displayName ?? profile.displayName,
     description: patch.description ?? profile.description,
     provider,
+    compaction,
   };
+}
+
+function normalizeCompactionForProvider(
+  compaction: ProfileCompactionConfig,
+  provider: BuiltInProviderConfig,
+): ProfileCompactionConfig {
+  if (provider.type === "chatgpt_responses" || compaction.type !== "openai_responses") {
+    return compaction;
+  }
+  return { type: "auto" };
 }
 
 function patchProvider(

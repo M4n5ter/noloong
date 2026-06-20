@@ -139,10 +139,11 @@ describe("SettingsView", () => {
     await screen.findByRole("heading", { name: "Provider" });
     await user.click(screen.getByRole("button", { name: "Storage" }));
 
-    const eventStore = await screen.findByRole("textbox", { name: "Event store" });
+    await user.selectOptions(await screen.findByLabelText("Event store"), "sqlite");
+    const eventStore = await screen.findByRole("textbox", { name: "Event store JSON" });
     await user.clear(eventStore);
     await user.click(eventStore);
-    await user.paste('{ "type": "memory", "scope": "session" }');
+    await user.paste('{ "type": "sqlite", "databaseUrl": "sqlite://noloong.db" }');
 
     expect(eventStore).toHaveFocus();
     expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
@@ -163,10 +164,11 @@ describe("SettingsView", () => {
     await screen.findByRole("heading", { name: "Provider" });
     await user.click(screen.getByRole("button", { name: "Storage" }));
 
-    const eventStore = await screen.findByRole("textbox", { name: "Event store" });
+    await user.selectOptions(await screen.findByLabelText("Event store"), "sqlite");
+    const eventStore = await screen.findByRole("textbox", { name: "Event store JSON" });
     await user.clear(eventStore);
     await user.click(eventStore);
-    await user.paste('{ "type": "memory", "scope": "session" }');
+    await user.paste('{ "type": "sqlite", "databaseUrl": "sqlite://noloong.db" }');
     expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
 
     await user.clear(eventStore);
@@ -295,10 +297,12 @@ describe("SettingsView", () => {
     await screen.findByRole("heading", { name: "Provider" });
     await user.click(screen.getByRole("button", { name: "Storage" }));
 
-    const eventStore = await screen.findByRole("textbox", { name: "Event store" });
+    const eventStoreType = await screen.findByLabelText("Event store");
+    await user.selectOptions(eventStoreType, "sqlite");
+    const eventStore = await screen.findByRole("textbox", { name: "Event store JSON" });
     await user.clear(eventStore);
     await user.click(eventStore);
-    await user.paste('{ "type": "memory", "scope": "session" }');
+    await user.paste('{ "type": "sqlite", "databaseUrl": "sqlite://noloong.db" }');
     await user.clear(eventStore);
     await user.paste("{");
 
@@ -307,7 +311,106 @@ describe("SettingsView", () => {
 
     expect(screen.queryByText("Fix the invalid JSON field before saving.")).not.toBeInTheDocument();
     expect(screen.queryByText(/SyntaxError/)).not.toBeInTheDocument();
-    expect(eventStore).toHaveValue("{\n  \"type\": \"memory\"\n}");
+    expect(eventStoreType).toHaveValue("default");
+    expect(screen.queryByRole("textbox", { name: "Event store JSON" })).not.toBeInTheDocument();
+  });
+
+  it("keeps simple storage settings out of JSON editors by default", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+
+    expect(await screen.findByLabelText("Event store")).toHaveValue("default");
+    expect(screen.getByLabelText("Compaction")).toHaveValue("auto");
+    expect(screen.getByLabelText("Registry store")).toHaveValue("default");
+    expect(screen.queryByRole("textbox", { name: /JSON/ })).not.toBeInTheDocument();
+  });
+
+  it("uses runnable defaults when a storage selector reveals expert JSON", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+    await user.selectOptions(await screen.findByLabelText("Event store"), "sqlite");
+
+    expect(await screen.findByRole("textbox", { name: "Event store JSON" })).toHaveValue(
+      '{\n  "type": "sqlite",\n  "databaseUrl": "sqlite:target/noloong-events.sqlite",\n  "migrateOnConnect": true\n}',
+    );
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
+  });
+
+  it("only offers OpenAI Responses compaction for ChatGPT Responses profiles", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    const providerSelect = screen
+      .getAllByLabelText("Provider")
+      .find((element): element is HTMLSelectElement => element instanceof HTMLSelectElement);
+    if (!providerSelect) {
+      throw new Error("Expected a provider select");
+    }
+    await user.selectOptions(providerSelect, "anthropic_messages");
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+
+    const options = Array.from((screen.getByLabelText("Compaction") as HTMLSelectElement).options).map(
+      (option) => option.value,
+    );
+    expect(options).toEqual(["auto", "none"]);
+  });
+
+  it("resets OpenAI Responses compaction when switching to an unsupported provider", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsView
+        i18n={createI18n("en")}
+        launchOptions={{}}
+        onRuntimeRestart={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Provider" });
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+    await user.selectOptions(screen.getByLabelText("Compaction"), "openai_responses");
+
+    await user.click(screen.getByRole("button", { name: "Provider" }));
+    const providerSelect = screen
+      .getAllByLabelText("Provider")
+      .find((element): element is HTMLSelectElement => element instanceof HTMLSelectElement);
+    if (!providerSelect) {
+      throw new Error("Expected a provider select");
+    }
+    await user.selectOptions(providerSelect, "anthropic_messages");
+
+    await user.click(screen.getByRole("button", { name: "Storage" }));
+    const compaction = screen.getByLabelText("Compaction") as HTMLSelectElement;
+    expect(compaction).toHaveValue("auto");
+    expect(Array.from(compaction.options).map((option) => option.value)).toEqual(["auto", "none"]);
   });
 
   it("restores the last viewed settings pane", async () => {
