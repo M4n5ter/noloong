@@ -26,62 +26,39 @@
   place-items: center;
 }
 
-.conversation-surface.runtime-unavailable .surface-status-pill {
-  position: static;
-  display: grid;
-  max-width: min(360px, 100%);
-  justify-items: center;
-  gap: 12px;
-  padding: 18px;
-  border-radius: 24px;
-  text-align: center;
-}
-
 .chat-surface.sessions-panel-open .conversation-surface {
   opacity: 0;
   pointer-events: none;
 }
 
-.surface-status-pill {
-  position: absolute;
-  z-index: 3;
-  top: 186px;
-  left: clamp(154px, 14.6vw, 210px);
-  display: flex;
-  max-width: 400px;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px 8px 16px;
-  border: 1px solid rgba(229, 212, 179, 0.18);
-  border-radius: 999px;
-  background: rgba(23, 25, 20, 0.72);
-  color: rgba(243, 239, 228, 0.48);
-  font-size: 12px;
+.runtime-recovery-panel {
+  display: grid;
+  width: min(380px, calc(100% - 48px));
+  justify-items: center;
+  gap: 14px;
+  padding: 0;
+  color: rgba(243, 239, 228, 0.58);
+  text-align: center;
 }
 
-.surface-status-pill h1 {
+.runtime-recovery-copy {
+  display: grid;
+  gap: 7px;
+}
+
+.runtime-recovery-panel h1 {
   margin: 0;
-  color: #e5d4b3;
-  font-size: 12px;
-  line-height: 1.2;
+  color: rgba(243, 239, 228, 0.78);
+  font-size: 17px;
+  font-weight: 590;
+  line-height: 1.25;
 }
 
-.surface-status-pill span {
-  overflow: hidden;
-  max-width: 112px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.conversation-surface.runtime-unavailable .surface-status-pill span {
-  max-width: none;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
-}
-
-.conversation-surface.runtime-unavailable .surface-status-pill h1 {
-  font-size: 15px;
+.runtime-recovery-panel p {
+  margin: 0;
+  color: rgba(243, 239, 228, 0.48);
+  font-size: 13px;
+  line-height: 1.42;
 }
 
 .conversation {

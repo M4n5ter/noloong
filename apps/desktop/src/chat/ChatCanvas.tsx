@@ -231,7 +231,11 @@ function InteractionCanvas({
             onToggleReasoning={runtime.toggleReasoning}
           />
         ) : (
-          <SurfaceStatus i18n={i18n} interaction={runtime.interaction} onOpenSettings={onOpenSettings} />
+          <RuntimeRecoveryPanel
+            i18n={i18n}
+            interaction={runtime.interaction}
+            onOpenSettings={onOpenSettings}
+          />
         )}
       </section>
       {sessionsPanelVisible ? (
@@ -288,7 +292,7 @@ function isMainDocumentMenuTargetAvailable(): boolean {
   return document.visibilityState !== "hidden" && document.hasFocus();
 }
 
-function SurfaceStatus({
+function RuntimeRecoveryPanel({
   i18n,
   interaction,
   onOpenSettings,
@@ -305,9 +309,11 @@ function SurfaceStatus({
         : { title: i18n.t("chat.connectingTitle"), detail: i18n.t("chat.connectingDetail") };
 
   return (
-    <section aria-live="polite" className="surface-status-pill" role="status">
-      <h1>{copy.title}</h1>
-      <span>{copy.detail}</span>
+    <section aria-live="polite" className="runtime-recovery-panel" role="status">
+      <div className="runtime-recovery-copy">
+        <h1>{copy.title}</h1>
+        <p>{copy.detail}</p>
+      </div>
       {interaction.status === "disconnected" ? (
         <button className="text-button subtle icon-text" onClick={onOpenSettings} type="button">
           <Settings size={14} />
