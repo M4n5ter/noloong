@@ -40,7 +40,7 @@ const CONVERSATION_MENU_ENTRIES: [ConversationMenuEntry; 5] = [
     }),
     ConversationMenuEntry::Command(ConversationMenuCommandSpec {
         id: STOP_RESPONSE_MENU_ID,
-        title: "Stop Response",
+        title: "Stop Run",
         accelerator: Some("Esc"),
         initially_enabled: false,
     }),
@@ -434,7 +434,7 @@ mod tests {
                 }),
                 ConversationMenuEntry::Command(ConversationMenuCommandSpec {
                     id: STOP_RESPONSE_MENU_ID,
-                    title: "Stop Response",
+                    title: "Stop Run",
                     accelerator: Some("Esc"),
                     initially_enabled: false,
                 }),
