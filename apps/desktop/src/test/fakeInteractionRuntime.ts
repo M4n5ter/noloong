@@ -34,6 +34,7 @@ export class FakeInteractionRuntime {
   private displayHandlers: InteractionDisplayStreamHandlers | null = null;
   private createSessionFailure: Error | null = null;
   private promptDeferred: Deferred<AppInteractionSessionDescriptor> | null = null;
+  private approvalResolveDeferredQueue: Deferred<AppInteractionSessionDescriptor>[] = [];
   private queuedGetSessionResponses: AppInteractionSessionDescriptor[] = [];
 
   constructor(session: AppInteractionSessionDescriptor = emptySession()) {
@@ -99,6 +100,10 @@ export class FakeInteractionRuntime {
       },
       resolveApproval: async (request: AppApprovalResolveRequest) => {
         this.approvalResolveRequests.push(request);
+        const deferred = this.approvalResolveDeferredQueue.shift();
+        if (deferred) {
+          return deferred.promise;
+        }
         return clone(this.requireSession(request.sessionId));
       },
       close: () => {
@@ -148,6 +153,21 @@ export class FakeInteractionRuntime {
     this.promptDeferred = null;
   }
 
+  deferNextApprovalResolve(): PendingApprovalResolve {
+    const deferred = createDeferred<AppInteractionSessionDescriptor>();
+    this.approvalResolveDeferredQueue.push(deferred);
+    let resolved = false;
+    return {
+      resolve: (session: AppInteractionSessionDescriptor = this.requireSession("session-1")) => {
+        if (resolved) {
+          throw new Error("approval resolve already completed");
+        }
+        resolved = true;
+        deferred.resolve(clone(session));
+      },
+    };
+  }
+
   private requireSession(sessionId: string): AppInteractionSessionDescriptor {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -188,6 +208,10 @@ export function completedSessionWithText(text: string): AppInteractionSessionDes
 type Deferred<T> = {
   promise: Promise<T>;
   resolve(value: T): void;
+};
+
+type PendingApprovalResolve = {
+  resolve(session?: AppInteractionSessionDescriptor): void;
 };
 
 function createDeferred<T>(): Deferred<T> {

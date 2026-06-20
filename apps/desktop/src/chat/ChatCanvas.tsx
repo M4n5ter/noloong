@@ -149,6 +149,7 @@ function InteractionCanvas({
   useApprovalQuickCancel({
     conversation: runtime.interaction.status === "ready" ? runtime.interaction.conversation : null,
     disabled: foregroundContextOpen,
+    resolvingApprovalIds: runtime.resolvingApprovalIds,
     onResolveApproval: runtime.resolveApproval,
   });
 
@@ -227,6 +228,7 @@ function InteractionCanvas({
             onOpenSettings={onOpenSettings}
             onOpenSessions={openSessionsPanel}
             onResolveApproval={runtime.resolveApproval}
+            resolvingApprovalIds={runtime.resolvingApprovalIds}
             onSubmitPrompt={runtime.submitPrompt}
             onToggleReasoning={runtime.toggleReasoning}
           />

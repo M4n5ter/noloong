@@ -156,6 +156,44 @@ describe("approval decisions", () => {
     );
   });
 
+  it("prevents duplicate approval decisions while the resolution is pending", async () => {
+    const runtime = new FakeInteractionRuntime(emptySession());
+    const user = userEvent.setup();
+    const pendingApproval = runtime.deferNextApprovalResolve();
+
+    render(<App dependencies={dependenciesFor(runtime)} />);
+
+    await composerReadyForInput();
+    emitApprovalRequest(runtime, "approval-pending");
+
+    const card = await screen.findByRole("article", { name: "Run a local command?" });
+    const confirm = within(card).getByRole("button", { name: "Run Local Command" });
+    const cancel = within(card).getByRole("button", { name: "Cancel" });
+
+    await user.click(confirm);
+
+    expect(card).toHaveAttribute("aria-busy", "true");
+    expect(confirm).toBeDisabled();
+    expect(cancel).toBeDisabled();
+
+    await user.keyboard("{Escape}");
+
+    expect(runtime.approvalResolveRequests).toEqual([
+      expect.objectContaining({
+        approvalId: "approval-pending",
+        decision: expect.objectContaining({ outcome: "allow" }),
+        sessionId: "session-1",
+      }),
+    ]);
+    expect(runtime.abortRequests).toHaveLength(0);
+
+    act(() => {
+      pendingApproval.resolve();
+    });
+
+    await waitFor(() => expect(within(card).getByText("Approved")).toBeVisible());
+  });
+
   it("localizes approval decision controls in Chinese", async () => {
     const runtime = new FakeInteractionRuntime(emptySession());
 

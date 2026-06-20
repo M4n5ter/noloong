@@ -732,6 +732,13 @@
   color: rgba(243, 239, 228, 0.74);
 }
 
+.approval-actions button:disabled {
+  border-color: rgba(243, 239, 228, 0.08);
+  background: rgba(23, 25, 20, 0.34);
+  color: rgba(243, 239, 228, 0.38);
+  cursor: default;
+}
+
 .sessions-panel {
   position: absolute;
   z-index: 8;

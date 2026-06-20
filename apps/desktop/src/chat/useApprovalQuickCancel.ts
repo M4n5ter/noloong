@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import type { AppToolPermissionOutcome } from "../generated/contracts";
 import {
   pendingApprovalIdFromConversation,
@@ -8,16 +8,16 @@ import {
 type ApprovalQuickCancelOptions = {
   conversation: ConversationState | null;
   disabled: boolean;
+  resolvingApprovalIds: ReadonlySet<string>;
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
 };
 
 export function useApprovalQuickCancel({
   conversation,
   disabled,
+  resolvingApprovalIds,
   onResolveApproval,
 }: ApprovalQuickCancelOptions): void {
-  const resolvingApprovalRef = useRef<string | null>(null);
-
   useEffect(() => {
     if (disabled || !conversation) {
       return;
@@ -33,20 +33,15 @@ export function useApprovalQuickCancel({
       if (event.key !== "Escape" && !(event.metaKey && event.key === ".")) {
         return;
       }
-      if (resolvingApprovalRef.current === approvalId) {
-        return;
-      }
       event.preventDefault();
       event.stopImmediatePropagation();
-      resolvingApprovalRef.current = approvalId;
-      void onResolveApproval(approvalId, "deny").finally(() => {
-        if (resolvingApprovalRef.current === approvalId) {
-          resolvingApprovalRef.current = null;
-        }
-      });
+      if (resolvingApprovalIds.has(approvalId)) {
+        return;
+      }
+      void onResolveApproval(approvalId, "deny");
     }
 
     window.addEventListener("keydown", handleApprovalQuickCancel, { capture: true });
     return () => window.removeEventListener("keydown", handleApprovalQuickCancel, { capture: true });
-  }, [conversation, disabled, onResolveApproval]);
+  }, [conversation, disabled, onResolveApproval, resolvingApprovalIds]);
 }

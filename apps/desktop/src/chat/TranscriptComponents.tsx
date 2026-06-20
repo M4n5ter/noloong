@@ -75,6 +75,7 @@ export function TranscriptView({
   onOpenSettings,
   onOpenSessions,
   onResolveApproval,
+  resolvingApprovalIds,
   onSubmitPrompt,
   onToggleReasoning,
 }: {
@@ -86,6 +87,7 @@ export function TranscriptView({
   onOpenSettings: () => void;
   onOpenSessions: () => void;
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
+  resolvingApprovalIds: ReadonlySet<string>;
   onSubmitPrompt: (submission: PromptSubmission) => Promise<void>;
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
 }) {
@@ -235,6 +237,7 @@ export function TranscriptView({
                 key={timelineItemKey(item)}
                 onResolveApproval={onResolveApproval}
                 onToggleReasoning={onToggleReasoning}
+                resolvingApprovalIds={resolvingApprovalIds}
                 subordinateToReasoning={isSubordinateActivity(item, timeline, index)}
               />
             ))
@@ -261,12 +264,14 @@ function TimelineItemView({
   item,
   onResolveApproval,
   onToggleReasoning,
+  resolvingApprovalIds,
   subordinateToReasoning = false,
 }: {
   i18n: AppI18n;
   item: TimelineItem;
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
   onToggleReasoning: (thoughtId: string, expanded: boolean) => void;
+  resolvingApprovalIds: ReadonlySet<string>;
   subordinateToReasoning?: boolean;
 }) {
   switch (item.kind) {
@@ -285,7 +290,14 @@ function TimelineItemView({
         />
       );
     case "approval":
-      return <ApprovalCard approval={item} i18n={i18n} onResolveApproval={onResolveApproval} />;
+      return (
+        <ApprovalCard
+          approval={item}
+          i18n={i18n}
+          onResolveApproval={onResolveApproval}
+          resolving={resolvingApprovalIds.has(item.approvalId)}
+        />
+      );
   }
 }
 
@@ -398,10 +410,12 @@ function ApprovalCard({
   approval,
   i18n,
   onResolveApproval,
+  resolving,
 }: {
   approval: ApprovalTimelineItem;
   i18n: AppI18n;
   onResolveApproval: (approvalId: string, outcome: AppToolPermissionOutcome) => Promise<void>;
+  resolving: boolean;
 }) {
   const pending = approval.status === "pending";
   const decision = approvalDecisionViewModel(approval, i18n);
@@ -410,6 +424,7 @@ function ApprovalCard({
 
   return (
     <article
+      aria-busy={resolving}
       aria-labelledby={titleId}
       aria-describedby={summaryId}
       className={`activity-card approval-card approval-card-${approval.status}`}
@@ -460,6 +475,7 @@ function ApprovalCard({
         <div className="approval-actions">
           <button
             className="approval-cancel"
+            disabled={resolving}
             onClick={() => void onResolveApproval(approval.approvalId, "deny")}
             type="button"
           >
@@ -467,6 +483,7 @@ function ApprovalCard({
           </button>
           <button
             className="approval-confirm"
+            disabled={resolving}
             onClick={() => void onResolveApproval(approval.approvalId, "allow")}
             type="button"
           >

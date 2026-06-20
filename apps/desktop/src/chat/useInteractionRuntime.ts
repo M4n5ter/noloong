@@ -31,6 +31,7 @@ type UseInteractionRuntimeOptions = {
 
 export type InteractionRuntime = {
   interaction: InteractionState;
+  resolvingApprovalIds: ReadonlySet<string>;
   createSession(): Promise<string | null>;
   selectSession(sessionId: string): Promise<void>;
   submitPrompt(submission: PromptSubmission): Promise<void>;
@@ -56,6 +57,10 @@ export function useInteractionRuntime({
   const selectedSessionIdRef = useRef<string | null>(null);
   const subscriptionPromisesRef = useRef(new Map<string, Promise<void>>());
   const terminalRefreshTimersRef = useRef(new Map<string, number[]>());
+  const resolvingApprovalIdsRef = useRef(new Set<string>());
+  const [resolvingApprovalIds, setResolvingApprovalIds] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
 
   useEffect(() => {
     const ready = interaction.status === "ready" ? interaction : null;
@@ -535,6 +540,9 @@ export function useInteractionRuntime({
 
   const resolveApproval = useCallback(
     async (approvalId: string, outcome: AppToolPermissionOutcome) => {
+      if (resolvingApprovalIdsRef.current.has(approvalId)) {
+        return;
+      }
       const ready = readyRef.current;
       if (!ready?.selectedSessionId) {
         return;
@@ -548,6 +556,8 @@ export function useInteractionRuntime({
         );
         return;
       }
+      resolvingApprovalIdsRef.current.add(approvalId);
+      setResolvingApprovalIds(new Set(resolvingApprovalIdsRef.current));
       try {
         await stream.resolveApproval({
           sessionId: ready.selectedSessionId,
@@ -569,6 +579,9 @@ export function useInteractionRuntime({
         setInteraction((current) =>
           current.status === "ready" ? { ...current, streamError: String(error) } : current,
         );
+      } finally {
+        resolvingApprovalIdsRef.current.delete(approvalId);
+        setResolvingApprovalIds(new Set(resolvingApprovalIdsRef.current));
       }
     },
     [i18n],
@@ -587,6 +600,7 @@ export function useInteractionRuntime({
 
   return {
     interaction,
+    resolvingApprovalIds,
     createSession,
     selectSession,
     submitPrompt,
