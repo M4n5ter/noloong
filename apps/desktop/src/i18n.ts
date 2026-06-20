@@ -3,11 +3,6 @@ import type { AppInteractionStatus, Locale } from "./generated/contracts";
 export type UiLocale = "en" | "zh";
 
 export type I18nKey =
-  | "app.brand"
-  | "nav.chat"
-  | "header.starting"
-  | "header.failed"
-  | "header.starterDraft"
   | "bootstrap.loadingTitle"
   | "bootstrap.loadingDetail"
   | "bootstrap.failedTitle"
@@ -132,11 +127,6 @@ export type I18nKey =
 
 const messages = {
   en: {
-    "app.brand": "Noloong",
-    "nav.chat": "Chat",
-    "header.starting": "Starting runtime",
-    "header.failed": "Bootstrap failed",
-    "header.starterDraft": "starter draft",
     "bootstrap.loadingTitle": "Starting",
     "bootstrap.loadingDetail": "Reading the Rust-side launch state.",
     "bootstrap.failedTitle": "Bootstrap failed",
@@ -262,11 +252,6 @@ const messages = {
     "settings.providerReasoningTitle": "Reasoning",
   },
   zh: {
-    "app.brand": "Noloong",
-    "nav.chat": "聊天",
-    "header.starting": "正在启动运行时",
-    "header.failed": "启动失败",
-    "header.starterDraft": "新配置草稿",
     "bootstrap.loadingTitle": "正在启动",
     "bootstrap.loadingDetail": "正在读取 Rust 侧启动状态。",
     "bootstrap.failedTitle": "启动失败",
@@ -407,14 +392,6 @@ export function createI18n(locale: UiLocale) {
     locale,
     t(key: I18nKey, vars?: Record<string, string | number>) {
       return interpolate(catalog[key], vars);
-    },
-    headerSubtitle(options: {
-      status: "loading" | "failed";
-    }) {
-      if (options.status === "loading") {
-        return catalog["header.starting"];
-      }
-      return catalog["header.failed"];
     },
     disconnected(status: AppInteractionStatus | null | undefined) {
       if (status?.status === "unavailable") {

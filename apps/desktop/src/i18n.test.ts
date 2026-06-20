@@ -23,10 +23,4 @@ describe("app i18n", () => {
     });
   });
 
-  it("keeps bootstrap subtitles focused on transient launch states", () => {
-    const i18n = createI18n("en");
-
-    expect(i18n.headerSubtitle({ status: "loading" })).toBe("Starting runtime");
-    expect(i18n.headerSubtitle({ status: "failed" })).toBe("Bootstrap failed");
-  });
 });

@@ -55,39 +55,8 @@ button:focus-visible {
   top: 0;
   left: 0;
   right: 0;
-  display: flex;
-  height: 54px;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 24px 0 92px;
+  height: 44px;
   user-select: none;
-}
-
-.title-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.title-copy strong {
-  color: rgba(243, 239, 228, 0.54);
-  font-size: 13px;
-  font-weight: 620;
-}
-
-.title-copy span {
-  overflow: hidden;
-  max-width: min(52vw, 520px);
-  color: rgba(243, 239, 228, 0.46);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.title-drag-spacer {
-  align-self: stretch;
-  flex: 1;
 }
 
 .text-button {

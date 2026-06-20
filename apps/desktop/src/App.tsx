@@ -12,7 +12,7 @@ import {
   connectInteractionDisplayStream as connectDefaultInteractionDisplayStream,
   createInteractionClient as createDefaultInteractionClient,
 } from "./interaction/client";
-import { createI18n, resolveUiLocale, type AppI18n } from "./i18n";
+import { createI18n, resolveUiLocale } from "./i18n";
 import { SettingsView } from "./settings/SettingsView";
 import { devLaunchOptions, isTauriRuntime } from "./devFallback";
 import {
@@ -179,20 +179,9 @@ export function App({ dependencies = {} }: { dependencies?: AppShellDependencies
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [bootstrap.status, surface]);
 
-  const title = bootstrap.status === "ready" ? null : headerTitle(bootstrap, i18n);
-  const subtitle = headerSubtitle(bootstrap, i18n);
-
   return (
     <main className="app-shell">
-      <header className="title-bar" data-tauri-drag-region="deep">
-        {title ? (
-          <div className="title-copy">
-            <strong>{title}</strong>
-            {subtitle ? <span>{subtitle}</span> : null}
-          </div>
-        ) : null}
-        <div className="title-drag-spacer" />
-      </header>
+      <header aria-hidden="true" className="title-bar" data-tauri-drag-region="deep" />
       {surface === "settings" && bootstrap.status === "ready" ? (
         <SettingsView
           i18n={i18n}
@@ -244,20 +233,6 @@ function notifyMainRuntimeRestart(result: AppRuntimeRestartResult): void {
 
 function mainDocumentCanAcceptConversationMenuCommand(): boolean {
   return document.visibilityState !== "hidden" && document.hasFocus();
-}
-
-function headerTitle(bootstrap: BootstrapState, i18n: AppI18n): string {
-  if (bootstrap.status !== "ready") {
-    return i18n.t("app.brand");
-  }
-  return i18n.t("nav.chat");
-}
-
-function headerSubtitle(bootstrap: BootstrapState, i18n: AppI18n): string | null {
-  if (bootstrap.status === "ready") {
-    return null;
-  }
-  return i18n.headerSubtitle({ status: bootstrap.status });
 }
 
 function defaultBootstrap(): Promise<AppLaunchOptions> {

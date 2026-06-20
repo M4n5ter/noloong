@@ -1,12 +1,6 @@
 @media (max-width: 900px) {
   .title-bar {
-    height: 50px;
-    padding-right: 14px;
-    padding-left: 78px;
-  }
-
-  .title-copy span {
-    display: none;
+    height: 42px;
   }
 
   .chat-surface {
