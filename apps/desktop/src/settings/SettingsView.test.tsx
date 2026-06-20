@@ -64,24 +64,24 @@ describe("SettingsView", () => {
     );
 
     const model = await screen.findByLabelText("Model");
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save Changes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Discard Changes" })).not.toBeInTheDocument();
     await user.clear(model);
     await user.type(model, "gpt-5.5");
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Discard" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard Changes" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
-    expect(screen.getByRole("button", { name: "Saving" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Discard" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Saving Changes" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Discard Changes" })).toBeDisabled();
     expect(model).toBeDisabled();
 
     expect(resolveSave).not.toBeNull();
     const finishSave = resolveSave as unknown as (value: AppProfileConfigDocument) => void;
     finishSave(profileDocument());
     await waitFor(() => expect(model).not.toBeDisabled());
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save Changes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Discard Changes" })).not.toBeInTheDocument();
   });
 
   it("keeps pane content focused on the editable settings", async () => {
@@ -145,8 +145,8 @@ describe("SettingsView", () => {
     await user.paste('{ "type": "memory", "scope": "session" }');
 
     expect(eventStore).toHaveFocus();
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Discard" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard Changes" })).toBeEnabled();
   });
 
   it("blocks saving the last valid JSON draft while the focused field is invalid", async () => {
@@ -167,7 +167,7 @@ describe("SettingsView", () => {
     await user.clear(eventStore);
     await user.click(eventStore);
     await user.paste('{ "type": "memory", "scope": "session" }');
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
 
     await user.clear(eventStore);
     await user.paste("{");
@@ -175,10 +175,10 @@ describe("SettingsView", () => {
     expect(eventStore).toHaveFocus();
     expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
     expect(screen.getByText(/SyntaxError/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
 
     vi.mocked(saveProfileConfig).mockClear();
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
     expect(saveProfileConfig).not.toHaveBeenCalled();
   });
 
@@ -203,13 +203,13 @@ describe("SettingsView", () => {
     await user.paste("{");
 
     expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "Delete plugin" }));
 
     expect(screen.queryByText("Fix the invalid JSON field before saving.")).not.toBeInTheDocument();
     expect(screen.queryByText(/SyntaxError/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
   });
 
   it("keeps a plugin JSON parse error attached to its item when an earlier item is deleted", async () => {
@@ -234,7 +234,7 @@ describe("SettingsView", () => {
     await user.paste("{");
 
     expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
 
     const deleteButtons = screen.getAllByRole("button", { name: "Delete plugin" });
     await user.click(deleteButtons[0]);
@@ -244,7 +244,7 @@ describe("SettingsView", () => {
     expect(remainingPluginEditor).toHaveValue("{");
     expect(screen.getByText("Fix the invalid JSON field before saving.")).toBeVisible();
     expect(screen.getByText(/SyntaxError/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
   });
 
   it("does not move a deleted plugin JSON parse error onto the next item", async () => {
@@ -278,7 +278,7 @@ describe("SettingsView", () => {
     })) as HTMLTextAreaElement;
     expect(() => JSON.parse(String(remainingPluginEditor.value))).not.toThrow();
     expect(remainingPluginEditor).not.toHaveValue("{");
-    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
   });
 
   it("clears field-level JSON errors when discarding settings changes", async () => {
@@ -303,7 +303,7 @@ describe("SettingsView", () => {
     await user.paste("{");
 
     expect(screen.getByText(/SyntaxError/)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Discard" }));
+    await user.click(screen.getByRole("button", { name: "Discard Changes" }));
 
     expect(screen.queryByText("Fix the invalid JSON field before saving.")).not.toBeInTheDocument();
     expect(screen.queryByText(/SyntaxError/)).not.toBeInTheDocument();
@@ -364,7 +364,7 @@ describe("SettingsView", () => {
     }
     await user.clear(model);
     await user.type(model, "gpt-5.5");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
     expect(await screen.findByText("Saved and applied")).toBeInTheDocument();
     expect(screen.queryByText(/profile\.jsonc/)).not.toBeInTheDocument();
