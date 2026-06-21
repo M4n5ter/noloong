@@ -84,9 +84,10 @@
   display: flex;
   align-self: start;
   min-height: 44px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  flex-direction: column;
+  gap: 12px;
   padding: 8px 0;
   border-top: 1px solid rgba(243, 239, 228, 0.055);
 }
@@ -280,11 +281,6 @@
   .lens-form > .inline-actions,
   .lens-form .check-row {
     padding-left: 0;
-  }
-
-  .json-list-empty {
-    align-items: flex-start;
-    flex-direction: column;
   }
 
   .json-field small {
