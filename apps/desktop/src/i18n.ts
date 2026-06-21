@@ -32,6 +32,9 @@ export type I18nKey =
   | "sessionContext.failed"
   | "sessionContext.aborted"
   | "message.sending"
+  | "message.userLabel"
+  | "message.assistantLabel"
+  | "message.pendingUserLabel"
   | "composer.write"
   | "composer.waitingForApproval"
   | "composer.connecting"
@@ -169,6 +172,9 @@ const messages = {
     "sessionContext.failed": "{profile} stopped with an error",
     "sessionContext.aborted": "{profile} stopped",
     "message.sending": "sending",
+    "message.userLabel": "Your message",
+    "message.assistantLabel": "Assistant message",
+    "message.pendingUserLabel": "Sending your message",
     "composer.write": "Write a message...",
     "composer.waitingForApproval": "Waiting for your approval...",
     "composer.connecting": "Connecting display stream...",
@@ -305,6 +311,9 @@ const messages = {
     "sessionContext.failed": "{profile} 已因错误停止",
     "sessionContext.aborted": "{profile} 已停止",
     "message.sending": "发送中",
+    "message.userLabel": "你的消息",
+    "message.assistantLabel": "助手消息",
+    "message.pendingUserLabel": "正在发送你的消息",
     "composer.write": "输入消息...",
     "composer.waitingForApproval": "等待你审批...",
     "composer.connecting": "正在连接 Display 流...",

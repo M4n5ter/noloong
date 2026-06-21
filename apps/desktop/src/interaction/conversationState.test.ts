@@ -306,6 +306,93 @@ describe("conversation timeline reducer", () => {
     expect(converged.timeline[2]).toMatchObject({ id: "assistant-1", text: "final" });
   });
 
+  it("acknowledges optimistic user prompts once the assistant starts responding", () => {
+    const withPrompt = appendLocalPrompt(emptyConversationState(), "hello", "local-user-1");
+
+    const responding = applyDisplayEventToConversation(withPrompt, {
+      type: "assistant_message_delta",
+      runId: "run-1",
+      displayMessageId: "display-1",
+      text: "draft",
+    });
+
+    expect(responding.timeline[0]).toEqual({
+      kind: "message",
+      id: "local-user-1",
+      role: "user",
+      text: "hello",
+      pending: true,
+      acknowledged: true,
+    });
+    expect(responding.timeline[1]).toMatchObject({
+      kind: "message",
+      role: "assistant",
+      text: "draft",
+      live: true,
+    });
+  });
+
+  it("keeps optimistic user prompts sending when an assistant delta is empty", () => {
+    const withPrompt = appendLocalPrompt(emptyConversationState(), "hello", "local-user-1");
+
+    const unchanged = applyDisplayEventToConversation(withPrompt, {
+      type: "assistant_message_delta",
+      runId: "run-1",
+      displayMessageId: "display-1",
+      text: "",
+    });
+
+    expect(unchanged.timeline).toEqual(withPrompt.timeline);
+  });
+
+  it("keeps acknowledged optimistic prompts mergeable when snapshot text differs", () => {
+    const withPrompt = appendLocalPrompt(
+      emptyConversationState(),
+      "inspect this\n\n@reference.png",
+      "local-user-1",
+    );
+    const live = applyDisplayEventToConversation(withPrompt, {
+      type: "assistant_message_delta",
+      runId: "run-1",
+      displayMessageId: "display-1",
+      text: "draft",
+    });
+
+    const converged = convergeConversationToSessionSnapshot(live, {
+      sessionId: "session-1",
+      profileId: "default",
+      status: "completed",
+      state: {
+        messages: [
+          {
+            id: "user-1",
+            role: "user",
+            content: [{ type: "text", text: "inspect this" }],
+          },
+          {
+            id: "assistant-1",
+            role: "assistant",
+            content: [{ type: "text", text: "final" }],
+          },
+        ],
+      },
+    });
+
+    expect(converged.timeline).toHaveLength(2);
+    expect(converged.timeline[0]).toMatchObject({
+      kind: "message",
+      id: "user-1",
+      role: "user",
+      text: "inspect this",
+    });
+    expect(converged.timeline[1]).toMatchObject({
+      kind: "message",
+      id: "assistant-1",
+      role: "assistant",
+      text: "final",
+    });
+  });
+
   it("converges snapshot thinking into existing live reasoning without duplicating it", () => {
     const events: AppDisplayEvent[] = [
       {

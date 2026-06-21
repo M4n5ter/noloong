@@ -21,6 +21,7 @@ export type MessageTimelineItem = {
   text: string;
   live?: boolean;
   pending?: boolean;
+  acknowledged?: boolean;
 };
 
 export type ReasoningTimelineItem = {
@@ -241,14 +242,25 @@ export function applyDisplayEventToConversation(
       if (isTerminalRunStatus(state.runStatus)) {
         return state;
       }
+      if (event.text.length === 0) {
+        return state;
+      }
       return {
         ...state,
-        timeline: appendAssistantDelta(state.timeline, event.displayMessageId, event.text),
+        timeline: appendAssistantDelta(
+          acknowledgePendingUserMessages(state.timeline),
+          event.displayMessageId,
+          event.text,
+        ),
       };
     case "assistant_message_final":
       return {
         ...state,
-        timeline: applyAssistantFinal(state.timeline, event.displayMessageId, event.message),
+        timeline: applyAssistantFinal(
+          acknowledgePendingUserMessages(state.timeline),
+          event.displayMessageId,
+          event.message,
+        ),
       };
     default:
       return state;
@@ -402,6 +414,23 @@ function replacementSnapshotItemIndex(
 
 function shouldDropUnmatchedCurrentItem(item: TimelineItem): boolean {
   return item.kind === "message" && Boolean(item.live || item.pending);
+}
+
+function acknowledgePendingUserMessages(timeline: TimelineItem[]): TimelineItem[] {
+  let changed = false;
+  const acknowledged = timeline.map((item) => {
+    if (
+      item.kind !== "message" ||
+      item.role !== "user" ||
+      !item.pending ||
+      item.acknowledged
+    ) {
+      return item;
+    }
+    changed = true;
+    return { ...item, acknowledged: true };
+  });
+  return changed ? acknowledged : timeline;
 }
 
 function mergeTimelineItemWithSnapshot(

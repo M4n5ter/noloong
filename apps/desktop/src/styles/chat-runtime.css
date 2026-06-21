@@ -253,7 +253,7 @@
   white-space: pre;
 }
 
-.message-role {
+.message-status {
   color: rgba(243, 239, 228, 0.36);
   font-size: 12px;
   text-transform: capitalize;

@@ -299,9 +299,19 @@ function TimelineItemView({
 }
 
 function MessageCard({ i18n, item }: { i18n: AppI18n; item: MessageTimelineItem }) {
+  const sending = Boolean(item.pending && !item.acknowledged);
+  const label = sending
+    ? i18n.t("message.pendingUserLabel")
+    : item.role === "user"
+      ? i18n.t("message.userLabel")
+      : i18n.t("message.assistantLabel");
+
   return (
-    <article className={`message ${item.role}${item.pending ? " pending" : ""}`}>
-      <div className="message-role">{item.pending ? i18n.t("message.sending") : item.role}</div>
+    <article
+      aria-label={label}
+      className={`message ${item.role}${sending ? " pending" : ""}`}
+    >
+      {sending ? <div className="message-status">{i18n.t("message.sending")}</div> : null}
       <MarkdownMessage role={item.role} streaming={Boolean(item.live)} text={item.text} />
     </article>
   );
