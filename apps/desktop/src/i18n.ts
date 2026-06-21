@@ -36,7 +36,6 @@ export type I18nKey =
   | "message.assistantLabel"
   | "message.pendingUserLabel"
   | "composer.write"
-  | "composer.waitingForApproval"
   | "composer.connecting"
   | "composer.attach"
   | "composer.send"
@@ -175,7 +174,6 @@ const messages = {
     "message.assistantLabel": "Assistant message",
     "message.pendingUserLabel": "Sending your message",
     "composer.write": "Write a message...",
-    "composer.waitingForApproval": "Waiting for your approval...",
     "composer.connecting": "Connecting display stream...",
     "composer.attach": "Attach files",
     "composer.send": "Send message",
@@ -313,7 +311,6 @@ const messages = {
     "message.assistantLabel": "助手消息",
     "message.pendingUserLabel": "正在发送你的消息",
     "composer.write": "输入消息...",
-    "composer.waitingForApproval": "等待你审批...",
     "composer.connecting": "正在连接 Display 流...",
     "composer.attach": "添加附件",
     "composer.send": "发送消息",

@@ -189,9 +189,8 @@ export function TranscriptView({
       ? sessionTitle(interaction.selectedSession)
       : i18n.t("transcript.newSessionTitle");
   const timelineEmpty = interaction.conversation.timeline.length === 0;
-  const composerPlaceholder = waitingForApproval
-    ? i18n.t("composer.waitingForApproval")
-    : interaction.streamStatus === "ready"
+  const composerPlaceholder =
+    interaction.streamStatus === "ready"
       ? i18n.t("composer.write")
       : interaction.streamError ?? i18n.t("composer.connecting");
 
