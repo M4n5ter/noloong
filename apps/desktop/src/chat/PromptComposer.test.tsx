@@ -74,7 +74,10 @@ describe("PromptComposer", () => {
     );
 
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
-    await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
+    await user.type(
+      textarea,
+      "This is a deliberately long composer input that should reveal the expansion control before it turns into a larger editing surface.",
+    );
     const expand = await screen.findByRole("button", { name: "Expand composer" });
     expect(expand).toHaveAttribute("title", "Expand composer");
 
@@ -182,6 +185,81 @@ describe("PromptComposer", () => {
         canClearComposer: false,
       }),
     );
+  });
+
+  it("shows input focus treatment for keyboard and command focus only", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    const capsule = textarea.closest(".composer-capsule");
+    const editorShell = textarea.closest(".composer-editor-shell");
+    expect(capsule).toBeTruthy();
+    expect(editorShell).toBeTruthy();
+
+    await user.click(textarea);
+    expect(editorShell).not.toHaveClass("keyboard-focus");
+
+    act(() => dispatchConversationCommand("focus-composer"));
+    expect(textarea).toHaveFocus();
+    expect(editorShell).toHaveClass("keyboard-focus");
+
+    await user.click(textarea);
+    expect(editorShell).not.toHaveClass("keyboard-focus");
+
+    await user.tab({ shift: true });
+    await user.click(capsule as HTMLElement);
+    expect(textarea).toHaveFocus();
+    expect(editorShell).not.toHaveClass("keyboard-focus");
+
+    await user.click(textarea);
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    await user.tab();
+    await user.tab();
+    expect(textarea).toHaveFocus();
+    expect(editorShell).toHaveClass("keyboard-focus");
+
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    act(() => dispatchConversationCommand("focus-composer"));
+    expect(textarea).toHaveFocus();
+    expect(editorShell).toHaveClass("keyboard-focus");
+
+    await user.tab({ shift: true });
+    await user.tab();
+    expect(textarea).toHaveFocus();
+    expect(editorShell).toHaveClass("keyboard-focus");
+  });
+
+  it("does not show input focus treatment when command focus cannot reach a disabled input", () => {
+    render(
+      <PromptComposer
+        disabled
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    const editorShell = textarea.closest(".composer-editor-shell");
+    expect(editorShell).toBeTruthy();
+
+    act(() => dispatchConversationCommand("focus-composer"));
+
+    expect(textarea).not.toHaveFocus();
+    expect(editorShell).not.toHaveClass("keyboard-focus");
   });
 
   it("handles conversation commands through one command event path", async () => {
@@ -303,7 +381,7 @@ describe("PromptComposer", () => {
 
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
     await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
-    await user.click(await screen.findByRole("button", { name: "Expand composer" }));
+    expect(await screen.findByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
 
     const editorShell = textarea.closest(".composer-editor-shell");
     expect(editorShell).toBeTruthy();
@@ -347,7 +425,10 @@ describe("PromptComposer", () => {
     );
 
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
-    await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
+    await user.type(
+      textarea,
+      "This is a deliberately long composer input that should reveal the expansion control before it turns into a larger editing surface.",
+    );
 
     const expandButton = await screen.findByRole("button", { name: "Expand composer" });
     expect(expandButton).toHaveAttribute("aria-expanded", "false");

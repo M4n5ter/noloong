@@ -12,6 +12,7 @@ import {
 } from "./conversationCommands";
 
 const COMPACT_TEXT_LIMIT = 96;
+type ComposerFocusModality = "keyboard" | "pointer";
 
 export function PromptComposer({
   disabled,
@@ -36,10 +37,12 @@ export function PromptComposer({
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [keyboardFocusVisible, setKeyboardFocusVisible] = useState(false);
   const [scrollFades, setScrollFades] = useState({ top: false, bottom: false });
   const editorId = useId();
   const formRef = useRef<HTMLFormElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const focusModalityRef = useRef<ComposerFocusModality>("keyboard");
   const disabledRef = useRef(disabled);
   const canAbort = Boolean(onAbortRun);
   const hasDraft = text.length > 0 || attachments.length > 0;
@@ -116,7 +119,11 @@ export function PromptComposer({
       const command = (event as CustomEvent<ConversationCommand>).detail;
       switch (command) {
         case "focus-composer":
+          focusModalityRef.current = "keyboard";
           textareaRef.current?.focus();
+          if (document.activeElement === textareaRef.current) {
+            setKeyboardFocusVisible(true);
+          }
           break;
         case "send-message":
           void submit();
@@ -228,7 +235,17 @@ export function PromptComposer({
       }}
       ref={formRef}
     >
-      <div className="composer-capsule" onClick={() => textareaRef.current?.focus()}>
+      <div
+        className="composer-capsule"
+        onClick={() => textareaRef.current?.focus()}
+        onKeyDownCapture={() => {
+          focusModalityRef.current = "keyboard";
+        }}
+        onPointerDownCapture={() => {
+          focusModalityRef.current = "pointer";
+          setKeyboardFocusVisible(false);
+        }}
+      >
         <div aria-label={i18n.t("chat.sessionToolbar")} className="composer-navigation" role="group">
           <button
             aria-label={i18n.t("sessions.title")}
@@ -270,6 +287,7 @@ export function PromptComposer({
             className={[
               "composer-editor-shell",
               expanded ? "expanded" : "",
+              keyboardFocusVisible ? "keyboard-focus" : "",
               previewingCompactOverflow ? "previewing" : "",
               scrollFades.top ? "fade-top" : "",
               scrollFades.bottom ? "fade-bottom" : "",
@@ -281,7 +299,19 @@ export function PromptComposer({
               aria-label={i18n.t("composer.write")}
               className="composer-input"
               disabled={disabled}
-              onChange={(event) => setText(event.target.value)}
+              onChange={(event) => {
+                const nextText = event.target.value;
+                if (!expanded && !text.includes("\n") && nextText.includes("\n")) {
+                  setExpanded(true);
+                }
+                setText(nextText);
+              }}
+              onBlur={() => {
+                setKeyboardFocusVisible(false);
+              }}
+              onFocus={() => {
+                setKeyboardFocusVisible(focusModalityRef.current === "keyboard");
+              }}
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();

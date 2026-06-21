@@ -27,11 +27,11 @@
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.24);
 }
 
-.composer-capsule:has(.composer-editor-shell:not(.expanded) .composer-input:focus) {
-  border-color: var(--focus-border);
+.composer-capsule:has(.composer-editor-shell.keyboard-focus:not(.expanded)) {
+  border-color: rgba(206, 225, 239, 0.48);
   box-shadow:
     0 24px 80px rgba(0, 0, 0, 0.24),
-    0 0 0 3px var(--focus-ring-soft);
+    inset 0 0 0 1px rgba(188, 212, 232, 0.18);
 }
 
 .composer:has(.composer-editor-shell.expanded) .composer-capsule {
@@ -153,11 +153,11 @@
   box-shadow: 0 16px 52px rgba(0, 0, 0, 0.26);
 }
 
-.composer-editor-shell.expanded:has(.composer-input:focus) {
-  border-color: var(--focus-border);
+.composer-editor-shell.expanded.keyboard-focus {
+  border-color: rgba(206, 225, 239, 0.42);
   box-shadow:
     0 16px 52px rgba(0, 0, 0, 0.26),
-    0 0 0 3px var(--focus-ring-muted);
+    inset 0 0 0 1px rgba(188, 212, 232, 0.18);
 }
 
 .composer-editor-shell.expanded::before,
