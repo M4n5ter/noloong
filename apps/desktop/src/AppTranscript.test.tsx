@@ -76,9 +76,10 @@ describe("transcript accessibility", () => {
     await user.type(await screen.findByPlaceholderText("Write a message..."), "hello from user");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(screen.getByRole("article", { name: "Sending your message" })).toHaveTextContent(
-      "hello from user",
-    );
+    const pendingMessage = screen.getByRole("article", { name: "Sending your message" });
+    expect(pendingMessage).toHaveAttribute("aria-busy", "true");
+    expect(pendingMessage).toHaveTextContent("hello from user");
+    expect(pendingMessage).not.toHaveTextContent("sending");
 
     act(() => {
       runtime.emitAssistantDelta("assistant response");

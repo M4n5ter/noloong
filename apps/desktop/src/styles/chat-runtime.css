@@ -2,7 +2,7 @@
   --composer-track-width: min(760px, calc(100vw - clamp(24px, 7.5vw, 96px)));
   --composer-bottom-clearance: 28px;
   --composer-height: 68px;
-  --composer-expanded-editor-gap: 20px;
+  --composer-expanded-editor-gap: 0px;
   --composer-expanded-editor-height: 224px;
   --composer-active-height: var(--composer-height);
   --composer-popover-gap: 16px;
@@ -184,7 +184,6 @@
 }
 
 .message.user.pending {
-  justify-self: start;
   border-color: rgba(229, 212, 179, 0.18);
   background:
     linear-gradient(180deg, rgba(229, 212, 179, 0.062), rgba(229, 212, 179, 0.035)),
@@ -293,12 +292,6 @@
 .markdown-code-block code,
 .markdown-code-highlight code {
   white-space: pre;
-}
-
-.message-status {
-  color: rgba(243, 239, 228, 0.36);
-  font-size: 12px;
-  text-transform: capitalize;
 }
 
 .activity-title-row {

@@ -38,9 +38,13 @@
 }
 
 .composer:has(.composer-editor-shell.expanded) .composer-capsule {
-  border-color: rgba(243, 239, 228, 0.11);
-  background: rgba(23, 25, 20, 0.76);
-  box-shadow: 0 18px 62px rgba(0, 0, 0, 0.22);
+  border-color: rgba(243, 239, 228, 0.1);
+  border-top-color: rgba(243, 239, 228, 0.045);
+  border-radius: 0 0 34px 34px;
+  background:
+    linear-gradient(180deg, rgba(17, 19, 15, 0.88), rgba(23, 25, 20, 0.82)),
+    rgba(23, 25, 20, 0.82);
+  box-shadow: 0 22px 62px rgba(0, 0, 0, 0.24);
 }
 
 .composer.dragging .composer-capsule,
@@ -60,52 +64,20 @@
   --composer-editor-action-space: calc(
     var(--composer-expand-inset) + var(--composer-expand-size) + var(--composer-expand-gap)
   );
-  --composer-preview-fade: calc(var(--composer-editor-action-space) * 1.7);
   height: 38px;
   min-width: 0;
   align-items: center;
 }
 
-.composer-preview {
-  grid-area: 1 / 1;
-  display: block;
-  height: 38px;
-  min-width: 0;
+.composer-compact-measure {
+  position: absolute;
+  visibility: hidden;
+  height: 0;
   overflow: hidden;
-  padding-inline-end: calc(var(--composer-editor-action-space) + var(--composer-preview-fade));
-  color: rgba(243, 239, 228, 0.74);
-  font-size: 17px;
-  line-height: 38px;
-  -webkit-mask-image: linear-gradient(
-    90deg,
-    #000 0,
-    #000 calc(100% - var(--composer-preview-fade)),
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    90deg,
-    #000 0,
-    #000 calc(100% - var(--composer-preview-fade)),
-    transparent 100%
-  );
-  pointer-events: none;
-  text-overflow: clip;
   white-space: nowrap;
-}
-
-:dir(rtl) .composer-preview {
-  -webkit-mask-image: linear-gradient(
-    270deg,
-    #000 0,
-    #000 calc(100% - var(--composer-preview-fade)),
-    transparent 100%
-  );
-  mask-image: linear-gradient(
-    270deg,
-    #000 0,
-    #000 calc(100% - var(--composer-preview-fade)),
-    transparent 100%
-  );
+  font-size: 17px;
+  line-height: 22px;
+  pointer-events: none;
 }
 
 .composer-editor-shell {
@@ -116,27 +88,9 @@
   min-width: 0;
 }
 
-.composer-editor-shell.previewing::after {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  inset-inline-end: 0;
-  bottom: 0;
-  width: calc(var(--composer-editor-action-space) + var(--composer-preview-fade));
-  border-start-end-radius: 999px;
-  border-end-end-radius: 999px;
-  background: linear-gradient(90deg, rgba(23, 25, 20, 0), rgba(23, 25, 20, 0.94) 36%);
-  content: "";
-  pointer-events: none;
-}
-
-:dir(rtl) .composer-editor-shell.previewing::after {
-  background: linear-gradient(270deg, rgba(23, 25, 20, 0), rgba(23, 25, 20, 0.94) 36%);
-}
-
 .composer-editor-shell.expanded {
   position: absolute;
-  bottom: calc(100% + var(--composer-expanded-editor-gap));
+  bottom: calc(100% - 1px);
   right: 0;
   left: 0;
   z-index: 2;
@@ -147,13 +101,14 @@
   overflow: hidden;
   isolation: isolate;
   border: 1px solid rgba(243, 239, 228, 0.1);
-  border-radius: 26px;
+  border-radius: 26px 26px 0 0;
   -webkit-backdrop-filter: blur(16px) saturate(1.03);
   backdrop-filter: blur(16px) saturate(1.03);
   background:
     linear-gradient(180deg, rgba(37, 40, 31, 0.78), rgba(17, 19, 15, 0.88)),
     rgba(23, 25, 20, 0.84);
-  box-shadow: 0 16px 52px rgba(0, 0, 0, 0.26);
+  box-shadow: 0 16px 52px rgba(0, 0, 0, 0.22);
+  animation: composer-editor-open 170ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .composer-editor-shell.expanded.keyboard-focus {
@@ -219,12 +174,6 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .composer-preview {
-    -webkit-mask-image: none;
-    mask-image: none;
-    text-overflow: ellipsis;
-  }
-
   .composer-editor-shell.expanded {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -244,6 +193,24 @@
   }
 }
 
+@keyframes composer-editor-open {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-editor-shell.expanded {
+    animation: none;
+  }
+}
+
 .composer-input {
   width: 100%;
   min-width: 0;
@@ -260,19 +227,15 @@
 }
 
 .composer-editor-shell:not(.expanded) .composer-input {
-  height: 38px;
-  min-height: 38px;
-  max-height: 42px;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 22px;
+  min-height: 22px;
+  max-height: 22px;
   overflow-y: hidden;
-  padding-block: 8px;
+  padding-block: 0;
   padding-inline: 0 var(--composer-editor-action-space);
-}
-
-.composer-editor-shell.previewing .composer-input {
-  position: relative;
-  z-index: 2;
-  caret-color: #f3efe4;
-  color: transparent;
 }
 
 .composer-editor-shell.expanded .composer-input {
@@ -283,6 +246,32 @@
   padding: 26px var(--composer-editor-action-space) 26px 17px;
   overflow-y: auto;
   scrollbar-color: rgba(243, 239, 228, 0.18) transparent;
+}
+
+.composer-draft-preview {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 var(--composer-editor-action-space) 0 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: #f3efe4;
+  cursor: text;
+  font: inherit;
+  font-size: 17px;
+  line-height: 38px;
+  outline: none;
+  text-align: start;
+}
+
+.composer-draft-preview span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-input::placeholder {
@@ -374,14 +363,8 @@
   z-index: 3;
   width: var(--composer-expand-size);
   height: var(--composer-expand-size);
-  background: rgba(23, 25, 20, 0.28);
-  color: rgba(243, 239, 228, 0.42);
-}
-
-.composer-editor-shell.previewing .composer-expand {
-  border-color: rgba(243, 239, 228, 0.11);
-  background: rgba(23, 25, 20, 0.86);
-  color: rgba(243, 239, 228, 0.52);
+  background: rgba(23, 25, 20, 0.76);
+  color: rgba(243, 239, 228, 0.56);
 }
 
 .composer-editor-shell.expanded .composer-expand {
@@ -389,14 +372,9 @@
 }
 
 .composer-tool:not(:disabled):hover,
+.composer-expand:not(:disabled):hover,
 .send-button:not(:disabled):hover {
   border-color: rgba(168, 196, 220, 0.42);
-}
-
-.composer-expand:hover {
-  border-color: rgba(168, 196, 220, 0.32);
-  background: rgba(58, 84, 107, 0.34);
-  color: rgba(243, 239, 228, 0.78);
 }
 
 .composer-tool:disabled,

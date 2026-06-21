@@ -72,19 +72,24 @@ describe("PromptComposer", () => {
       "title",
       "Send message",
     );
-
+    expect(screen.getByRole("button", { name: "Sessions" })).toHaveAttribute("title", "Sessions");
+    expect(screen.getByRole("button", { name: "Create session" })).toHaveAttribute(
+      "title",
+      "Create session",
+    );
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
     await user.type(
       textarea,
-      "This is a deliberately long composer input that should reveal the expansion control before it turns into a larger editing surface.",
+      "This is a deliberately long composer input that should reveal the collapse control in the expanded editor.",
     );
-    const expand = await screen.findByRole("button", { name: "Expand composer" });
-    expect(expand).toHaveAttribute("title", "Expand composer");
-
-    await user.click(expand);
     expect(screen.getByRole("button", { name: "Collapse composer" })).toHaveAttribute(
       "title",
       "Collapse composer",
+    );
+    await user.click(screen.getByRole("button", { name: "Collapse composer" }));
+    expect(screen.getByRole("button", { name: "Expand composer" })).toHaveAttribute(
+      "title",
+      "Expand composer",
     );
 
     rerender(
@@ -381,8 +386,7 @@ describe("PromptComposer", () => {
 
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
     await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
-    await user.click(await screen.findByRole("button", { name: "Expand composer" }));
-    expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+    expect(textarea.closest(".composer-editor-shell")).toHaveClass("expanded");
 
     const editorShell = textarea.closest(".composer-editor-shell");
     expect(editorShell).toBeTruthy();
@@ -411,7 +415,7 @@ describe("PromptComposer", () => {
     expect(editorShell).not.toHaveClass("fade-bottom");
   });
 
-  it("keeps multiline input compact until the user expands it", async () => {
+  it("promotes multiline input into the expanded editor", async () => {
     const user = userEvent.setup();
 
     render(
@@ -428,21 +432,25 @@ describe("PromptComposer", () => {
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
     await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
 
-    const expandButton = await screen.findByRole("button", { name: "Expand composer" });
-    expect(expandButton).toHaveAttribute("aria-expanded", "false");
-    expect(textarea.closest(".composer-editor-shell")).toHaveClass("previewing");
-    expect(textarea.closest(".composer-editor-shell")).not.toHaveClass("expanded");
-
-    await user.click(expandButton);
-
     expect(screen.getByRole("button", { name: "Collapse composer" })).toHaveAttribute(
       "aria-expanded",
       "true",
     );
-    expect(textarea.closest(".composer-editor-shell")).toHaveClass("expanded");
+
+    await user.click(screen.getByRole("button", { name: "Collapse composer" }));
+
+    expect(screen.queryByRole("textbox", { name: "Write a message..." })).not.toBeInTheDocument();
+    const draftPreview = screen.getByRole("button", { name: "first line second line" });
+    expect(draftPreview).toHaveAttribute("aria-controls");
+
+    await user.click(draftPreview);
+
+    expect(screen.getByRole("textbox", { name: "Write a message..." })).toHaveValue(
+      "first line\nsecond line",
+    );
   });
 
-  it("exposes the expanded editor relationship to assistive technology", async () => {
+  it("promotes long input into the expanded editor", async () => {
     const user = userEvent.setup();
 
     render(
@@ -461,43 +469,10 @@ describe("PromptComposer", () => {
       textarea,
       "This is a deliberately long composer input that should reveal the expansion control before it turns into a larger editing surface.",
     );
-
-    const expandButton = await screen.findByRole("button", { name: "Expand composer" });
-    expect(expandButton).toHaveAttribute("aria-expanded", "false");
-    const controlledEditorId = expandButton.getAttribute("aria-controls");
-    expect(controlledEditorId).toBeTruthy();
-    expect(document.getElementById(controlledEditorId ?? "")).toBe(textarea.closest(".composer-editor-shell"));
-
-    await user.click(expandButton);
-
-    expect(screen.getByRole("button", { name: "Collapse composer" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+    expect(textarea).toHaveValue(
+      "This is a deliberately long composer input that should reveal the expansion control before it turns into a larger editing surface.",
     );
-  });
-
-  it("keeps expanded draft text out of the compact capsule preview", async () => {
-    const user = userEvent.setup();
-
-    render(
-      <PromptComposer
-        disabled={false}
-        i18n={createI18n("en")}
-        onCreateSession={vi.fn()}
-        onOpenSessions={vi.fn()}
-        onSubmit={vi.fn()}
-        placeholder="Write a message..."
-      />,
-    );
-
-    const longDraft =
-      "This is a deliberately long composer input that should live in the expanded editor instead of being repeated in the compact capsule.";
-    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
-    await user.type(textarea, longDraft);
-    await user.click(await screen.findByRole("button", { name: "Expand composer" }));
-
-    expect(document.querySelector(".composer-preview")).not.toBeInTheDocument();
-    expect(textarea).toHaveValue(longDraft);
   });
 });
 

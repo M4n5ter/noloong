@@ -307,10 +307,10 @@ function MessageCard({ i18n, item }: { i18n: AppI18n; item: MessageTimelineItem 
 
   return (
     <article
+      aria-busy={sending || undefined}
       aria-label={label}
       className={`message ${item.role}${sending ? " pending" : ""}`}
     >
-      {sending ? <div className="message-status">{i18n.t("message.sending")}</div> : null}
       <MarkdownMessage role={item.role} streaming={Boolean(item.live)} text={item.text} />
     </article>
   );

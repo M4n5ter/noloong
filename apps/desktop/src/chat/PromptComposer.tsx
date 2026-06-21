@@ -36,11 +36,14 @@ export function PromptComposer({
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [dragging, setDragging] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [compactOverflow, setCompactOverflow] = useState(false);
   const [keyboardFocusVisible, setKeyboardFocusVisible] = useState(false);
   const [scrollFades, setScrollFades] = useState({ top: false, bottom: false });
   const editorId = useId();
   const formRef = useRef<HTMLFormElement | null>(null);
+  const inputShellRef = useRef<HTMLDivElement | null>(null);
+  const compactMeasureRef = useRef<HTMLSpanElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const focusModalityRef = useRef<ComposerFocusModality>("keyboard");
   const disabledRef = useRef(disabled);
@@ -48,11 +51,10 @@ export function PromptComposer({
   const hasDraft = text.length > 0 || attachments.length > 0;
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled && !canAbort;
   const canClear = hasDraft && !disabled && !canAbort;
-  const needsExpansion = needsExpandedComposer(text);
-  const canExpand = expanded || needsExpansion;
-  const previewingCompactOverflow = needsExpansion && !expanded;
-  const compactPreview = firstPreviewLine(text);
-  const expandLabel = i18n.t(expanded ? "composer.collapse" : "composer.expand");
+  const needsExpansion = needsExpandedComposer(text, compactOverflow);
+  const editorExpanded = needsExpansion && !collapsed;
+  const showingDraftPreview = needsExpansion && collapsed;
+  const expandLabel = i18n.t(collapsed ? "composer.expand" : "composer.collapse");
   const sendLabel = canAbort ? i18n.t("run.stop") : i18n.t("composer.send");
 
   useEffect(() => {
@@ -63,10 +65,16 @@ export function PromptComposer({
   }, [disabled]);
 
   useEffect(() => {
-    if (expanded) {
+    if (!needsExpansion && collapsed) {
+      setCollapsed(false);
+    }
+  }, [collapsed, needsExpansion]);
+
+  useEffect(() => {
+    if (editorExpanded) {
       textareaRef.current?.focus();
     }
-  }, [expanded]);
+  }, [editorExpanded]);
 
   useEffect(() => {
     onCommandAvailabilityChange?.({
@@ -79,21 +87,56 @@ export function PromptComposer({
 
   const updateScrollFades = useCallback(() => {
     const textarea = textareaRef.current;
-    if (!expanded || !textarea) {
+    if (!editorExpanded || !textarea) {
       setScrollFades({ top: false, bottom: false });
       return;
     }
     setScrollFades(composerScrollFadeState(textarea));
-  }, [expanded]);
+  }, [editorExpanded]);
 
   useLayoutEffect(() => {
     updateScrollFades();
-  }, [expanded, text, updateScrollFades]);
+  }, [editorExpanded, text, updateScrollFades]);
+
+  const focusTextInput = useCallback(() => {
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      if (document.activeElement === textareaRef.current) {
+        setKeyboardFocusVisible(focusModalityRef.current === "keyboard");
+      }
+    });
+  }, []);
+
+  const expandDraftAndFocus = useCallback(() => {
+    setCollapsed(false);
+    focusTextInput();
+  }, [focusTextInput]);
+
+  useLayoutEffect(() => {
+    setCompactOverflow(compactDraftOverflows(inputShellRef.current, compactMeasureRef.current, text));
+  }, [text]);
+
+  useEffect(() => {
+    const inputShell = inputShellRef.current;
+    const measure = compactMeasureRef.current;
+    if (!inputShell || !measure || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      setCompactOverflow(compactDraftOverflows(inputShell, measure, text));
+    });
+    observer.observe(inputShell);
+    observer.observe(measure);
+    return () => {
+      observer.disconnect();
+    };
+  }, [text]);
 
   const resetDraft = useCallback(() => {
     setText("");
     setAttachments([]);
-    setExpanded(false);
+    setCollapsed(false);
+    setCompactOverflow(false);
   }, []);
 
   const submit = useCallback(async () => {
@@ -120,9 +163,13 @@ export function PromptComposer({
       switch (command) {
         case "focus-composer":
           focusModalityRef.current = "keyboard";
-          textareaRef.current?.focus();
-          if (document.activeElement === textareaRef.current) {
-            setKeyboardFocusVisible(true);
+          if (showingDraftPreview) {
+            expandDraftAndFocus();
+          } else {
+            textareaRef.current?.focus();
+            if (document.activeElement === textareaRef.current) {
+              setKeyboardFocusVisible(true);
+            }
           }
           break;
         case "send-message":
@@ -143,7 +190,7 @@ export function PromptComposer({
     return () => {
       window.removeEventListener(CONVERSATION_COMMAND_EVENT, handleConversationCommand);
     };
-  }, [canAbort, clearComposer, onAbortRun, submit]);
+  }, [canAbort, clearComposer, expandDraftAndFocus, onAbortRun, showingDraftPreview, submit]);
 
   const addPaths = useCallback((paths: string[]) => {
     if (disabledRef.current) {
@@ -237,7 +284,13 @@ export function PromptComposer({
     >
       <div
         className="composer-capsule"
-        onClick={() => textareaRef.current?.focus()}
+        onClick={() => {
+          if (showingDraftPreview) {
+            expandDraftAndFocus();
+            return;
+          }
+          textareaRef.current?.focus();
+        }}
         onKeyDownCapture={() => {
           focusModalityRef.current = "keyboard";
         }}
@@ -276,65 +329,80 @@ export function PromptComposer({
             <Plus size={16} />
           </button>
         </div>
-        <div className="composer-input-shell">
-          {previewingCompactOverflow ? (
-            <span aria-hidden="true" className="composer-preview">
-              {compactPreview || placeholder}
-            </span>
-          ) : null}
+        <div className="composer-input-shell" ref={inputShellRef}>
+          <span aria-hidden="true" className="composer-compact-measure" ref={compactMeasureRef}>
+            {compactDraftPreview(text)}
+          </span>
           <div
             id={editorId}
             className={[
               "composer-editor-shell",
-              expanded ? "expanded" : "",
+              editorExpanded ? "expanded" : "",
+              showingDraftPreview ? "collapsed" : "",
               keyboardFocusVisible ? "keyboard-focus" : "",
-              previewingCompactOverflow ? "previewing" : "",
               scrollFades.top ? "fade-top" : "",
               scrollFades.bottom ? "fade-bottom" : "",
             ]
               .filter(Boolean)
               .join(" ")}
           >
-            <textarea
-              aria-label={i18n.t("composer.write")}
-              className="composer-input"
-              disabled={disabled}
-              onChange={(event) => {
-                setText(event.target.value);
-              }}
-              onBlur={() => {
-                setKeyboardFocusVisible(false);
-              }}
-              onFocus={() => {
-                setKeyboardFocusVisible(focusModalityRef.current === "keyboard");
-              }}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  dispatchConversationCommand("send-message");
-                }
-              }}
-              onScroll={updateScrollFades}
-              placeholder={placeholder}
-              ref={textareaRef}
-              rows={expanded ? 6 : 1}
-              value={text}
-            />
-            {canExpand ? (
+            {showingDraftPreview ? (
               <button
                 aria-controls={editorId}
-                aria-expanded={expanded}
+                aria-expanded="false"
+                className="composer-draft-preview"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  expandDraftAndFocus();
+                }}
+                title={i18n.t("composer.expand")}
+                type="button"
+              >
+                <span>{compactDraftPreview(text)}</span>
+              </button>
+            ) : (
+              <textarea
+                aria-label={i18n.t("composer.write")}
+                className="composer-input"
+                disabled={disabled}
+                onChange={(event) => {
+                  setText(event.target.value);
+                }}
+                onBlur={() => {
+                  setKeyboardFocusVisible(false);
+                }}
+                onFocus={() => {
+                  setKeyboardFocusVisible(focusModalityRef.current === "keyboard");
+                }}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    dispatchConversationCommand("send-message");
+                  }
+                }}
+                onScroll={updateScrollFades}
+                placeholder={placeholder}
+                ref={textareaRef}
+                rows={editorExpanded ? 6 : 1}
+                value={text}
+              />
+            )}
+            {needsExpansion ? (
+              <button
+                aria-controls={editorId}
+                aria-expanded={editorExpanded}
                 aria-label={expandLabel}
                 className="composer-expand"
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  setExpanded((current) => !current);
+                  setCollapsed((current) => !current);
                 }}
                 title={expandLabel}
                 type="button"
               >
-                {expanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                {editorExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
               </button>
             ) : null}
           </div>
@@ -403,12 +471,27 @@ export function PromptComposer({
   );
 }
 
-function firstPreviewLine(text: string): string {
-  return text.split(/\r?\n/, 1)[0]?.trimEnd() ?? "";
+function needsExpandedComposer(text: string, compactOverflow: boolean): boolean {
+  return textNeedsExpansionFallback(text) || compactOverflow;
 }
 
-function needsExpandedComposer(text: string): boolean {
+function textNeedsExpansionFallback(text: string): boolean {
   return text.includes("\n") || text.length > COMPACT_TEXT_LIMIT;
+}
+
+function compactDraftOverflows(
+  inputShell: HTMLElement | null,
+  measure: HTMLElement | null,
+  text: string,
+): boolean {
+  if (!inputShell || !measure || text.length === 0) {
+    return false;
+  }
+  return measure.getBoundingClientRect().width > inputShell.getBoundingClientRect().width + 1;
+}
+
+function compactDraftPreview(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function composerScrollFadeState(metrics: {

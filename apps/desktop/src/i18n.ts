@@ -31,7 +31,6 @@ export type I18nKey =
   | "sessionContext.paused"
   | "sessionContext.failed"
   | "sessionContext.aborted"
-  | "message.sending"
   | "message.userLabel"
   | "message.assistantLabel"
   | "message.pendingUserLabel"
@@ -169,7 +168,6 @@ const messages = {
     "sessionContext.paused": "{profile} needs a decision",
     "sessionContext.failed": "{profile} stopped with an error",
     "sessionContext.aborted": "{profile} stopped",
-    "message.sending": "sending",
     "message.userLabel": "Your message",
     "message.assistantLabel": "Assistant message",
     "message.pendingUserLabel": "Sending your message",
@@ -306,7 +304,6 @@ const messages = {
     "sessionContext.paused": "{profile} 需要你决定",
     "sessionContext.failed": "{profile} 已因错误停止",
     "sessionContext.aborted": "{profile} 已停止",
-    "message.sending": "发送中",
     "message.userLabel": "你的消息",
     "message.assistantLabel": "助手消息",
     "message.pendingUserLabel": "正在发送你的消息",
