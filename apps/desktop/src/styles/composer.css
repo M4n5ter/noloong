@@ -8,6 +8,19 @@
   margin: 0 auto;
 }
 
+.composer:has(.composer-editor-shell.expanded.keyboard-focus)::before {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  height: calc(var(--composer-expanded-editor-height) + var(--composer-height) + 1px);
+  border-radius: 26px 26px 34px 34px;
+  box-shadow: 0 0 0 3px rgba(188, 212, 232, 0.12);
+  pointer-events: none;
+  content: "";
+}
+
 .composer-capsule {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -27,6 +40,9 @@
   box-shadow:
     0 18px 54px rgba(0, 0, 0, 0.2),
     inset 0 0 0 1px rgba(243, 239, 228, 0.025);
+  transition:
+    background 170ms ease,
+    box-shadow 170ms ease;
 }
 
 .composer-capsule:has(.composer-editor-shell.keyboard-focus:not(.expanded)) {
@@ -39,12 +55,18 @@
 
 .composer:has(.composer-editor-shell.expanded) .composer-capsule {
   border-color: rgba(243, 239, 228, 0.1);
-  border-top-color: rgba(243, 239, 228, 0.045);
+  border-top-color: transparent;
   border-radius: 0 0 34px 34px;
   background:
     linear-gradient(180deg, rgba(17, 19, 15, 0.88), rgba(23, 25, 20, 0.82)),
     rgba(23, 25, 20, 0.82);
   box-shadow: 0 22px 62px rgba(0, 0, 0, 0.24);
+}
+
+.composer:has(.composer-editor-shell.expanded.keyboard-focus) .composer-capsule {
+  border-color: var(--focus-border);
+  border-top-color: transparent;
+  box-shadow: 0 22px 62px rgba(0, 0, 0, 0.26);
 }
 
 .composer.dragging .composer-capsule,
@@ -101,6 +123,7 @@
   overflow: hidden;
   isolation: isolate;
   border: 1px solid rgba(243, 239, 228, 0.1);
+  border-bottom-color: transparent;
   border-radius: 26px 26px 0 0;
   -webkit-backdrop-filter: blur(16px) saturate(1.03);
   backdrop-filter: blur(16px) saturate(1.03);
@@ -113,9 +136,9 @@
 
 .composer-editor-shell.expanded.keyboard-focus {
   border-color: var(--focus-border);
+  border-bottom-color: transparent;
   box-shadow:
     0 16px 52px rgba(0, 0, 0, 0.26),
-    0 0 0 3px rgba(188, 212, 232, 0.12),
     inset 0 0 0 1px var(--focus-ring-soft);
 }
 
@@ -206,6 +229,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .composer-capsule {
+    transition: none;
+  }
+
+  .composer:has(.composer-editor-shell.expanded.keyboard-focus)::before {
+    transition: none;
+  }
+
   .composer-editor-shell.expanded {
     animation: none;
   }

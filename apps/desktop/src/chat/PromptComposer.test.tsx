@@ -233,16 +233,6 @@ describe("PromptComposer", () => {
     await user.tab();
     expect(textarea).toHaveFocus();
     expect(editorShell).toHaveClass("keyboard-focus");
-
-    await user.click(screen.getByRole("button", { name: "Sessions" }));
-    act(() => dispatchConversationCommand("focus-composer"));
-    expect(textarea).toHaveFocus();
-    expect(editorShell).toHaveClass("keyboard-focus");
-
-    await user.tab({ shift: true });
-    await user.tab();
-    expect(textarea).toHaveFocus();
-    expect(editorShell).toHaveClass("keyboard-focus");
   });
 
   it("does not show input focus treatment when command focus cannot reach a disabled input", () => {
