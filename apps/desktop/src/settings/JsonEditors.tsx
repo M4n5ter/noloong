@@ -130,20 +130,30 @@ export function JsonListEditor<T>({
     });
   }, [items.length]);
 
+  const addButton = (
+    <button
+      className="text-button icon-text"
+      onClick={() => {
+        setItemKeys((current) => [...current, nextJsonEditorKey()]);
+        onUpsert(fallback, null);
+      }}
+      type="button"
+    >
+      <Plus size={15} />
+      <span>{addLabel}</span>
+    </button>
+  );
+
   return (
     <div className="json-list">
-      <button
-        className="text-button icon-text"
-        onClick={() => {
-          setItemKeys((current) => [...current, nextJsonEditorKey()]);
-          onUpsert(fallback, null);
-        }}
-        type="button"
-      >
-        <Plus size={15} />
-        <span>{addLabel}</span>
-      </button>
-      {items.length === 0 ? <p className="muted">{emptyLabel}</p> : null}
+      {items.length === 0 ? (
+        <div className="json-list-empty">
+          <p className="muted">{emptyLabel}</p>
+          {addButton}
+        </div>
+      ) : (
+        addButton
+      )}
       {items.map((item, index) => (
         <div className="json-list-item" key={itemKeys[index] ?? index}>
           <JsonObjectEditor

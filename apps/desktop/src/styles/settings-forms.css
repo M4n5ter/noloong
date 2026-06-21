@@ -66,6 +66,25 @@
   gap: 14px;
 }
 
+.json-list > .text-button {
+  justify-self: start;
+}
+
+.json-list-empty {
+  display: flex;
+  align-self: start;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(243, 239, 228, 0.055);
+}
+
+.json-list-empty > .muted {
+  margin: 0;
+}
+
 .lens-form label,
 .json-field {
   display: grid;
@@ -244,6 +263,11 @@
   .lens-form > .inline-actions,
   .lens-form .check-row {
     padding-left: 0;
+  }
+
+  .json-list-empty {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .json-field small {
