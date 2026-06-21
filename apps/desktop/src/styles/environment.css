@@ -8,7 +8,7 @@
   --settings-pane-button-active-border: rgba(168, 196, 220, 0.18);
   --settings-pane-button-hover-bg: rgba(243, 239, 228, 0.032);
   --settings-pane-button-hover-border: rgba(243, 239, 228, 0.06);
-  --settings-pane-button-width: clamp(68px, 8vw, 92px);
+  --settings-pane-button-width: clamp(86px, 9vw, 104px);
   display: grid;
   height: 100%;
   min-height: 0;
