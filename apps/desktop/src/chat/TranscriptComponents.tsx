@@ -433,7 +433,7 @@ function ApprovalCard({
       aria-busy={resolving}
       aria-labelledby={titleId}
       aria-describedby={summaryId}
-      className={`activity-card approval-card approval-card-${approval.status}`}
+      className={`approval-card approval-card-${approval.status}`}
     >
       <header className="approval-head">
         <span aria-hidden="true" className="approval-glyph">
