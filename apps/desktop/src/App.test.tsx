@@ -474,7 +474,9 @@ describe("Noloong app chat regression harness", () => {
     const composer = await screen.findByRole("textbox", { name: "Write a message..." });
     await user.type(composer, "first line{Shift>}{Enter}{/Shift}second line");
 
-    expect(await screen.findByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Expand composer" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand composer" }));
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Write a message..." })).toHaveValue(
       "first line\nsecond line",
     );

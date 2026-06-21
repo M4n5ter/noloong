@@ -381,7 +381,8 @@ describe("PromptComposer", () => {
 
     const textarea = screen.getByRole("textbox", { name: "Write a message..." });
     await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
-    expect(await screen.findByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Expand composer" }));
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toBeInTheDocument();
 
     const editorShell = textarea.closest(".composer-editor-shell");
     expect(editorShell).toBeTruthy();
@@ -408,6 +409,37 @@ describe("PromptComposer", () => {
     fireEvent.scroll(textarea);
     await waitFor(() => expect(editorShell).not.toHaveClass("fade-top"));
     expect(editorShell).not.toHaveClass("fade-bottom");
+  });
+
+  it("keeps multiline input compact until the user expands it", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <PromptComposer
+        disabled={false}
+        i18n={createI18n("en")}
+        onCreateSession={vi.fn()}
+        onOpenSessions={vi.fn()}
+        onSubmit={vi.fn()}
+        placeholder="Write a message..."
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "Write a message..." });
+    await user.type(textarea, "first line{Shift>}{Enter}{/Shift}second line");
+
+    const expandButton = await screen.findByRole("button", { name: "Expand composer" });
+    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+    expect(textarea.closest(".composer-editor-shell")).toHaveClass("previewing");
+    expect(textarea.closest(".composer-editor-shell")).not.toHaveClass("expanded");
+
+    await user.click(expandButton);
+
+    expect(screen.getByRole("button", { name: "Collapse composer" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(textarea.closest(".composer-editor-shell")).toHaveClass("expanded");
   });
 
   it("exposes the expanded editor relationship to assistive technology", async () => {

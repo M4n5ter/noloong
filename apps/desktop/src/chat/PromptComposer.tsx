@@ -300,11 +300,7 @@ export function PromptComposer({
               className="composer-input"
               disabled={disabled}
               onChange={(event) => {
-                const nextText = event.target.value;
-                if (!expanded && !text.includes("\n") && nextText.includes("\n")) {
-                  setExpanded(true);
-                }
-                setText(nextText);
+                setText(event.target.value);
               }}
               onBlur={() => {
                 setKeyboardFocusVisible(false);
