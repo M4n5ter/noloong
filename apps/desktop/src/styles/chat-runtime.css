@@ -141,20 +141,22 @@
 }
 
 .message.user {
-  justify-self: stretch;
-  width: 100%;
-  max-width: 100%;
+  justify-self: end;
+  width: max-content;
+  max-width: min(620px, 100%);
   min-width: 0;
   gap: 6px;
-  padding: 10px 0 10px 16px;
-  border-left: 1px solid rgba(229, 212, 179, 0.18);
-  color: rgba(243, 239, 228, 0.7);
+  padding: 11px 15px 12px;
+  border: 1px solid rgba(229, 212, 179, 0.12);
+  border-radius: 18px;
+  background: rgba(229, 212, 179, 0.045);
+  color: rgba(243, 239, 228, 0.72);
   text-align: left;
 }
 
 .message.user p {
   min-width: 0;
-  max-width: 680px;
+  max-width: 100%;
   margin: 0;
   padding: 0;
   border: 0;
@@ -166,10 +168,10 @@
 }
 
 .message.user.pending {
-  border-left-color: rgba(229, 212, 179, 0.34);
+  border-color: rgba(229, 212, 179, 0.18);
   background:
-    linear-gradient(90deg, rgba(229, 212, 179, 0.055), transparent 42%),
-    transparent;
+    linear-gradient(180deg, rgba(229, 212, 179, 0.062), rgba(229, 212, 179, 0.035)),
+    rgba(23, 25, 20, 0.28);
 }
 
 .markdown-body {
@@ -204,18 +206,17 @@
 
 .markdown-body blockquote {
   margin: 18px 0;
-  padding: 10px 14px 11px;
-  border-left: 2px solid rgba(168, 196, 220, 0.46);
-  border-radius: 0 10px 10px 0;
-  background: rgba(168, 196, 220, 0.055);
-  color: rgba(243, 239, 228, 0.68);
+  padding: 8px 0 8px 14px;
+  border-left: 2px solid rgba(168, 196, 220, 0.34);
+  border-radius: 0;
+  background: transparent;
+  color: rgba(243, 239, 228, 0.6);
 }
 
 .message.user .markdown-body blockquote {
   margin: 10px 0;
-  border-left-color: rgba(229, 212, 179, 0.5);
-  background: rgba(229, 212, 179, 0.045);
-  color: rgba(243, 239, 228, 0.72);
+  border-left-color: rgba(229, 212, 179, 0.28);
+  color: rgba(243, 239, 228, 0.58);
 }
 
 .markdown-body blockquote > :first-child {
