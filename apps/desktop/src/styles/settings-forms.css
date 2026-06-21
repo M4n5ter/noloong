@@ -262,7 +262,7 @@
   color: #e5d4b3;
 }
 
-@media (max-width: 760px) {
+@media (max-width: 640px) {
   .lens-form > label:not(.check-row),
   .subsection > label:not(.check-row),
   .lens-form > .json-field {
