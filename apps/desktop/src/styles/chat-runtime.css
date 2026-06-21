@@ -170,6 +170,7 @@
 }
 
 .message.user.pending {
+  justify-self: start;
   border-color: rgba(229, 212, 179, 0.18);
   background:
     linear-gradient(180deg, rgba(229, 212, 179, 0.062), rgba(229, 212, 179, 0.035)),
