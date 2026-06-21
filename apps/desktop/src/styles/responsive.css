@@ -4,6 +4,7 @@
   }
 
   .chat-surface {
+    --composer-bottom-clearance: 18px;
     padding: 72px 14px 18px;
   }
 
@@ -29,8 +30,8 @@
 }
 
 @media (max-width: 760px) {
-  .composer {
-    width: calc(100% - 20px);
+  .chat-surface {
+    --composer-track-width: calc(100vw - 48px);
   }
 
   .composer-capsule {

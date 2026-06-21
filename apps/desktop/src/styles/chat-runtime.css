@@ -1,8 +1,22 @@
 .chat-surface {
+  --composer-track-width: min(760px, calc(100vw - clamp(24px, 7.5vw, 96px)));
+  --composer-bottom-clearance: 28px;
+  --composer-height: 68px;
+  --composer-expanded-editor-gap: 20px;
+  --composer-expanded-editor-height: 224px;
+  --composer-active-height: var(--composer-height);
+  --composer-popover-gap: 16px;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
+}
+
+.chat-surface:has(.composer-editor-shell.expanded) {
+  --composer-active-height: calc(
+    var(--composer-height) + var(--composer-expanded-editor-gap) +
+      var(--composer-expanded-editor-height)
+  );
 }
 
 .conversation-surface {
@@ -774,7 +788,12 @@
   --sessions-panel-bg:
     linear-gradient(180deg, rgba(24, 26, 21, 0.92), rgba(17, 19, 15, 0.9)),
     rgba(18, 20, 16, 0.9);
+  --sessions-panel-arrow-bg: rgba(17, 19, 15, 0.9);
+  --sessions-panel-bottom-offset: calc(
+    var(--composer-bottom-clearance) + var(--composer-active-height) + var(--composer-popover-gap)
+  );
   --sessions-panel-border: rgba(243, 239, 228, 0.105);
+  --sessions-panel-pointer-inline: 26px;
   --sessions-row-bg: rgba(243, 239, 228, 0.025);
   --sessions-row-bg-hover: rgba(243, 239, 228, 0.04);
   --sessions-row-bg-selected: rgba(243, 239, 228, 0.048);
@@ -782,11 +801,11 @@
   --sessions-row-border-selected: rgba(168, 196, 220, 0.28);
   position: absolute;
   z-index: 8;
-  top: clamp(76px, 11vh, 104px);
-  left: clamp(24px, 5vw, 72px);
+  bottom: var(--sessions-panel-bottom-offset);
+  left: calc(50% - (var(--composer-track-width) / 2));
   display: grid;
   width: min(340px, calc(100vw - 48px));
-  max-height: min(560px, calc(100vh - 168px));
+  max-height: min(560px, calc(100vh - var(--sessions-panel-bottom-offset) - 24px));
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   padding: 14px;
@@ -798,11 +817,32 @@
   backdrop-filter: blur(18px) saturate(1.04);
 }
 
+.sessions-panel::after {
+  position: absolute;
+  bottom: -5px;
+  left: var(--sessions-panel-pointer-inline);
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid var(--sessions-panel-border);
+  border-bottom: 1px solid var(--sessions-panel-border);
+  background: var(--sessions-panel-arrow-bg);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.chat-surface:has(.composer-editor-shell.expanded) .sessions-panel::after {
+  display: none;
+}
+
 @media (prefers-reduced-transparency: reduce) {
   .sessions-panel {
     background: #171914;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+
+  .sessions-panel::after {
+    background: #171914;
   }
 }
 

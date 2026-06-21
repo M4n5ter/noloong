@@ -1,7 +1,7 @@
 .composer {
   position: relative;
   display: grid;
-  width: min(760px, calc(100% - clamp(24px, 7.5vw, 96px)));
+  width: var(--composer-track-width);
   max-width: 760px;
   min-width: 0;
   gap: 8px;
@@ -15,7 +15,7 @@
   grid-template-rows: 38px;
   width: 100%;
   min-width: 0;
-  height: 68px;
+  height: var(--composer-height);
   align-content: center;
   align-items: center;
   justify-items: stretch;
@@ -136,7 +136,7 @@
 
 .composer-editor-shell.expanded {
   position: absolute;
-  bottom: calc(100% + 20px);
+  bottom: calc(100% + var(--composer-expanded-editor-gap));
   right: 0;
   left: 0;
   z-index: 2;
@@ -279,7 +279,7 @@
   display: block;
   position: relative;
   z-index: 1;
-  height: 224px;
+  height: var(--composer-expanded-editor-height);
   padding: 26px var(--composer-editor-action-space) 26px 17px;
   overflow-y: auto;
   scrollbar-color: rgba(243, 239, 228, 0.18) transparent;
