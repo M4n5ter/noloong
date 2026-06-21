@@ -7,10 +7,10 @@
 
 .lens-header h2 {
   margin: 0;
-  color: rgba(243, 239, 228, 0.72);
-  font-size: 15px;
+  color: rgba(243, 239, 228, 0.78);
+  font-size: 16px;
   font-weight: 620;
-  line-height: 1.2;
+  line-height: 20px;
 }
 
 .lens-header p {
@@ -52,13 +52,23 @@
 }
 
 .lens-form {
-  --settings-control-width: 420px;
+  --settings-control-bg: rgba(23, 25, 20, 0.42);
+  --settings-control-bg-hover: rgba(23, 25, 20, 0.52);
+  --settings-control-bg-focus: rgba(23, 25, 20, 0.62);
+  --settings-control-border: rgba(243, 239, 228, 0.075);
+  --settings-control-border-hover: rgba(243, 239, 228, 0.105);
+  --settings-control-border-focus: rgba(206, 225, 239, 0.72);
+  --settings-control-focus-ring: rgba(188, 212, 232, 0.46);
+  --settings-control-radius: 10px;
+  --settings-control-height: 36px;
+  --settings-control-width: 390px;
+  --settings-row-separator: rgba(243, 239, 228, 0.055);
   --settings-label-width: 188px;
   --settings-row-gap: 18px;
   --settings-control-offset: calc(var(--settings-label-width) + var(--settings-row-gap));
   align-content: start;
   gap: 0;
-  padding: 2px 0 16px;
+  padding: 0 0 16px;
 }
 
 .jsonc-pane,
@@ -96,14 +106,14 @@
 .lens-form > label:not(.check-row),
 .subsection > label:not(.check-row),
 .lens-form > .json-field {
-  min-height: 48px;
+  min-height: 46px;
   grid-template-columns:
     minmax(132px, var(--settings-label-width))
     minmax(0, var(--settings-control-width));
   align-items: center;
   gap: var(--settings-row-gap);
-  padding: 8px 0;
-  border-top: 1px solid rgba(243, 239, 228, 0.055);
+  padding: 7px 0;
+  border-top: 1px solid var(--settings-row-separator);
 }
 
 .lens-form > label:first-child {
@@ -124,36 +134,43 @@
 .lens-form textarea,
 .json-field textarea {
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid rgba(243, 239, 228, 0.075);
-  border-radius: 16px;
+  padding: 8px 11px;
+  border: 1px solid var(--settings-control-border);
+  border-radius: var(--settings-control-radius);
   outline: none;
-  background: rgba(23, 25, 20, 0.42);
+  background: var(--settings-control-bg);
   box-shadow: inset 0 1px 0 rgba(243, 239, 228, 0.018);
   color: rgba(243, 239, 228, 0.88);
+  font-size: 13px;
+  line-height: 18px;
   transition:
     border-color 140ms ease,
     background 140ms ease,
     box-shadow 140ms ease;
 }
 
+.lens-form input:not([type="checkbox"]),
+.lens-form select {
+  min-height: var(--settings-control-height);
+}
+
 .lens-form input:not([type="checkbox"]):hover,
 .lens-form select:hover,
 .lens-form textarea:hover,
 .json-field textarea:hover {
-  border-color: rgba(243, 239, 228, 0.105);
-  background: rgba(23, 25, 20, 0.52);
+  border-color: var(--settings-control-border-hover);
+  background: var(--settings-control-bg-hover);
 }
 
 .lens-form input:not([type="checkbox"]):focus,
 .lens-form select:focus,
 .lens-form textarea:focus,
 .json-field textarea:focus {
-  border-color: rgba(206, 225, 239, 0.72);
-  background: rgba(23, 25, 20, 0.62);
+  border-color: var(--settings-control-border-focus);
+  background: var(--settings-control-bg-focus);
   box-shadow:
     inset 0 1px 0 rgba(243, 239, 228, 0.026),
-    0 0 0 3px rgba(188, 212, 232, 0.46);
+    0 0 0 3px var(--settings-control-focus-ring);
 }
 
 .inline-actions,
@@ -166,7 +183,7 @@
 .lens-form > .inline-actions {
   justify-content: flex-start;
   padding: 12px 0 12px min(var(--settings-control-offset), 30%);
-  border-top: 1px solid rgba(243, 239, 228, 0.055);
+  border-top: 1px solid var(--settings-row-separator);
 }
 
 .lens-form .check-row {
@@ -175,7 +192,7 @@
   gap: 8px;
   min-height: 42px;
   padding: 8px 0 8px min(var(--settings-control-offset), 30%);
-  border-top: 1px solid rgba(243, 239, 228, 0.055);
+  border-top: 1px solid var(--settings-row-separator);
 }
 
 .lens-form .check-row input[type="checkbox"] {
@@ -200,10 +217,10 @@
 
 .subsection h3 {
   margin: 0 0 6px;
-  color: rgba(243, 239, 228, 0.62);
+  color: rgba(243, 239, 228, 0.68);
   font-size: 13px;
   font-weight: 620;
-  line-height: 1.2;
+  line-height: 18px;
 }
 
 .jsonc-pane {
@@ -227,7 +244,7 @@
   min-height: 300px;
   max-height: 100%;
   border: 1px solid rgba(243, 239, 228, 0.1);
-  border-radius: 22px;
+  border-radius: 16px;
   overflow: hidden;
   background: #171914;
 }
@@ -237,7 +254,7 @@
   gap: 10px;
   padding: 12px;
   border: 1px solid rgba(243, 239, 228, 0.09);
-  border-radius: 22px;
+  border-radius: 16px;
 }
 
 .json-field small {
