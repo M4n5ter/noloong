@@ -90,11 +90,6 @@
   white-space: nowrap;
 }
 
-.composer:has(.composer-editor-shell.expanded) .composer-preview {
-  color: rgba(243, 239, 228, 0.58);
-  font-size: 14px;
-}
-
 :dir(rtl) .composer-preview {
   -webkit-mask-image: linear-gradient(
     270deg,

@@ -42,7 +42,6 @@ export type I18nKey =
   | "composer.send"
   | "composer.expand"
   | "composer.collapse"
-  | "composer.editingDraft"
   | "composer.removeAttachment"
   | "tool.running"
   | "tool.done"
@@ -182,7 +181,6 @@ const messages = {
     "composer.send": "Send message",
     "composer.expand": "Expand composer",
     "composer.collapse": "Collapse composer",
-    "composer.editingDraft": "Editing draft",
     "composer.removeAttachment": "Remove {name}",
     "tool.running": "Running",
     "tool.done": "Done",
@@ -321,7 +319,6 @@ const messages = {
     "composer.send": "发送消息",
     "composer.expand": "展开输入区",
     "composer.collapse": "收起输入区",
-    "composer.editingDraft": "正在编辑草稿",
     "composer.removeAttachment": "移除 {name}",
     "tool.running": "运行中",
     "tool.done": "完成",

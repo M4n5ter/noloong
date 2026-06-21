@@ -383,9 +383,7 @@ describe("PromptComposer", () => {
     await user.type(textarea, longDraft);
     await user.click(await screen.findByRole("button", { name: "Expand composer" }));
 
-    const preview = document.querySelector(".composer-preview");
-    expect(preview).toHaveTextContent("Editing draft");
-    expect(preview).not.toHaveTextContent("deliberately long composer");
+    expect(document.querySelector(".composer-preview")).not.toBeInTheDocument();
     expect(textarea).toHaveValue(longDraft);
   });
 });

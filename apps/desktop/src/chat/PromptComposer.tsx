@@ -45,9 +45,10 @@ export function PromptComposer({
   const hasDraft = text.length > 0 || attachments.length > 0;
   const canSend = (text.trim().length > 0 || attachments.length > 0) && !disabled && !canAbort;
   const canClear = hasDraft && !disabled && !canAbort;
-  const canExpand = expanded || needsExpandedComposer(text);
-  const previewingCompactOverflow = canExpand && !expanded;
-  const compactPreview = expanded ? i18n.t("composer.editingDraft") : firstPreviewLine(text);
+  const needsExpansion = needsExpandedComposer(text);
+  const canExpand = expanded || needsExpansion;
+  const previewingCompactOverflow = needsExpansion && !expanded;
+  const compactPreview = firstPreviewLine(text);
   const expandLabel = i18n.t(expanded ? "composer.collapse" : "composer.expand");
   const sendLabel = canAbort ? i18n.t("run.stop") : i18n.t("composer.send");
 
@@ -259,7 +260,7 @@ export function PromptComposer({
           </button>
         </div>
         <div className="composer-input-shell">
-          {expanded || previewingCompactOverflow ? (
+          {previewingCompactOverflow ? (
             <span aria-hidden="true" className="composer-preview">
               {compactPreview || placeholder}
             </span>
