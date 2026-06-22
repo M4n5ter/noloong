@@ -29,6 +29,7 @@ describe("approval presentation", () => {
       { id: "write", label: "Can change files in the project.", detail: null },
     ]);
     expect(view).toMatchObject({
+      cancelNote: "Cancel keeps this action from running.",
       confirmTone: "caution",
       summary: "This action can change files in your project.",
     });

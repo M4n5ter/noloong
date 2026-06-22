@@ -13,6 +13,7 @@ export type ApprovalDecisionViewModel = {
   cwd: string | null;
   targetPaths: string[];
   permissions: ApprovalPermissionViewModel[];
+  cancelNote: string;
   confirmLabel: string;
   confirmTone: "normal" | "caution";
 };
@@ -47,6 +48,7 @@ export function approvalDecisionViewModel(
     cwd: approval.cwd,
     targetPaths: uniqueNonEmptyStrings(approval.targetPaths),
     permissions: permissionViewModels(approval.permissions, i18n),
+    cancelNote: i18n.t("approval.cancelNote"),
     confirmLabel: approval.command ? i18n.t("approval.runCommand") : i18n.t("approval.continue"),
     confirmTone: risk === "project-write" ? "caution" : "normal",
   };

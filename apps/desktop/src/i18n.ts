@@ -68,6 +68,7 @@ export type I18nKey =
   | "approval.affectedFiles"
   | "approval.reason"
   | "approval.permissions"
+  | "approval.cancelNote"
   | "approval.runCommand"
   | "approval.continue"
   | "approval.cancel"
@@ -205,6 +206,7 @@ const messages = {
     "approval.affectedFiles": "Affected files",
     "approval.reason": "Why",
     "approval.permissions": "Access",
+    "approval.cancelNote": "Cancel keeps this action from running.",
     "approval.runCommand": "Run Local Command",
     "approval.continue": "Continue",
     "approval.cancel": "Cancel",
@@ -341,6 +343,7 @@ const messages = {
     "approval.affectedFiles": "受影响文件",
     "approval.reason": "原因",
     "approval.permissions": "权限",
+    "approval.cancelNote": "取消后这次操作不会执行。",
     "approval.runCommand": "运行本地命令",
     "approval.continue": "继续",
     "approval.cancel": "取消",

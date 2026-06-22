@@ -68,7 +68,7 @@ describe("approval decisions", () => {
     );
     expect(within(approval).getByRole("heading", { name: "Run a local command?" })).toBeVisible();
     expect(approval).toHaveAccessibleDescription(
-      "This action can change files in your project.",
+      "This action can change files in your project. This preview-only action would update local project files. Cancel keeps this action from running.",
     );
     expect(within(approval).getByRole("button", { name: "Run Local Command" })).toBeVisible();
     expect(within(approval).getByRole("button", { name: "Cancel" })).toBeVisible();
@@ -100,6 +100,7 @@ describe("approval decisions", () => {
     await user.click(within(approval).getByRole("button", { name: "Cancel" }));
 
     await waitFor(() => expect(within(approval).getByText("Canceled")).toBeVisible());
+    expect(within(approval).queryByText("Cancel keeps this action from running.")).not.toBeInTheDocument();
     expect(within(approval).queryByRole("button", { name: "Run Local Command" })).not.toBeInTheDocument();
     expect(within(approval).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     expect(
@@ -144,6 +145,7 @@ describe("approval decisions", () => {
     expect(within(card).getByText("Runs inside the active project shell.")).toBeVisible();
     expect(within(card).getByText("Uses the selected working folder.")).toBeVisible();
     expect(within(card).getByText("Call MCP tool search from the design server.")).toBeVisible();
+    expect(within(card).getByText("Cancel keeps this action from running.")).toBeVisible();
     expect(within(card).queryByText("host.exec.start")).not.toBeInTheDocument();
 
     await user.click(within(card).getByRole("button", { name: "Run Local Command" }));
@@ -209,6 +211,7 @@ describe("approval decisions", () => {
     expect(within(card).getByRole("heading", { name: "运行本地命令？" })).toBeVisible();
     expect(within(card).getByText("等待你决定")).toBeVisible();
     expect(within(card).getByText("受影响文件")).toBeVisible();
+    expect(within(card).getByText("取消后这次操作不会执行。")).toBeVisible();
     expect(within(card).getByRole("button", { name: "运行本地命令" })).toBeVisible();
     expect(within(card).getByRole("button", { name: "取消" })).toBeVisible();
   });

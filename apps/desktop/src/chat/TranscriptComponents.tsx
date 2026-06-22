@@ -444,8 +444,11 @@ function ApprovalCard({
           <h2 id={titleId}>{decision.title}</h2>
         </div>
       </header>
-      <p className="approval-summary" id={summaryId}>{decision.summary}</p>
-      {decision.reason ? <p className="approval-reason">{decision.reason}</p> : null}
+      <div className="approval-decision-strip" id={summaryId}>
+        <p className="approval-summary">{decision.summary}</p>
+        {decision.reason ? <p className="approval-reason">{decision.reason}</p> : null}
+        {pending ? <p className="approval-cancel-note">{decision.cancelNote}</p> : null}
+      </div>
       {decision.command ? (
         <div className="approval-command-block">
           <span>{i18n.t("approval.command")}</span>
