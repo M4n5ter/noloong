@@ -76,12 +76,13 @@ export function toolActivityViewModel(
     : tool.status === "running"
       ? i18n.t("tool.running")
       : i18n.t("tool.done");
+  const auditLines = [...tool.updates, tool.outputText].filter((line) => line.trim().length > 0);
 
   return {
     title: toolTitle(tool.toolName, i18n),
     auditLabel: tool.toolName || null,
     detail: tool.outputText || tool.updates.at(-1) || "",
-    auditDetail: tool.updates.length > 0 ? tool.updates.join("\n") : "",
+    auditDetail: auditLines.join("\n"),
     statusLabel,
   };
 }

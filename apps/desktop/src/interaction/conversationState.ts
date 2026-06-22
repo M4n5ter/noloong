@@ -43,6 +43,7 @@ export type ToolTimelineItem = {
   updates: string[];
   outputText: string;
   isError: boolean;
+  startedDuringReasoning: boolean;
 };
 
 export type ApprovalTimelineItem = {
@@ -195,6 +196,7 @@ export function applyDisplayEventToConversation(
           ...tool,
           toolName: event.toolName,
           status: "running",
+          startedDuringReasoning: tool.startedDuringReasoning || hasRunningReasoningContext(state.timeline),
         })),
       };
     case "tool_updated":
@@ -551,7 +553,13 @@ function defaultTool(toolCallId: string): ToolTimelineItem {
     updates: [],
     outputText: "",
     isError: false,
+    startedDuringReasoning: false,
   };
+}
+
+function hasRunningReasoningContext(timeline: TimelineItem[]): boolean {
+  const parent = nearestPreviousNonToolActivity(timeline, timeline.length);
+  return parent?.kind === "reasoning" && parent.status === "running";
 }
 
 function upsertTool(
@@ -566,6 +574,19 @@ function upsertTool(
   return timeline.map((item, itemIndex) =>
     itemIndex === index && item.kind === "tool" ? update(item) : item,
   );
+}
+
+function nearestPreviousNonToolActivity(
+  timeline: TimelineItem[],
+  beforeIndex: number,
+): TimelineItem | undefined {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (item.kind !== "tool") {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function upsertApprovalRequest(

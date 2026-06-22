@@ -162,6 +162,85 @@ describe("conversation timeline reducer", () => {
       updates: ["running"],
       outputText: "done",
       isError: false,
+      startedDuringReasoning: false,
+    });
+  });
+
+  it("marks tools started during active reasoning as reasoning activity", () => {
+    const events: AppDisplayEvent[] = [
+      {
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      },
+      {
+        type: "thought_delta",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        kind: "summary",
+        text: "checking",
+      },
+      {
+        type: "tool_started",
+        toolCallId: "call-1",
+        toolName: "desktop.preview.inspect",
+      },
+      {
+        type: "thought_completed",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        elapsedMs: 360,
+      },
+      {
+        type: "tool_completed",
+        toolCallId: "call-1",
+        output: {
+          content: [{ type: "text", text: "done" }],
+          isError: false,
+        },
+      },
+    ];
+    const state = events.reduce(applyDisplayEventToConversation, emptyConversationState());
+
+    expect(state.timeline[1]).toMatchObject({
+      kind: "tool",
+      startedDuringReasoning: true,
+      status: "completed",
+      outputText: "done",
+    });
+  });
+
+  it("keeps tools started after reasoning completion independent", () => {
+    const events: AppDisplayEvent[] = [
+      {
+        type: "thought_started",
+        runId: "run-1",
+        thoughtId: "thought-1",
+      },
+      {
+        type: "thought_delta",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        kind: "summary",
+        text: "checking",
+      },
+      {
+        type: "thought_completed",
+        runId: "run-1",
+        thoughtId: "thought-1",
+        elapsedMs: 360,
+      },
+      {
+        type: "tool_started",
+        toolCallId: "call-1",
+        toolName: "desktop.preview.inspect",
+      },
+    ];
+    const state = events.reduce(applyDisplayEventToConversation, emptyConversationState());
+
+    expect(state.timeline[1]).toMatchObject({
+      kind: "tool",
+      startedDuringReasoning: false,
     });
   });
 

@@ -136,6 +136,7 @@ describe("approval presentation", () => {
         updates: ["running pwd"],
         outputText: "",
         isError: false,
+        startedDuringReasoning: false,
       } satisfies ToolTimelineItem,
       i18n,
     );
@@ -159,6 +160,7 @@ describe("approval presentation", () => {
         updates: [],
         outputText: "Permission denied.",
         isError: true,
+        startedDuringReasoning: true,
       } satisfies ToolTimelineItem,
       i18n,
     );

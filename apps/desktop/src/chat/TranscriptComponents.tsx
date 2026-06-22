@@ -234,7 +234,7 @@ export function TranscriptView({
                 onResolveApproval={onResolveApproval}
                 onToggleReasoning={onToggleReasoning}
                 resolvingApprovalIds={resolvingApprovalIds}
-                subordinateToReasoning={isSubordinateActivity(item, timeline, index)}
+                subordinateToReasoning={item.kind === "tool" && item.startedDuringReasoning && !item.isError}
               />
             ))
           )}
@@ -382,6 +382,11 @@ function ToolActivityRow({
   tool: ToolTimelineItem;
 }) {
   const view = toolActivityViewModel(tool, i18n);
+  const showInlineStatus = !subordinateToReasoning;
+  const showInlineDetail = !subordinateToReasoning && view.detail;
+  const summaryLabel = subordinateToReasoning
+    ? `${view.title}, ${view.statusLabel}`
+    : undefined;
   return (
     <details
       className={[
@@ -393,14 +398,16 @@ function ToolActivityRow({
         .filter(Boolean)
         .join(" ")}
     >
-      <summary>
+      <summary aria-label={summaryLabel}>
         <span className="tool-activity-dot" aria-hidden="true" />
         <span className="tool-activity-disclosure" aria-hidden="true" />
         <span className="tool-activity-title">{view.title}</span>
-        <span className={`activity-status activity-status-${tool.status}`}>
-          {view.statusLabel}
-        </span>
-        {view.detail ? <span className="tool-activity-detail">{view.detail}</span> : null}
+        {showInlineStatus ? (
+          <span className={`activity-status activity-status-${tool.status}`}>
+            {view.statusLabel}
+          </span>
+        ) : null}
+        {showInlineDetail ? <span className="tool-activity-detail">{view.detail}</span> : null}
       </summary>
       {view.auditLabel || view.auditDetail ? (
         <div className="tool-activity-audit">
@@ -545,25 +552,4 @@ function timelineItemKey(item: TimelineItem): string {
     case "approval":
       return `approval:${item.approvalId}`;
   }
-}
-
-function isSubordinateActivity(item: TimelineItem, timeline: TimelineItem[], index: number): boolean {
-  if (item.kind !== "tool" || item.isError) {
-    return false;
-  }
-  const parent = nearestPreviousNonToolActivity(timeline, index);
-  return parent?.kind === "reasoning" && parent.status === "running";
-}
-
-function nearestPreviousNonToolActivity(
-  timeline: TimelineItem[],
-  index: number,
-): TimelineItem | undefined {
-  for (let itemIndex = index - 1; itemIndex >= 0; itemIndex -= 1) {
-    const item = timeline[itemIndex];
-    if (item?.kind !== "tool") {
-      return item;
-    }
-  }
-  return undefined;
 }
