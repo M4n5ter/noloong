@@ -109,12 +109,18 @@
 
 .transcript-content {
   display: grid;
+  min-height: 100%;
+  align-content: end;
   gap: 14px;
   width: min(760px, calc(100% - clamp(24px, 7.5vw, 96px)));
   max-width: 760px;
   min-width: 0;
   margin: 0 auto;
-  padding: clamp(38px, 8vh, 68px) 0 0;
+  padding: clamp(28px, 6vh, 52px) 0 clamp(28px, 5vh, 44px);
+}
+
+.conversation:has(.composer-editor-shell.expanded) .transcript-content:not(.transcript-content-empty) {
+  padding-bottom: calc(var(--composer-expanded-editor-height) + clamp(28px, 5vh, 44px));
 }
 
 .transcript-content-empty {
