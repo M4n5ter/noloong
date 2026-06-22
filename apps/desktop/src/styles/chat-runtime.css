@@ -787,21 +787,26 @@
 }
 
 .approval-actions .approval-confirm {
-  border-color: rgba(168, 196, 220, 0.34);
-  background: rgba(58, 84, 107, 0.5);
-  color: rgba(243, 239, 228, 0.88);
+  border-color: rgba(168, 196, 220, 0.3);
+  background: rgba(168, 196, 220, 0.075);
+  color: rgba(206, 225, 239, 0.88);
 }
 
 .approval-actions .approval-confirm-caution {
-  border-color: rgba(229, 212, 179, 0.42);
-  background: rgba(122, 89, 50, 0.62);
-  color: rgba(243, 239, 228, 0.92);
+  border-color: rgba(229, 212, 179, 0.34);
+  background: rgba(229, 212, 179, 0.075);
+  color: rgba(229, 212, 179, 0.9);
 }
 
 .approval-actions .approval-cancel {
   border-color: rgba(243, 239, 228, 0.16);
   background: rgba(23, 25, 20, 0.56);
   color: rgba(243, 239, 228, 0.74);
+}
+
+.approval-actions button:not(:disabled):hover {
+  border-color: rgba(243, 239, 228, 0.24);
+  background: rgba(243, 239, 228, 0.08);
 }
 
 .approval-actions button:disabled {
