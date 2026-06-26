@@ -1,60 +1,100 @@
-# Noloong Agent Core
+# Noloong
 
-`noloong-agent-core` is an event-sourced, providerless Rust agent kernel with a stateful agent UX layer.
+English | [简体中文](README_ZH.md)
 
-## Layers
+**Noloong is an early-stage, radically extensible agent runtime for building AI
+systems that can replace providers, tools, phases, hooks, context, compaction,
+auth, interaction bridges, and product behavior without turning the core into a
+fragile black box.**
 
-- Kernel: `AgentRuntime`, typed phase graph, `AgentEvent`, `AgentEffect`, reducer, and `EventStore`.
-- Native extensions: Rust `ModelProvider`, `ToolProvider`, `ContextProvider`, `PhaseNode`, and `ToolCallHook`.
-- Process extensions: newline-delimited JSON-RPC 2.0 over stdio.
-- Runtime plugins: `noloong-agent` manifest/profile declarations that start stdio extensions with approval, env isolation, and capability allowlists.
-- UX layer: `Agent` with persistent state, subscriptions, `prompt`, `continue_run`, `reset`, `abort`, `wait_for_idle`, steering, and follow-up queues.
+Noloong is still young. Expect fast-moving internals, incomplete polish, and
+occasional breaking changes while the project searches for the right product
+shape. The direction is deliberate: keep a small event-sourced Rust kernel
+reliable, move evolution into typed extension boundaries, and make it realistic
+for an AI agent to iterate on its own surrounding architecture while the core
+runtime remains auditable and recoverable.
 
-Detailed architecture notes live in [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md). Extension authoring details live in [`crates/noloong-agent-core/docs/EXTENSIONS.md`](crates/noloong-agent-core/docs/EXTENSIONS.md).
+## Why Noloong Exists
 
-## Build Info Source Snapshot
+Most agent systems collapse too many concerns into one opaque loop: model calls,
+tool execution, approvals, UI state, persistence, provider quirks, and product
+policy all blur together. Noloong takes the opposite path.
 
-The root `noloong` binary embeds a build-time source snapshot for immutable host inspection. This lets an agent see the Rust host, product layer, examples, schemas, and docs that were present when the binary was built, even when the original checkout is unavailable.
+It treats the agent runtime as a set of replaceable contracts. A model provider
+can come from Rust, TypeScript, Python, or another process. A tool, phase node,
+phase hook, tool hook, context provider, compactor, or auth provider can be
+swapped through the same runtime semantics. Product behavior evolves through
+manifests and plugins instead of hardcoded branching.
+
+The goal is not to make another chatbot. The goal is to make an agent substrate
+that can keep changing itself at the edges while preserving the properties that
+matter: event replay, structured failures, approval audit trails, typed state
+transitions, and a core that does not need to understand every future component
+in advance.
+
+## What Is Inside
+
+- **A providerless Rust kernel** with event-sourced execution, typed phases,
+  reducers, effect validation, replayable state, and structured run failure
+  handling.
+- **A replaceable phase graph** where providers, tools, context providers, phase
+  nodes, phase hooks, tool hooks, compactors, and auth providers share one
+  runtime contract.
+- **A cross-language extension bridge** over stdio JSON-RPC, with TypeScript and
+  Python conformance examples and a public conformance runner.
+- **A product runtime** with sessions, manifests, approvals, persistence,
+  follow-up queues, steering, background jobs, subagents, and local execution
+  tools.
+- **A macOS desktop app** built with Tauri and React, focused on reading,
+  editing, approvals, and configuration.
+- **Provider integrations** for OpenAI-compatible Chat Completions, OpenAI
+  Responses, ChatGPT subscription auth, and Anthropic Messages.
+- **Provider-neutral content models** for thinking, reasoning, media, tool calls,
+  provider replay payloads, and bounded tool output.
+- **Messaging bridges** for Telegram and Weixin iLink experiments.
+- **Profile configuration schema** for editor-friendly, checked configuration.
+
+## Product Principles
+
+Noloong is being shaped around a few hard preferences:
+
+- **Runtime parts should be replaceable:** model calls, tools, context, phases,
+  hooks, compaction, auth, interaction bridges, and product policy should not
+  require rewriting the kernel.
+- **Extensions should be language-agnostic:** Rust-native traits and process
+  extensions must share the same semantics, so a component can start as Python
+  or TypeScript and later move to Rust only when that is actually useful.
+- **Self-evolution belongs at the boundary:** an AI agent should be able to
+  modify plugins, manifests, prompts, bridge code, and tools without
+  destabilizing the event-sourced kernel.
+- **Failures should be structured:** malformed extension output, provider
+  errors, tool denials, approval pauses, aborts, and run failures should become
+  auditable state, not mysterious process corruption.
+- **Providerless core:** provider-specific behavior belongs behind explicit
+  configuration and adapters.
+- **Human approval is part of the runtime:** risky actions should be explained,
+  paused, resumed, and replayed as first-class events.
+- **Quiet desktop experience:** the app should help people read, decide, and
+  continue work without dashboard noise.
+
+## Quick Start
+
+### Prerequisites
+
+- Rust toolchain with edition 2024 support
+- Bun
+- macOS for the packaged desktop app
+
+### Run the desktop app
 
 ```bash
-noloong build-info manifest
-noloong build-info command
-noloong build-info source list
-noloong build-info source cat Cargo.toml
-noloong build-info source extract --output-dir /tmp/noloong-source
-noloong build-info source archive --output /tmp/noloong-source.tar.zst
-```
-
-The snapshot follows `.gitignore` and always excludes `.git/`. Treat `.gitignore` as the safety boundary before adding local credentials, databases, logs, or other private files to a checkout.
-
-This feature is for understanding and auditing the immutable Rust host behind a binary. It is not the recommended self-improvement path to extract the embedded source, edit it, and rebuild a replacement binary. Noloong should evolve through plugins first: write or update plugin code, reload the extension layer, and keep the Rust host small and stable unless the core contract itself needs to change.
-
-## Diagnostics
-
-The `noloong` binary uses the `log` facade with `env_logger`. The default diagnostic filter is `info`, and `RUST_LOG` overrides it:
-
-```bash
-RUST_LOG=noloong=debug cargo run -p noloong -- build-info command
-RUST_LOG=warn cargo run -p noloong -- build-info command
-```
-
-Diagnostics are written to stderr and do not mix into machine-readable stdout contracts such as profile schema output and build-info output. `noloong-extension-conformance` keeps report output on stdout and CLI errors on stderr so third-party extension test runners can consume it without enabling a logger backend.
-
-Release builds also install `human-panic` for user-friendly crash reports. Set `RUST_BACKTRACE=1` when you need the traditional panic backtrace.
-
-## Desktop App
-
-`noloong app` opens the Tauri/WebView desktop app and defaults to the Chat workspace. It is the primary local interaction client: users can create or continue agent sessions, send text, observe streaming replies, stop the current run, resolve inline approvals, and switch into Settings when they need to edit profile/provider/runtime configuration.
-
-```bash
+bun install
 bun run app:bundle
-cargo run -p noloong -- app
-cargo run -p noloong -- app --locale zh
-cargo run -p noloong -- app --profile-config ~/.agents/noloong/profile-config.jsonc
-cargo run -p noloong -- app --interaction-ws-url ws://127.0.0.1:3000/jsonrpc/ws --interaction-token "$TOKEN"
+cargo run -p noloong -- app \
+  --profile-config examples/profile-configs/chatgpt-codex-subscription.json
 ```
 
-For frontend-only development, run Vite directly:
+For frontend-only desktop development:
 
 ```bash
 bun run desktop:dev
@@ -62,363 +102,127 @@ bun run desktop:build
 bun run desktop:typecheck
 ```
 
-For the full Tauri shell, use the app scripts from the repository root:
+For the full Tauri shell:
 
 ```bash
 bun run app:dev
 bun run app:bundle
 ```
 
-`bun run app:bundle` builds the React frontend, compiles the Rust Tauri host, and generates an unsigned macOS `.app` bundle using product name `Noloong` and bundle identifier `com.noloong.desktop`.
-
-`noloong app` launches that packaged `.app` bundle and passes the prepared launch options to it through a private environment payload. This keeps the visible process as the real macOS app bundle, so Computer Use and other desktop automation tools can identify it by `com.noloong.desktop`. If the bundle is missing, build it first with `bun run app:bundle`; for hot-reload Tauri development, use `bun run app:dev`.
-
-Profile config path resolution is `--profile-config` first, then `NOLOONG_PROFILE_CONFIG`, then `~/.agents/noloong/profile-config.jsonc`. When the app opens a missing config path it starts from a local draft using a `chatgpt_responses` profile, `gpt-5.4-mini`, and automatic compaction; it does not write secrets. Other CLI commands use the same default path but still require the file to exist.
-
-The app UI locale is selected by `--locale zh|en` or system locale detection. It is independent from the agent profile locale. Saving writes canonical pretty JSON to the `.jsonc` path; existing comments and formatting are intentionally not preserved.
-
-By default the app starts an embedded loopback interaction runtime for the selected profile config. Embedded mode still uses the same JSON-RPC interaction protocol as an external runtime: the GUI initializes through the typed interaction client, creates/lists sessions through protocol requests, and subscribes to display notifications for transcript updates. The app does not hold the registry directly and does not maintain a second transcript source.
-
-Use `--interaction-ws-url` for external runtime mode. In that mode the app skips embedded server startup and connects to the supplied interaction WebSocket endpoint, optionally using `--interaction-token` for bearer authentication. Chat rendering is intentionally driven by display events only: assistant deltas/finals, reasoning summaries, tool activity, approvals, run lifecycle events, and failures must be represented in display events rather than raw provider or registry internals.
-
-On macOS, packaged builds are generated by Tauri rather than by a custom bundle helper. The visible app identity is split across Tauri config and Cargo target metadata: `crates/noloong-app/tauri.conf.json` owns product name `Noloong` and bundle identifier `com.noloong.desktop`, while `crates/noloong-app/Cargo.toml` keeps the package named `noloong-app` but declares the macOS app binary target as `Noloong`. That keeps `CFBundleExecutable`, the process name, and the visible app name aligned for desktop automation tools.
-
-## Examples
-
-```bash
-cargo run -p noloong-agent-core --example native_kernel
-cargo run -p noloong-agent-core --example stateful_agent
-```
-
-Built-in OpenAI-compatible Chat Completions provider:
-
-```rust
-use noloong_agent_core::{
-    AgentRuntime, ChatCompletionsProvider, ChatCompletionsProviderConfig,
-};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> noloong_agent_core::Result<()> {
-    let provider = ChatCompletionsProvider::new(
-        ChatCompletionsProviderConfig::new("openai-chat", "gpt-5.4-mini")
-            .api_key_env("OPENAI_API_KEY")
-            .max_completion_tokens(512),
-    )?;
-
-    let runtime = AgentRuntime::builder()
-        .with_model_provider(Arc::new(provider))
-        .max_turns(1)
-        .build()?;
-
-    let report = runtime.run("Say hello from Chat Completions").await?;
-    println!("messages: {}", report.state.messages.len());
-    Ok(())
-}
-```
-
-Provider-specific compatible APIs should be configured by the caller through `base_url`, `api_key_env`, headers, and `extra_body`; the core provider intentionally does not hardcode vendor/model presets. OpenAI Chat Completions uses `max_completion_tokens` for the generated-token upper bound, including visible output and reasoning tokens. Some compatible providers still require their legacy or provider-specific field names, so those overrides should stay in caller-owned `extra_body`. The root `noloong` profile config adds a product-layer `reasoning` convenience field for common provider switches, but it still maps to generic provider config and keeps `extraBody` as the final override.
-
-Built-in OpenAI Responses API provider:
-
-```rust
-use noloong_agent_core::{
-    AgentRuntime, ResponsesApiProvider, ResponsesApiProviderConfig,
-    ResponsesReasoningConfig, ResponsesReasoningEffort,
-};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> noloong_agent_core::Result<()> {
-    let provider = ResponsesApiProvider::new(
-        ResponsesApiProviderConfig::new("openai-responses", "gpt-5.4-mini")
-            .api_key_env("OPENAI_API_KEY")
-            .stateless()
-            .max_output_tokens(1024)
-            .reasoning(
-                ResponsesReasoningConfig::new()
-                    .effort(ResponsesReasoningEffort::Low),
-            ),
-    )?;
-
-    let runtime = AgentRuntime::builder()
-        .with_model_provider(Arc::new(provider))
-        .max_turns(1)
-        .build()?;
-
-    let report = runtime.run("Think briefly, then say hello").await?;
-    println!("messages: {}", report.state.messages.len());
-    Ok(())
-}
-```
-
-Responses-compatible routers stay caller-owned as well. For example, OpenRouter can be configured with `base_url("https://openrouter.ai/api/v1")`, `api_key_env("OPENROUTER_API_KEY")`, optional headers such as `X-Title`, and provider-specific request fields through `extra_body`; core does not provide an OpenRouter or model preset.
-
-Responses state is controlled by `ResponsesStateMode`. The default is stateless full input-array chaining with `store=false`; reasoning requests in this mode automatically ask for `reasoning.encrypted_content` so prior reasoning can be replayed without service-side item persistence. Use `.stateful()` or profile `stateMode: "stateful"` only when you intentionally want the upstream Responses service to persist response items with `store=true`.
-
-Built-in Anthropic Messages provider:
-
-```rust
-use noloong_agent_core::{
-    AgentRuntime, AnthropicEffort, AnthropicMessagesProvider, AnthropicMessagesProviderConfig,
-};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> noloong_agent_core::Result<()> {
-    let provider = AnthropicMessagesProvider::new(
-        AnthropicMessagesProviderConfig::new("anthropic", "claude-sonnet-4-6")
-            .api_key_env("ANTHROPIC_API_KEY")
-            .max_tokens(2048)
-            .output_effort(AnthropicEffort::Medium)
-            .adaptive_thinking(),
-    )?;
-
-    let runtime = AgentRuntime::builder()
-        .with_model_provider(Arc::new(provider))
-        .max_turns(1)
-        .build()?;
-
-    let report = runtime.run("Think briefly, then say hello").await?;
-    println!("messages: {}", report.state.messages.len());
-    Ok(())
-}
-```
-
-Anthropic-compatible routers should also stay caller-owned config. For example, OpenRouter's Anthropic Messages endpoint can use `base_url("https://openrouter.ai/api")`, `api_key_env("OPENROUTER_API_KEY")`, `auth_scheme(AnthropicAuthScheme::Bearer)`, and `without_anthropic_version()` without adding an OpenRouter preset to core.
-
-## ChatGPT Subscription
-
-The root `noloong` binary can use a ChatGPT subscription through the ChatGPT Codex Responses backend. Login writes a local token file at `~/.agents/noloong/chatgpt/token.json` by default. Set `NOLOONG_CHATGPT_TOKEN_FILE` or pass `--token-file` to use another path.
+### ChatGPT subscription flow
 
 ```bash
 cargo run -p noloong -- chatgpt login --flow browser
 cargo run -p noloong -- chatgpt status
 ```
 
-The profile example below uses token-file auth by default, uses `gpt-5.4-mini`, runs the ChatGPT Responses backend in stateless mode, and enables Codex compact automatically. Auto compaction uses Models.dev metadata for the main model input limit and triggers at 90% of that input limit; the compact request itself still goes through the ChatGPT subscription Responses compact endpoint.
+Then use the subscription profile:
 
 ```bash
-cargo run -p noloong -- telegram --profile-config examples/profile-configs/chatgpt-codex-subscription.json
+cargo run -p noloong -- app \
+  --profile-config examples/profile-configs/chatgpt-codex-subscription.json
 ```
 
-Set `"compaction": {"type": "none"}` in the profile to disable the ChatGPT Codex compact endpoint.
-Use [`examples/profile-configs/chatgpt-codex-subscription-stateful.json`](examples/profile-configs/chatgpt-codex-subscription-stateful.json) only when service-side Responses item storage is desired.
-
-## Weixin iLink
-
-The root `noloong` binary also includes a Weixin iLink interaction bridge. It is DM-first, final-only, and uses numbered text commands instead of buttons because iLink does not provide the same editing and inline-control surface as Telegram.
-
-```bash
-cargo run -p noloong -- weixin login
-cargo run -p noloong -- weixin login --qr-png /tmp/noloong-weixin-login-qr.png
-cargo run -p noloong -- weixin run \
-  --profile-config examples/profile-configs/weixin-chatgpt-subscription.json \
-  --weixin-account-id <account-id> \
-  --weixin-allowed-users <user-id>
-```
-
-Runtime config can also come from environment variables: `WEIXIN_ACCOUNT_ID`, `WEIXIN_TOKEN`, `WEIXIN_ALLOWED_USERS`, `WEIXIN_BASE_URL`, `WEIXIN_CDN_BASE_URL`, `WEIXIN_LOCALE`, and the `WEIXIN_FILE_*` size/download settings. Bridge state uses the unified SQLite state database and stores iLink `sync_buf` plus per-peer `context_token`; credentials saved by `weixin login` live under `~/.agents/noloong/weixin/accounts/`.
-
-`weixin login` renders a terminal QR and writes a PNG QR image to `/tmp/noloong-weixin-login-qr.png` by default; use `--qr-png` to choose a different path.
-
-Weixin cockpit commands must start with `/` or `／`; text without a prefix is ordinary agent input. Supported commands include `/帮助`, `/状态`, `/新会话`, `/会话`, `/切换 1`, `/删除 1`, `/运行配置`, `/队列`, `/清空队列`, `/审批`, `/同意 1`, `/拒绝 1`, `/进程 1`, and `/子任务 <prompt>`. Outbound text is split around a conservative 2000-character Weixin limit by default, and run progress uses iLink typing when the API returns a typing ticket.
-
-See [`crates/noloong-agent-weixin/docs/WEIXIN.md`](crates/noloong-agent-weixin/docs/WEIXIN.md) for media behavior, troubleshooting, and the live smoke checklist.
-
-## Profile Config Schema
-
-Root profile config has a checked-in JSON Schema at [`schemas/profile-config.schema.json`](schemas/profile-config.schema.json). Editors can reference it with a `$schema` field:
-
-```json
-{
-  "$schema": "../../schemas/profile-config.schema.json",
-  "profiles": [{
-    "profileId": "default",
-    "displayName": "Default",
-    "provider": {
-      "type": "responses",
-      "model": "gpt-5.4-mini",
-      "stateMode": "stateless",
-      "reasoning": {
-        "effort": "medium",
-        "summary": "auto"
-      }
-    }
-  }]
-}
-```
-
-Provider `reasoning` is typed by API format. Chat Completions supports `enabled` plus `effort` and maps common compatible thinking switches, including `reasoning_effort`. Responses and ChatGPT subscription profiles map to the Responses API reasoning object and expose `stateMode: "stateless" | "stateful"`; stateless reasoning requires encrypted reasoning replay, so `includeEncrypted: false` is valid only in stateful mode. Anthropic Messages maps `effort` to `output_config.effort` and can opt into `thinking: "adaptive"` or `thinking: "disabled"`. Chat Completions still applies `extraBody` last as an escape hatch; Responses reserves `store` and `include` for `stateMode` and reasoning replay.
-
-Regenerate or check the artifact with the root CLI:
+### Generate or check the profile schema
 
 ```bash
 cargo run -p noloong -- profile-config schema --output schemas/profile-config.schema.json
 cargo run -p noloong -- profile-config schema --check schemas/profile-config.schema.json
 ```
 
-Profile config loading also supports JSONC for comments and trailing commas; see [`examples/profile-configs/telegram-openrouter-free.jsonc`](examples/profile-configs/telegram-openrouter-free.jsonc). This applies only to root profile config files. JSON-RPC extension protocol messages, model provider payloads, and Telegram API payloads remain strict JSON. Noloong intentionally does not accept JSON5 syntax such as unquoted keys, single-quoted strings, or hexadecimal numbers, because that would widen the public config language beyond the editor-oriented JSONC use case.
+## Developer Paths
 
-## Extension Authoring
-
-The deterministic conformance examples are the fastest way to learn the stdio JSON-RPC extension contract. They do not call a real model; they exist to validate the bridge surface and pass `noloong-extension-conformance --profile strict`.
-
-TypeScript:
+### Agent core examples
 
 ```bash
-cd examples/extensions/typescript-conformance
-npm install
-npm run check
-npm run conformance
+cargo run -p noloong-agent-core --example native_kernel
+cargo run -p noloong-agent-core --example stateful_agent
 ```
 
-Python:
+### Extension conformance
 
 ```bash
-python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py
-cargo run -p noloong-agent-core --bin noloong-extension-conformance -- --profile strict -- python3 examples/extensions/python-conformance/full_conformance_extension.py
+python3 -m py_compile \
+  examples/extensions/python-conformance/noloong_jsonrpc.py \
+  examples/extensions/python-conformance/full_conformance_extension.py
+
+cargo run -p noloong-agent-core --bin noloong-extension-conformance -- \
+  --profile strict \
+  -- python3 examples/extensions/python-conformance/full_conformance_extension.py
 ```
 
-The TS AI SDK stdio provider example lives in `examples/extensions/ai-sdk-provider`. It is a real provider integration example, not the strict conformance template:
+### Messaging bridges
+
+Telegram and Weixin bridges are active experiments. They are useful for learning
+how the runtime behaves outside the desktop app, but their UX is intentionally
+different from the desktop surface.
 
 ```bash
-cd examples/extensions/ai-sdk-provider
-npm install
-OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.4-mini npm run start
+cargo run -p noloong -- telegram \
+  --profile-config examples/profile-configs/chatgpt-codex-subscription.json
+
+cargo run -p noloong -- weixin login
+cargo run -p noloong -- weixin run \
+  --profile-config examples/profile-configs/weixin-chatgpt-subscription.json \
+  --weixin-account-id <account-id> \
+  --weixin-allowed-users <user-id>
 ```
 
-The Rust side for launching that provider is:
+## Architecture Notes
 
-```bash
-cargo run -p noloong-agent-core --example stdio_ai_sdk
-```
+- Core architecture: [`crates/noloong-agent-core/docs/ARCHITECTURE.md`](crates/noloong-agent-core/docs/ARCHITECTURE.md)
+- Extension authoring: [`crates/noloong-agent-core/docs/EXTENSIONS.md`](crates/noloong-agent-core/docs/EXTENSIONS.md)
+- Product runtime architecture: [`crates/noloong-agent/docs/ARCHITECTURE.md`](crates/noloong-agent/docs/ARCHITECTURE.md)
+- Extension conformance matrix: [`crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md`](crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md)
+- Weixin bridge notes: [`crates/noloong-agent-weixin/docs/WEIXIN.md`](crates/noloong-agent-weixin/docs/WEIXIN.md)
+- Desktop design language: [`DESIGN.md`](DESIGN.md)
 
-## Product Plugins
+## Current Status
 
-The core JSON-RPC extension bridge is also exposed as a safer product plugin layer in `noloong-agent`. A plugin declaration lives in a profile or session manifest, starts a stdio extension with direct `command + args`, maps only named host environment variables into the child process, and registers only `allowedCapabilities`.
+Noloong is pre-release software. The repository is currently optimized for fast
+iteration rather than broad compatibility.
 
-The example profile loads the Python conformance extension as a plugin and allows only its echo tool:
+What is relatively concrete today:
 
-```bash
-cargo run -p noloong -- telegram --profile-config examples/profile-configs/plugin-stdio-example.json
-```
+- Rust workspace layout and typed runtime contracts
+- Desktop app launch path and dev scripts
+- Profile config schema generation
+- Stdio extension conformance tests
+- SQLite-backed state paths
+- ChatGPT subscription auth experiments
+- Manifest-driven product runtime evolution
+- Structured provider-neutral thinking and media blocks
+- Background command lifecycle and subagent tools
 
-Agents cannot silently install plugins. They can only propose `register_plugin`, `set_plugin_enabled`, or `remove_plugin` manifest patches through `agent.manifest.propose_patch`; a bridge or human then approves and applies the proposal. Plugin changes take effect on the next runtime build/run, not by hot reloading an already running runtime.
+What may still change aggressively:
 
-## Session Stores
+- Desktop UX and visual language
+- Profile schema details
+- Plugin manifest ergonomics
+- Messaging bridge command surfaces
+- Provider convenience fields
+- Persistence defaults
 
-The root `noloong` profile config has two separate persistence layers. `registryStore` is a host-level session snapshot store for `AgentManifest`, `AgentState`, steering/follow-up queues, profile ids, metadata, and session descriptors. Profile-level `eventStore` is the core run event log for `AgentEvent` replay, tool approval resume, permission audit ordering, and run-level diagnostics. When either field is omitted, the host uses the unified SQLite state database at `~/.agents/noloong/state.sqlite`, or `NOLOONG_STATE_DATABASE_URL` when set.
+## Contributing
 
-```json
-{
-  "profiles": [{
-    "profileId": "default",
-    "displayName": "Default",
-    "provider": {"type": "responses", "model": "gpt-5.4-mini"}
-  }]
-}
-```
+Issues, experiments, and design critique are welcome, especially around:
 
-Use explicit `memory` only for tests or throwaway local runs. A persisted event store does not make interrupted `running` sessions continue automatically; they are still marked failed on restore. `registryStore` tracks interaction sessions and profile bindings, while `eventStore` tracks agent events for replay/audit. Neither setting is the same as Responses `stateMode`: `stateMode` controls whether the upstream Responses service stores response items.
+- cross-language extension authoring
+- runtime component replacement
+- self-evolving agent workflows
+- safer local tool execution
+- better approval UX
+- provider adapter boundaries
+- desktop interaction quality
+- practical examples that expose missing contracts
 
-## Thinking
+For now, prefer small, focused changes with clear verification. Noloong is not
+trying to preserve historical quirks; if an old shape no longer serves the
+product, it should be replaced with the cleaner one.
 
-Thinking is represented as structured data instead of plain text. `ContentBlock::Thinking` contains a `ThinkingBlock` with a kind, optional display text, optional raw provider payload, optional replay descriptor, and metadata. `ModelStreamEvent::ThinkingDelta` carries a `ThinkingDelta`, so providers can stream visible summaries while preserving JSON/object reasoning details for same-provider replay.
+## License
 
-OpenAI-compatible Chat Completions does not define a single standard thinking field. The built-in provider extracts common compatible fields such as `reasoning`, `reasoning_content`, `reasoning_text`, and `reasoning_details`, while provider-specific request parameters stay in caller-owned config.
+Noloong is open source under your choice of either:
 
-Anthropic Messages exposes extended thinking as stream events. The built-in provider keeps it off by default, enables it with `enable_thinking(budget_tokens)`, records `thinking_delta` as `ThinkingDelta`, preserves `signature_delta` in metadata/raw snapshots, and only replays prior thinking into assistant history when provider id and model match.
-
-OpenAI Responses exposes reasoning as first-class response items and summary/text deltas. The built-in provider maps reasoning summary text to `ThinkingKind::Summary`, raw reasoning text to `ThinkingKind::Raw`, encrypted reasoning payloads to `ThinkingKind::Encrypted`, and replays prior reasoning only when provider id and model match.
-
-## Media I/O
-
-Messages can carry provider-neutral media blocks. The core stores media as references by default, with inline base64 available for small payloads when the caller already owns encoded data:
-
-```rust
-use noloong_agent_core::{
-    AgentMessage, ContentBlock, MediaBlock, MediaKind,
-};
-
-let user_message = AgentMessage::user("user-1", "Describe this image");
-let image = ContentBlock::Media {
-    media: MediaBlock::uri(MediaKind::Image, "https://example.test/diagram.png"),
-};
-```
-
-Tool outputs use the same `Vec<ContentBlock>` surface, so tools can return images, audio, video references, or files without a separate tool-specific media API:
-
-```rust
-use noloong_agent_core::{
-    ContentBlock, MediaBlock, MediaKind, ToolOutput,
-};
-use serde_json::Value;
-
-let output = ToolOutput {
-    content: vec![ContentBlock::Media {
-        media: MediaBlock::provider(MediaKind::File, "openai-chat", "file_123"),
-    }],
-    details: Value::Null,
-    is_error: false,
-    updates: Vec::new(),
-};
-```
-
-The built-in Chat Completions provider maps image URI/inline media to `image_url`, inline WAV/MP3 audio to `input_audio`, video URI/inline media to `video_url`, and provider file references to `file_id`. Provider-hosted video references are passed as `file_id` only when `allow_provider_video_file_media(true)` is explicitly configured. It does not download media URIs or manage blob storage; a future `MediaStore` can be added without changing the message model.
-
-The built-in Responses provider maps image URI/inline/provider media to `input_image` and file URI/provider media to `input_file`. Inline file data is opt-in through `allow_file_data_url_input(true)`. Audio, video, custom media kinds, system media, and assistant media replay fail fast in this provider v1.
-
-The built-in Anthropic Messages provider maps image URI/inline media to `image` blocks and file URI/inline media to `document` blocks. Provider-hosted Anthropic file ids are opt-in through `allow_files_api_media(true)`, which also adds the Files API beta header. Audio, video, custom media kinds, and system media fail fast in this provider v1.
-
-Provider mapping references:
-
-- OpenAI Chat Completions API: <https://platform.openai.com/docs/api-reference/chat/create-chat-completion>
-- OpenAI Responses API: <https://platform.openai.com/docs/api-reference/responses/create>
-- OpenAI vision guide: <https://platform.openai.com/docs/guides/images-vision?api-mode=chat>
-- OpenAI audio guide: <https://platform.openai.com/docs/guides/audio>
-- Anthropic Messages examples: <https://docs.anthropic.com/en/api/messages-examples>
-- Anthropic Files API: <https://docs.anthropic.com/en/docs/build-with-claude/files>
-
-## Verification
-
-The conformance source of truth is [`crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md`](crates/noloong-agent-core/docs/CONFORMANCE_MATRIX.md). Update that matrix whenever a core capability, invariant, or verification command changes.
-
-The product-layer agent runtime lives in [`crates/noloong-agent`](crates/noloong-agent). Its architecture notes are in [`crates/noloong-agent/docs/ARCHITECTURE.md`](crates/noloong-agent/docs/ARCHITECTURE.md). The first product-layer execution primitive is a host-first background command lifecycle with `host.exec.start/read/wait/write/terminate/list`; `host.exec.start` uses a short foreground window before falling back to a background job handle. Rust built-in tools are enabled by default in new manifests and can be removed with `disable_tool` manifest patches. File editing remains policy-driven: `fileEditToolPolicy` selects exactly one of `apply_patch` or `write_file`, or disables both.
-
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test -p noloong-agent-core --examples
-cargo test -p noloong-agent-core --test extension_language_examples
-python3 -m py_compile examples/extensions/python-conformance/noloong_jsonrpc.py examples/extensions/python-conformance/full_conformance_extension.py
-node --check crates/noloong-agent-core/tests/fixtures/stdio-extension.mjs
-node --check crates/noloong-agent-core/tests/fixtures/openrouter-deepseek-extension.mjs
-node --check examples/extensions/ai-sdk-provider/stdio-ai-sdk-extension.mjs
-```
-
-Extension authoring gate:
-
-```bash
-cd examples/extensions/typescript-conformance
-npm install
-npm run check
-npm run conformance
-```
-
-Manual external gate:
-
-```bash
-cargo test -p noloong-agent-core --test openrouter_live -- --ignored --nocapture
-cargo test -p noloong-agent-core --test anthropic_live openrouter_anthropic_messages -- --ignored --nocapture
-cargo test -p noloong-agent-core --test responses_live -- --ignored --nocapture
-```
-
-The OpenRouter live test requires `OPENROUTER_API_KEY`. It routes `deepseek/deepseek-v4-flash` to the official DeepSeek provider with thinking enabled, uses the generic `openrouter/free` router for image input coverage, and uses `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` for audio and video input coverage because the free router currently reports no endpoints for input audio/video. Provider-specific request details are constructed in tests through generic `ChatCompletionsProviderConfig` and `extra_body`, not in core provider code. The manual gate uses larger live output budgets so thinking, visible text, tool-call streaming, and multimodal payload acceptance can be observed. It is intentionally excluded from default CI because it depends on external network access and provider availability.
-
-The Anthropic-compatible live gate uses OpenRouter and requires `OPENROUTER_API_KEY`. The text gate defaults to `openrouter/free` and can be overridden with `NOLOONG_OPENROUTER_ANTHROPIC_LIVE_MODEL`; the tool gate runs only when `NOLOONG_OPENROUTER_ANTHROPIC_TOOL_MODEL` names a tool-capable model. Official Anthropic live tests are present only as explicit opt-in diagnostics and require `NOLOONG_RUN_OFFICIAL_ANTHROPIC_LIVE=1` plus a valid `ANTHROPIC_API_KEY`.
-
-The Responses-compatible live gate also uses OpenRouter and requires only `OPENROUTER_API_KEY`. The text gate defaults to `openrouter/free` and can be overridden with `NOLOONG_OPENROUTER_RESPONSES_LIVE_MODEL`; tool and reasoning gates run only when `NOLOONG_OPENROUTER_RESPONSES_TOOL_MODEL` or `NOLOONG_OPENROUTER_RESPONSES_REASONING_MODEL` names a capable model.
-
-GitHub Actions runs the default local gate on push and pull request. Live provider gates stay manual.
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
